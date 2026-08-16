@@ -26,6 +26,16 @@ _SHAPE_WORDS = re.compile(r"\b(stdout|stderr|exit_code|tree_digest|returned_valu
                           # first module that shipped an entry point.
                           r"|(?<!sys\.)\bargv\b")
 
+# THE WORDS ARE AMBIGUOUS AND THE PROPERTY IS NOT. A subprocess result has a stdout; so does a
+# process-seam observation; they are not the same thing, and no regex can tell them apart. What
+# distinguishes them is what happens to the value: an OBSERVATION is something the pipeline freezes
+# and grades, and a command's output is something it reads once and discards.
+#
+# So modules that only ever run commands are exempt from the word check and are held to the
+# stronger property instead -- they must not freeze or grade anything. Listing them here is
+# deliberate friction: adding a name to this list is a claim, and the test below checks it.
+_RUNS_COMMANDS = {"sandbox.py"}
+
 
 def _python_files(*parts: str) -> list[str]:
     base = os.path.join(ROOT, *parts)
@@ -39,11 +49,32 @@ def test_core_does_not_know_what_an_observation_looks_like():
     """Anything in core/ naming a channel or a call detail belongs in observe/ instead."""
     offenders = []
     for path in _python_files("frf", "core"):
+        if os.path.basename(path) in _RUNS_COMMANDS:
+            continue
         for i, line in enumerate(open(path), 1):
             code = line.split("#", 1)[0]          # a comment may discuss the seams; code may not
             if _SHAPE_WORDS.search(code):
                 offenders.append("%s:%d %s" % (os.path.relpath(path, ROOT), i, code.strip()[:70]))
     assert not offenders, offenders
+
+
+def test_a_module_exempted_from_the_word_check_really_only_runs_commands():
+    """The exemption is a claim, so it is checked rather than trusted.
+
+    A module allowed to say `stdout` because it runs commands must not be the module that decides
+    what is correct. If it ever freezes or grades, the word it was excused for has become an
+    observation after all, and the exemption is hiding exactly what it was meant to permit.
+    """
+    for name in _RUNS_COMMANDS:
+        path = os.path.join(ROOT, "frf", "core", name)
+        assert os.path.exists(path), "%s is exempted but does not exist" % name
+        source = open(path).read()
+        tree = ast.parse(source)
+        defined = {n.name for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        assert not {"freeze", "grade"} & defined, (
+            "%s runs commands AND %s -- then its streams are observations and it belongs in a seam"
+            % (name, sorted({"freeze", "grade"} & defined)))
 
 
 def test_core_never_imports_a_seam():
