@@ -243,7 +243,7 @@ frontier-refactor-factory/
     observe/              两种接缝
       process.py            四通道
       call.py               JSON 行协议
-      probes/               输入词表（三档）
+      probes/               探测来源：schema 采样 / 生成器
       compare/              比较器（三档）
 
     scales/               每个尺度只写它独有的那点
@@ -262,7 +262,50 @@ frontier-refactor-factory/
 
 ---
 
-## 8. 尚未决定
+## 8. 接口：一个尺度到底要写多少代码
+
+上面说「共用」「分叉」都还是话。落到接口上，一个新尺度需要且只需要提供四样东西：
+
+```python
+class Scale(Protocol):
+    """一个尺度 = 四个回答。链路的七个环节由框架驱动，尺度只回答这四问。"""
+
+    def find(self, budget: int) -> Iterable[Candidate]:
+        """去哪找素材。仓库 / 包 / PR / 源码函数。"""
+
+    def specify(self, candidate: Candidate) -> Spec:
+        """这一个候选要怎么建、怎么调用。声明性部分必须能被逐字段校验。"""
+
+    def observe(self) -> Observer:
+        """接缝 A 还是接缝 B。返回 process.Observer 或 call.Observer。"""
+
+    def probes(self, spec: Spec) -> ProbeSource:
+        """探测从哪来。schema 采样器，或容器里跑的生成器。"""
+```
+
+框架负责的部分**对四个尺度逐字相同**：建环境、跑 N 遍取交集、遮蔽不可复现的位置、
+搜索区分输入、扣除计时探测、跑证据组、打 Harbor 包、驱动出厂包复验。
+
+**判据**：如果实现一个新尺度需要改 `core/` 里的任何一行，那说明这份抽象错了 ——
+要么这个尺度不属于这四个，要么某个"共用"的东西其实不共用。这条判据比任何文档都硬，
+所以它写在这里，将来第一个新尺度就是对它的检验。
+
+### 两个接缝的接口
+
+```python
+class Observer(Protocol):
+    def run(self, subject: Subject, probe: Probe) -> Observation: ...
+    def compare(self, expected: Observation, actual: Observation) -> Verdict: ...
+```
+
+- `process.Observer` 的 `Observation` 是四通道的哈希 + 行数 + 遮蔽位置
+- `call.Observer` 的 `Observation` 是返回值树（或抛出的错误）
+
+**判分器只依赖 `Observer` 这两个方法**，所以「加一个尺度」和「加一种观测」是两件独立的事。
+
+---
+
+## 9. 尚未决定
 
 - **SOURCE 的产能，四个尺度差一个数量级，而这决定素材池要多大。**
 
