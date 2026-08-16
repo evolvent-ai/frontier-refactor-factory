@@ -19,7 +19,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Words that only mean something once you have decided what an observation IS. A module in core/
 # that uses one has stopped being neutral about the seam.
-_SHAPE_WORDS = re.compile(r"\b(stdout|stderr|exit_code|argv|tree_digest|returned_value)\b")
+_SHAPE_WORDS = re.compile(r"\b(stdout|stderr|exit_code|tree_digest|returned_value)\b"
+                          # `argv` only counts as an OBSERVATION's field. `sys.argv` is a program
+                          # reading its own arguments, which every language has and which says
+                          # nothing about the seam -- flagging it made this check cry wolf on the
+                          # first module that shipped an entry point.
+                          r"|(?<!sys\.)\bargv\b")
 
 
 def _python_files(*parts: str) -> list[str]:
