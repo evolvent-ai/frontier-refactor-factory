@@ -32,6 +32,27 @@ from .protocol import Request, Response
 DEFAULT_CALL_TIMEOUT = 10.0
 
 
+def _last_error(text: str, limit: int = 400) -> str:
+    """The line that says what went wrong, out of whatever the subject printed.
+
+    NEITHER THE HEAD NOR A FIXED TAIL. Taking the head reported a `dpkg` warning from the image as
+    the cause of every failing candidate in a real batch. Taking a fixed tail cut the traceback
+    mid-frame, so the report ended in `File "importlib/__init__.py", line 90` and never reached the
+    `ModuleNotFoundError` that a reader actually needs.
+
+    A traceback puts its exception LAST, so the last non-empty line is the finding, and the frame
+    above it is the context worth keeping. Anything the environment printed first is neither.
+    """
+    lines = [line.rstrip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return "(empty)"
+    culprit = lines[-1]
+    context = next((line.strip() for line in reversed(lines[:-1])
+                    if line.strip().startswith("File ")), "")
+    joined = ("%s  [%s]" % (culprit, context)) if context else culprit
+    return joined[:limit]
+
+
 class SubjectFailed(RuntimeError):
     """The subject could not be spoken to at all -- as distinct from answering badly.
 
@@ -95,7 +116,7 @@ class Subject:
             stderr = ""
             if self._proc.stderr:
                 try:
-                    stderr = self._proc.stderr.read()[:500]
+                    stderr = _last_error(self._proc.stderr.read())
                 except OSError:
                     pass
             raise SubjectFailed("the subject exited without answering. stderr: %s"

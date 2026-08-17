@@ -20,6 +20,7 @@ WHAT IS REFUSED, AND ALL OF IT MECHANICALLY. No model is asked anything; the rul
 `core/sourcing.py` is that an index may be filtered but its members may not be invented, and a
 function whose signature cannot be read is not a candidate this index is entitled to guess at.
 
+    third-party imports           the file needs something the offline container will not have
     private names                 a leading underscore is the author saying "not the contract"
     methods                       need an instance, and constructing one is guesswork
     no annotations                the schema would be invented rather than read
@@ -77,6 +78,16 @@ UNSERVEABLE_RETURNS = ("Iterator", "Iterable", "Generator", "AsyncIterator", "As
 PER_PACKAGE = 8
 
 PYPI_FILES = "https://pypi.org/pypi/%s/%s/json"
+
+# Modules a served subject may rely on: the standard library, plus the package's own. Anything else
+# is absent from the offline workspace the shim serves from, so the subject dies on import and every
+# probe is lost.
+#
+# MEASURED, NOT SUPPOSED. On a twenty-candidate run this was eight of the ten refusals -- networkx,
+# psutil, torch -- and each one cost a download, an unpack, a build and five freeze passes before
+# failing. It is decidable from the file's own import statements, so it is decided here, where a
+# rejection costs nothing.
+_STDLIB = frozenset(getattr(__import__("sys"), "stdlib_module_names", ()))
 
 
 @dataclass
@@ -215,6 +226,11 @@ def scan(root: str, package: str = "", version: str = "") -> list:
             # deliberately broken fixtures, and none of that is a reason to lose the package.
             continue
         module = _module_name(root, path)
+        foreign = _foreign_imports(tree, package)
+        if foreign:
+            # One import the container will not have loses every function in the file, so this is
+            # checked once per file rather than once per function.
+            continue
         for node in tree.body:                      # top level only: see the module docstring
             if not isinstance(node, ast.FunctionDef):
                 continue
@@ -226,6 +242,32 @@ def scan(root: str, package: str = "", version: str = "") -> list:
                                   doc=(ast.get_docstring(node) or "").strip()))
     found.sort(key=lambda f: (f.module, f.symbol))
     return found
+
+
+def _foreign_imports(tree: ast.Module, package: str) -> list:
+    """Which modules this file needs that a served subject will not have.
+
+    Relative imports (`from . import x`) count as foreign too: they resolve inside the distribution
+    and not beside a shim, so a file using one cannot be served standing alone. That is the same
+    failure as a missing wheel and is reported the same way.
+    """
+    own = {package.replace("-", "_").lower(), package.lower()}
+    missing = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:                          # `from . import x`, relative to the package
+                missing.append("." * node.level + (node.module or ""))
+                continue
+            names = [node.module or ""]
+        else:
+            continue
+        for name in names:
+            root = name.split(".")[0]
+            if root and root not in _STDLIB and root.lower() not in own:
+                missing.append(name)
+    return missing
 
 
 def schema_for(node: ast.FunctionDef) -> dict | None:

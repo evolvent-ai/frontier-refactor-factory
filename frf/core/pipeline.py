@@ -42,6 +42,21 @@ FREEZE_RUNS = 5
 MIN_PROBES = 5
 MIN_GRADED_POINTS = 40
 
+# Checks whose INCONCLUSIVE is a statement about the MATERIAL rather than about this factory.
+#
+# The default reading of "could not conclude" is that we failed to set something up -- no container,
+# so isolation is not in force and the delegation check cannot decide. That is ours. But one check
+# is inconclusive for a reason that is entirely the subject's: a mutation that provably changes
+# nothing. `minimum = maximum = array[0]` mutated to `array[-1]` returns the same minimum, because
+# a minimum over the whole array does not depend on which element seeded it. The mutation was
+# applied, the subject was rebuilt, and the observation did not move -- there is nothing to repair
+# on our side, and a task whose behaviour cannot be perturbed cannot demonstrate that its verifier
+# would notice a wrong submission. That is a refusal, and it belongs to the material.
+#
+# A set rather than a flag on the Verdict because the reason lives with the pipeline's accounting,
+# not with the check: `evidence.py` reports what it found, and what a finding COSTS is decided here.
+INCONCLUSIVE_IS_MATERIAL = frozenset({"channels-bite"})
+
 
 class Fault(Enum):
     """Whose problem a refusal was. The single most important field in this module.
@@ -178,10 +193,18 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
         # the delegation check cannot conclude. Charging that to the material would report a 0%
         # yield for a batch where nothing was wrong with any of the candidates -- which is precisely
         # the confusion DESIGN.md s12.5 exists to prevent.
+        # NOT EVERY INCONCLUSIVE IS OURS, and the exception is measured rather than supposed. A
+        # subject can be genuinely unperturbable: `minimum = maximum = array[0]` becomes
+        # `array[-1]` and the answer is identical, because a minimum over the whole array does not
+        # depend on which element seeded it. Nothing is wrong with the factory there and nothing is
+        # wrong with the mutation -- the material simply cannot be made to differ this way, which
+        # is a fact about the material. On a real batch of twenty this was two of the twenty, and
+        # charging it to us put the run on the edge of reporting itself untrustworthy.
         failures = battery.failures()
-        undecided = all(v.outcome is evidence.Outcome.INCONCLUSIVE for v in failures)
+        undecided = [v for v in failures if v.outcome is evidence.Outcome.INCONCLUSIVE]
+        ours = [v for v in undecided if v.check not in INCONCLUSIVE_IS_MATERIAL]
         raise Stage("evidence", failures[0].check,
-                    Fault.FACTORY if undecided else Fault.MATERIAL,
+                    Fault.FACTORY if len(ours) == len(failures) else Fault.MATERIAL,
                     "; ".join(v.detail for v in failures))
     log("evidence: %d check(s) held" % len(battery.verdicts))
 
