@@ -209,3 +209,52 @@ def test_a_subject_that_mostly_will_not_repeat_is_rejected_not_shrunk():
 
     empty = observation.freeze_corpus({"a": unstable})
     assert not empty.usable and not empty.expectations
+
+
+def test_the_shipped_python_shim_serves_the_wire_the_factory_speaks():
+    """The shim is what makes "any language" concrete, so it is tested as a real process.
+
+    Three things have to hold, and the middle one is the one a careless shim gets wrong: a value
+    comes back, a REFUSAL comes back as an answer rather than killing the process, and `time` is
+    measured on the far side of the pipe.
+    """
+    import tempfile
+    from frf.observe.call import shims
+
+    source, argv = shims.load("python")
+    assert "python" in shims.available()
+
+    with tempfile.TemporaryDirectory() as work:
+        with open(os.path.join(work, "subject.py"), "w") as fh:
+            fh.write("def entry(args):\n"
+                     "    a, b = args\n"
+                     "    if b == 0:\n"
+                     "        raise ValueError('cannot divide by zero')\n"
+                     "    return a / b\n")
+        entry = os.path.join(work, "serve.py")
+        with open(entry, "w") as fh:
+            fh.write(source)
+
+        command = [part.format(entry=entry) for part in argv]
+        with Subject(command, cwd=work) as subject:
+            assert subject.call("run", [6, 3]) == Observation(True, 2.0)
+
+            refused = subject.call("run", [1, 0])
+            assert not refused.ok and "cannot divide by zero" in refused.error
+            assert "/" not in refused.error, "an error must not carry a host path into the key"
+
+            # ...and the process survived the refusal, so later probes still work.
+            assert subject.call("run", [9, 3]) == Observation(True, 3.0)
+            assert subject.time("run", [6, 3], repeats=100) > 0.0
+
+
+def test_an_unsupported_language_is_refused_by_name():
+    """Falling back to a default would emit a task that fails later with a syntax error."""
+    from frf.observe.call import shims
+
+    try:
+        shims.load("cobol")
+    except LookupError as exc:
+        assert "cobol" in str(exc) and "core/" in str(exc)
+    else:
+        raise AssertionError("an unsupported language must raise rather than guess")

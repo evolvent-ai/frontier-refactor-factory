@@ -28,12 +28,6 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-# The protocol's version travels in the handshake. A task emitted today is replayed months later by
-# a verifier vendored beside it; if the two ever disagree about the shape of a line, they must say
-# so rather than silently misread each other's fields.
-VERSION = 1
-
-
 @dataclass(frozen=True)
 class Request:
     """One call to make."""
