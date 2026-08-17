@@ -51,7 +51,7 @@ def test_no_backend_is_an_absence_and_ships_saying_so():
     Refusing would restrict which languages this factory serves, which is a bigger cost than a
     missing statistic -- and inventing the statistic would be worse than either.
     """
-    reach = adequacy.NullCoverage().measure(subject=None, probes=None)
+    reach = adequacy.NullCoverage().measure(spec=None, probes=None)
     assert not reach.measured and reach.backend == "none"
 
     report = adequacy.assess(reach, adequacy.measure_floor(lambda _n: (10, 100), ("exit-0",)))

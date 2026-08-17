@@ -60,7 +60,7 @@ class CoverageBackend(Protocol):
 
     name: str
 
-    def measure(self, subject, probes) -> "Reach": ...
+    def measure(self, spec, probes) -> "Reach": ...
 
 
 @dataclass(frozen=True)
@@ -107,7 +107,7 @@ class NullCoverage:
 
     name = "none"
 
-    def measure(self, subject, probes) -> Reach:
+    def measure(self, spec, probes) -> Reach:
         return Reach(backend=self.name)
 
 
