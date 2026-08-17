@@ -310,3 +310,37 @@ def test_the_measurement_counts_the_subject_and_not_our_shim():
         # The subject is six lines. A number anywhere near the shim's size means the shim was
         # counted -- the Python shim alone is about fifty.
         assert reach.total <= 12, (reach.total, reach.dark)
+
+def test_instrumentation_that_produced_no_data_is_unmeasured_not_a_zero():
+    """A subject that dies before exiting writes no coverage data, and gcov then reports every
+    line of it as executed zero times.
+
+    THIS WAS A REAL BUG, and it is the exact failure this whole package is written against. The
+    backend checked for `.gcno` -- which the COMPILER writes, and which only says the build was
+    instrumented -- but not for `.gcda`, which the PROGRAM writes as it exits and is the only
+    evidence it ran. A segfaulting subject therefore produced a perfectly well-formed 0/5, and
+    adequacy would have read that as a broken tracer and refused the task, when what really
+    happened is that the subject crashed. A crash is a finding for the freeze stage; it is not a
+    coverage measurement.
+    """
+    if not coverage.usable("c"):                             # pragma: no cover -- host-dependent
+        pytest.skip("no C toolchain here")
+
+    with tempfile.TemporaryDirectory() as work:
+        path = os.path.join(work, "subject.c")
+        with open(path, "w") as handle:
+            handle.write("#include <stdlib.h>\n"
+                         "char *entry_error = NULL;\n"
+                         "const char *entry(const char *args_json)\n"
+                         "{\n"
+                         "    int *p = NULL;\n"
+                         "    *p = 1;\n"                     # dies here, so nothing is flushed
+                         "    return NULL;\n"
+                         "}\n")
+        reach = coverage.backend_for("c").measure(
+            Spec(name="t", scale="module", language="c", description="d",
+                 environment={"subject_path": path}), [[1], [2]])
+
+        assert not reach.measured, (
+            "a crashed subject was reported as a measured %d/%d, which adequacy reads as a broken "
+            "tracer rather than as the crash it is" % (reach.reached, reach.total))

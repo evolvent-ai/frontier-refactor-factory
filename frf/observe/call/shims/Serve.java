@@ -319,9 +319,18 @@ public final class Serve {
      * exponent arrives as Long and any other as Double, because an argument list of array indices
      * read as floating point would be handed to the subject as something it never received.
      */
+    /* How deeply a request may nest. A line from the wire is nested only as deeply as the
+     * arguments are, and a limit keeps a pathological line from exhausting the stack of this
+     * recursive-descent parser. Without it a deeply nested line raises StackOverflowError out of
+     * the reader, which is not caught as a refusal is -- the process dies and the rest of the
+     * corpus is lost. The C and Rust shims cap depth for exactly this reason; this one did not,
+     * and that asymmetry was the bug. */
+    private static final int MAX_DEPTH = 200;
+
     private static final class JsonReader {
         private final String text;
         private int at;
+        private int depth;
 
         JsonReader(String text) {
             this.text = text;
@@ -340,8 +349,8 @@ public final class Serve {
         private Object readValue() {
             char c = peek();
             switch (c) {
-                case '{': return readObject();
-                case '[': return readArray();
+                case '{': return readContainer(true);
+                case '[': return readContainer(false);
                 case '"': return readString();
                 case 't': expect("true"); return Boolean.TRUE;
                 case 'f': expect("false"); return Boolean.FALSE;
@@ -351,6 +360,20 @@ public final class Serve {
                         return readNumber();
                     }
                     throw new JsonException("unexpected character " + c);
+            }
+        }
+
+        /* The one place recursion deepens, so the one place the limit has to be enforced. Both
+         * containers funnel through here rather than each counting for itself, which is how the
+         * two would otherwise drift apart. */
+        private Object readContainer(boolean isObject) {
+            if (++depth > MAX_DEPTH) {
+                throw new JsonException("nested more than " + MAX_DEPTH + " deep");
+            }
+            try {
+                return isObject ? readObject() : readArray();
+            } finally {
+                depth--;
             }
         }
 

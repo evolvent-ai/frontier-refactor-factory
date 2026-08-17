@@ -225,6 +225,35 @@ def test_a_subject_in_this_language_freezes_and_grades_identically(language):
             assert (passed, total) == (1, 1), (language, index)
 
 
+@pytest.mark.parametrize("language", _languages())
+def test_a_pathological_line_is_skipped_rather_than_fatal(language):
+    """A line nested ten thousand deep must not take the process down with it.
+
+    THIS FOUND A REAL ASYMMETRY. The C and Rust shims cap parser depth; the Java one did not, so a
+    deeply nested line raised StackOverflowError out of its reader and killed the JVM. That is not
+    a refusal -- it is the end of the corpus, and every probe after it is lost. The failure looked
+    like a subject that "exited without answering", which sends a repair loop to inspect the wire.
+
+    The rule the contract states is that an unreadable line is SKIPPED and the next is served
+    normally, so that is what is asserted: the second probe must still be answered.
+    """
+    with tempfile.TemporaryDirectory() as work:
+        argv = _serve(work, language)
+        nested = "[" * 100000 + "]" * 100000
+        script = ('{"id":1,"op":"run","call":"entry","args":%s}\n'
+                  '{"id":2,"op":"run","call":"entry","args":[[1,2,3]]}\n' % nested)
+
+        done = subprocess.run(argv, cwd=work, input=script, capture_output=True,
+                              text=True, timeout=300)
+
+        assert done.returncode == 0, (
+            "%s exited %d on a pathological line instead of skipping it: %s"
+            % (language, done.returncode, done.stderr[-400:]))
+        assert '"id":2' in done.stdout.replace(" ", ""), (
+            "%s never answered the probe after the bad line, so the corpus would stop there: %r"
+            % (language, done.stdout[-300:]))
+
+
 def test_the_seam_really_was_exercised_in_more_than_one_language():
     """A suite that skipped its way down to Python would pass while proving nothing.
 

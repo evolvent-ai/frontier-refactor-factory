@@ -48,6 +48,19 @@ class GccCoverage:
         notes = glob.glob(run.path("*.gcno"))
         if not notes:
             return spans.unmeasured(self.name)
+
+        # THE DATA FILE, NOT JUST THE NOTES. `.gcno` is written by the COMPILER and says only that
+        # the build was instrumented; `.gcda` is written by the PROGRAM as it exits and is the only
+        # evidence it ran at all. A subject that segfaults on its first probe flushes no .gcda, and
+        # gcov then reports every line of it as executed zero times -- a perfectly well-formed
+        # answer that is indistinguishable from a corpus which reaches nothing.
+        #
+        # Reporting that as a measured zero is the exact failure this package is written against:
+        # adequacy would read it as a broken tracer and refuse the task, when what actually happened
+        # is that the subject crashed. Unmeasured is the honest verdict, and the crash is a finding
+        # for the freeze stage, which is where a subject that will not run is properly diagnosed.
+        if not glob.glob(run.path("*.gcda")):
+            return spans.unmeasured(self.name)
         try:
             subprocess.run(["gcov", "-i", "-b"] + [os.path.basename(n) for n in notes],
                            cwd=run.work, capture_output=True, text=True, timeout=300)

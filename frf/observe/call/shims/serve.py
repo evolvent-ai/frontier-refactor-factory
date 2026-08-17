@@ -14,8 +14,14 @@ def serve(entry, stdin=sys.stdin, stdout=sys.stdout):
             continue
         try:
             request = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # RecursionError as well as ValueError, because a line nested deeply enough exhausts
+            # the decoder's stack rather than being rejected as malformed -- and RecursionError is
+            # not a ValueError, so it escapes and kills the process. That is not a skipped line: it
+            # is the end of the corpus, and every probe behind it is lost.
             continue                                  # an unreadable line is not a call
+        if not isinstance(request, dict):
+            continue                                  # a bare value is not a request either
         rid, op, args = request.get("id"), request.get("op", "run"), request.get("args", [])
 
         if op == "time":
