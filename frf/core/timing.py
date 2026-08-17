@@ -112,10 +112,22 @@ def measure(reference: Callable[[object], float], candidate: Callable[[object], 
             samples: int = SAMPLES_PER_SHAPE) -> SpeedResult:
     """-> the speedup a score may use, which is the worst shape's lower bound.
 
-    `reference` and `candidate` each time ONE probe and return seconds. Keeping the timing inside
-    the callables is what lets a compiled subject be timed fairly: it self-times the work rather
-    than being charged for process startup and transport, which would otherwise dominate exactly the
-    quick subjects this pipeline has the most of.
+    `reference` and `candidate` each measure the COST of one probe and return it. Keeping the
+    measurement inside the callables is what lets a compiled subject be measured fairly: it times
+    its own work rather than being charged for process startup and transport, which would otherwise
+    dominate exactly the quick subjects this pipeline has the most of.
+
+    COST IS NOT NECESSARILY TIME, and that is why these are callables returning a float rather than
+    a stopwatch this module owns. Wall-clock is the default and the noisiest choice available; a
+    routine running in a closed simulator can report cycles, which are exact and identical across
+    runs, and a CPU kernel can report instructions retired or allocations made. Everything below --
+    interleaving, alternating order, the noise floor, the bootstrap, taking the worst shape -- is
+    arithmetic on ratios and does not care which cost was measured.
+
+    A cost that is exact makes most of this module redundant rather than wrong: the noise floor of a
+    simulator's cycle count comes out at exactly 1.0, so the lower bound equals the median and
+    nothing is discarded as noise. Paying for the statistics in that case is the price of one
+    interface instead of two.
     """
     if not shapes:
         return SpeedResult(1.0, 0.0, 0.0, usable=False, note="no shape was given to time")

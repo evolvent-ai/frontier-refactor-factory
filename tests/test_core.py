@@ -159,3 +159,24 @@ def test_no_tracked_file_carries_a_credential():
                 # it again, into CI logs this time.
                 found.append("%s: %s %s..." % (rel, what, match.group(0)[:7]))
     assert not found, found
+
+
+def test_an_exact_cost_measure_is_not_treated_as_noise():
+    """Cost need not be wall-clock, and an exact measure must survive the noise machinery intact.
+
+    A routine in a closed simulator reports cycle counts: identical across runs, so the reference
+    against itself has zero spread and the floor lands at exactly 1.0. A genuine 2x must then be
+    reported as 2x rather than discarded -- if the statistics designed for a noisy clock swallowed
+    an exact measurement, the pluggable cost would be pluggable in name only.
+    """
+    def cycles_reference(_probe):
+        return 1_000_000.0                       # deterministic: a simulator, not a stopwatch
+
+    def cycles_candidate(_probe):
+        return 500_000.0
+
+    result = timing.measure(cycles_reference, cycles_candidate,
+                            lambda shape, i: i, ["only"], samples=12)
+    assert result.noise_floor == 1.0, "an exact cost has no noise to calibrate"
+    assert not result.within_noise, result
+    assert result.speedup == 2.0, result.speedup
