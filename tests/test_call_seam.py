@@ -6,6 +6,7 @@ nothing about the language independence that is the whole reason the seam is a w
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -221,7 +222,7 @@ def test_the_shipped_python_shim_serves_the_wire_the_factory_speaks():
     import tempfile
     from frf.observe.call import shims
 
-    source, argv = shims.load("python")
+    shim = shims.load("python")
     assert "python" in shims.available()
 
     with tempfile.TemporaryDirectory() as work:
@@ -231,11 +232,10 @@ def test_the_shipped_python_shim_serves_the_wire_the_factory_speaks():
                      "    if b == 0:\n"
                      "        raise ValueError('cannot divide by zero')\n"
                      "    return a / b\n")
-        entry = os.path.join(work, "serve.py")
-        with open(entry, "w") as fh:
-            fh.write(source)
+        with open(os.path.join(work, shim.template), "w") as fh:
+            fh.write(shims.source(shim))
 
-        command = [part.format(entry=entry) for part in argv]
+        _, command = shim.commands(work)
         with Subject(command, cwd=work) as subject:
             assert subject.call("run", [6, 3]) == Observation(True, 2.0)
 
@@ -246,6 +246,65 @@ def test_the_shipped_python_shim_serves_the_wire_the_factory_speaks():
             # ...and the process survived the refusal, so later probes still work.
             assert subject.call("run", [9, 3]) == Observation(True, 3.0)
             assert subject.time("run", [6, 3], repeats=100) > 0.0
+
+
+def test_every_shim_mentions_the_timing_field_the_protocol_sends():
+    """The two halves of the wire are written in different languages and cannot be type-checked
+    against each other, so the only thing keeping them in step is a test that reads both.
+
+    THIS CAUGHT A REAL BUG. The encoder sent `repeats` and the Python shim read `n`, so every
+    timing request ran the subject exactly once no matter what was asked. Nothing failed: the
+    subject answered, the seconds were real, and the mechanism that exists to lift a workload above
+    the clock's resolution had simply never operated.
+
+    ONLY `repeats` IS CHECKED TEXTUALLY, and the restraint is the lesson. The first version of this
+    test looked for every field as a quoted JSON key and failed on two shims that were correct --
+    the C one builds replies as text so the name sits inside a longer literal, and the JavaScript
+    one uses unquoted object keys because that is what the language does. A test that has to be
+    taught each language's punctuation is testing punctuation. What survives here is the one field
+    whose name is arbitrary and shared, which is exactly the one that drifted; everything else is
+    checked by running the shim.
+    """
+    from frf.observe.call import shims
+    from frf.observe.call.protocol import Request
+
+    sent = json.loads(Request(1, "entry", [1, 2], op="time", repeats=7).encode())
+    assert set(sent) == {"id", "op", "call", "args", "repeats"}, sent
+
+    for language in shims.available():
+        source = shims.source(shims.load(language))
+        assert "repeats" in source, (
+            "the %s shim never mentions `repeats`, so a timing request would run the subject once "
+            "however many were asked for -- which is what the Python shim did for its first month"
+            % language)
+
+
+def test_a_timing_request_really_runs_the_subject_that_many_times():
+    """The other half of the contract above: the field is read AND acted on.
+
+    A shim could mention `repeats` and ignore it. What makes this checkable without a stopwatch is
+    a subject that counts its own calls and can be asked afterwards -- so the assertion is about a
+    number the subject reports, not about elapsed time, which would be a flaky way to ask.
+    """
+    import tempfile
+    from frf.observe.call import shims
+
+    shim = shims.load("python")
+    with tempfile.TemporaryDirectory() as work:
+        with open(os.path.join(work, "subject.py"), "w") as fh:
+            fh.write("CALLS = [0]\n"
+                     "def entry(args):\n"
+                     "    CALLS[0] += 1\n"
+                     "    return CALLS[0] if args == ['count'] else args\n")
+        with open(os.path.join(work, shim.template), "w") as fh:
+            fh.write(shims.source(shim))
+        _, command = shim.commands(work)
+
+        with Subject(command, cwd=work) as subject:
+            subject.time("run", [1], repeats=25)
+            counted = subject.call("run", ["count"])
+            # 25 timed calls plus this one. Had the shim ignored `repeats`, this would read 2.
+            assert counted.value == 26, counted
 
 
 def test_an_unsupported_language_is_refused_by_name():

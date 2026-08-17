@@ -460,10 +460,25 @@ module 的两条索引归一化成同一个 `Candidate`，进同一个队列。
 | **coverage 后端** | **真代码**，每语言一个 | **题照出，少一个数并明说** |
 | **registry client**（每个约 50 行） | **真代码** | 该生态暂无素材来源 |
 
-**首批一次性铺开**：
-- coverage 后端 8 种：Python / Go / JS-TS / C / C++ / Rust / Java / Ruby
-- registry client 6 个：PyPI / npm / crates.io / pkg.go.dev / Maven Central / RubyGems
-- serve shim 模板 8 种
+**首批一次性铺开（已完成，每一项都在本机真跑过）**：
+
+| 组件 | 数量 | 实现方式 | 实测 |
+|---|---|---|---|
+| serve shim | 9 个键 / 8 种语言 | python / js（TS 共用）/ ruby / go / rust / c（C++ 共用）/ java | 7 个模板全部**编译并跑通**完整探针 |
+| coverage 后端 | 9 个键 / 8 种语言 | settrace · V8 · `go build -cover` · gcov · llvm-cov · JVMTI 自建 agent · Ruby `Coverage` | 全部**真测到未覆盖分支**，且语料变宽时数字上升 |
+| registry client | 7 个 | PyPI / npm / crates.io / pkg.go.dev / Maven / RubyGems **+ GitHub** | 7 个全部**实网跑通**，翻页不重不漏 |
+
+三张表都是**数据**，加第 9 种语言只加一行加一个文件，`core/` 一行不动 ——
+这一条现在由 `test_any_language.py` 机械检查（`core/` 与 `observe/` 里
+除 shim 表和 coverage 表外不允许出现任何语言名）。
+
+两个值得记下的实现选择：
+- **Java 没有标准库 coverage，JaCoCo 是三方 jar**，而题目要离线构建。
+  所以自己写了个 80 行 JVMTI agent（`coverage/agents/jvmti_lines.c`），
+  用 JVM 自己的行号表当分母 —— 比启发式猜哪行是代码更准。
+- **Go 用 `go build -cover` 而不是 `go test -coverprofile`**：
+  被测对象是通过 wire 服务的程序，没有测试二进制；
+  用后者等于在量「我们自己生成的测试覆盖了多少」。
 
 **这是一次性投入，不是持续成本** —— 加第 9 种语言时前 8 种一行不改。
 

@@ -34,7 +34,7 @@ _SHAPE_WORDS = re.compile(r"\b(stdout|stderr|exit_code|tree_digest|returned_valu
 # So modules that only ever run commands are exempt from the word check and are held to the
 # stronger property instead -- they must not freeze or grade anything. Listing them here is
 # deliberate friction: adding a name to this list is a claim, and the test below checks it.
-_RUNS_COMMANDS = {"sandbox.py"}
+_RUNS_COMMANDS = {"sandbox.py", "containers.py", "integrity.py"}
 
 
 def _python_files(*parts: str) -> list[str]:
@@ -105,7 +105,7 @@ def test_a_seam_is_self_contained():
     error this file exists to catch: a freeze written against one seam's coordinates, applied to
     another seam that has none.
     """
-    for seam in ("call",):                       # `process` joins this list when it is written
+    for seam in ("call", "process"):
         base = os.path.join(ROOT, "frf", "observe", seam)
         present = {n for n in os.listdir(base) if n.endswith(".py")}
         assert "observation.py" in present, (seam, present)

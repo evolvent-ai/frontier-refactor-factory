@@ -12,3 +12,7 @@ tasks/
 *.egg-info/
 build/
 dist/
+
+# The JVMTI coverage agent is compiled on demand from agents/jvmti_lines.c and cached beside it.
+# The source is the artefact worth keeping; the object is this machine's.
+frf/observe/coverage/agents/*.so

@@ -27,6 +27,7 @@ import json
 import os
 from dataclasses import dataclass, field
 
+from ..core import integrity
 from ..core.scale import Candidate, Spec
 from ..observe import coverage
 from ..observe.call import shims
@@ -72,18 +73,26 @@ class ProbeSource:
 class Observer:
     """The call seam, bound to an installed package."""
 
-    def __init__(self, workspace: str, material: Material) -> None:
+    def __init__(self, workspace: str, material: Material, *, backend=None) -> None:
         self.workspace = workspace
         self.material = material
+        # Which sandbox the subject runs in, so isolation is reported from what is in force.
+        self._backend = backend
         self._argv: list = []
 
     def build(self, spec: Spec) -> None:
+        """Write the shim beside the installed package.
+
+        Only the shim, unlike the module scale: there the subject is one file to be copied, and here
+        it is a package already installed in the environment, which the shim reaches by name. So
+        there is nothing to copy and nothing to compile -- whatever building the package needed
+        happened when it was installed.
+        """
+        shim = shims.load(spec.language)
         os.makedirs(self.workspace, exist_ok=True)
-        source, argv = shims.load(spec.language)
-        entry = os.path.join(self.workspace, "serve.py")
-        with open(entry, "w", encoding="utf-8") as handle:
-            handle.write(source)
-        self._argv = [part.format(entry=entry) for part in argv]
+        with open(os.path.join(self.workspace, shim.template), "w", encoding="utf-8") as handle:
+            handle.write(shims.source(shim))
+        _, self._argv = shim.commands(self.workspace)
 
     def subject(self, spec: Spec | None = None, *, mutated: bool = False) -> Subject:
         return Subject(self._argv, cwd=self.workspace)
@@ -92,16 +101,24 @@ class Observer:
         return coverage.backend_for(self.material.language)
 
     def forbidden_references(self, spec: Spec) -> list:
-        """The original package, by every name it can be reached under.
+        """Where the tree actually reaches the package it is meant to replace.
 
         This is the check that matters most at this scale: "reimplement this surface" collapses into
-        "import the thing you were asked to replace" unless the imports are inspected, and the
+        "import the thing you were asked to replace" unless the imports are inspected, and such a
         submission is perfectly correct while having implemented nothing.
+
+        What is returned is what was FOUND, not what is forbidden. Returning the ban list would make
+        the evidence check fail every task that has a rule -- which is every task at this scale.
         """
-        return list(self.material.forbidden or (self.material.identity,))
+        banned = tuple(self.material.forbidden or (self.material.identity,))
+        return [str(hit) for hit in integrity.inspect(self.workspace, banned).hits]
+
+    def isolation(self):
+        """How the two sides are kept apart while one is timed -- reported, never assumed."""
+        return integrity.isolation_for(self._backend)
 
     def isolated(self) -> bool:
-        return True
+        return self.isolation().enforced
 
 
 class Package:
@@ -110,7 +127,7 @@ class Package:
     name = "package"
 
     def __init__(self, index=None, workspace: str = "", *, observer=None,
-                 run_generator=None) -> None:
+                 run_generator=None, backend=None) -> None:
         self._index = index
         self._workspace = workspace or os.path.join("work", "package")
         self._observer = observer
@@ -118,6 +135,8 @@ class Package:
         # model-written code itself: the caller supplies something that runs it in a container, and
         # a caller that supplies something else is making that choice visibly.
         self._run_generator = run_generator
+        # Threaded to the Observer so the delegation check reports what is really in force.
+        self._backend = backend
         self._material: Material | None = None
 
     def find(self, budget: int):
@@ -151,7 +170,7 @@ class Package:
             return self._observer
         if self._material is None:
             raise RuntimeError("observe() was asked for before specify() chose a package")
-        return Observer(self._workspace, self._material)
+        return Observer(self._workspace, self._material, backend=self._backend)
 
     def probes(self, spec: Spec) -> ProbeSource:
         """Run the generator where model-written code is allowed to run, and take back data."""

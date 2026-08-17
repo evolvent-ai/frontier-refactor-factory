@@ -60,11 +60,11 @@ class _Observer:
         self.workspace = workspace
 
     def build(self, spec: Spec) -> None:
-        source, argv = shims.load(spec.language)
-        with open(os.path.join(self.workspace, "serve.py"), "w") as handle:
-            handle.write(source)
+        shim = shims.load(spec.language)
+        with open(os.path.join(self.workspace, shim.template), "w") as handle:
+            handle.write(shims.source(shim))
         self._write_subject(_SUBJECT)
-        self._argv = [part.format(entry=os.path.join(self.workspace, "serve.py")) for part in argv]
+        _, self._argv = shim.commands(self.workspace)
 
     def _write_subject(self, body: str) -> None:
         with open(os.path.join(self.workspace, "subject.py"), "w") as handle:

@@ -108,15 +108,15 @@ def available() -> dict[str, bool]:
 
     Reported as a mapping so a caller can say WHY it fell back, and so the answer appears in a log
     instead of being inferred from a stack trace three stages later.
+
+    Docker is probed by asking the daemon, not by looking for the CLI on PATH. Inside a container
+    the CLI is often present with no socket behind it, and believing PATH turns "there is no
+    sandbox here" into an expensive failure at freeze time rather than a clear one before any work
+    begins.
     """
-    docker = bool(shutil.which("docker"))
-    if docker:
-        try:
-            docker = subprocess.run(["docker", "info"], capture_output=True,
-                                    timeout=20).returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            docker = False
-    return {"docker": docker,
+    from . import containers
+
+    return {"docker": containers.docker_available(),
             "remote": bool(credentials.get("E2B_API_KEY")),
             "local-process": True}
 
@@ -146,10 +146,15 @@ def find(prefer: str | None = None) -> Backend:
 
 
 def _build(name: str) -> Backend:
+    """Construct one backend by name. The only place any of them is instantiated."""
+    from . import containers
+
     if name == "local-process":
         import tempfile
         return LocalProcess(root=tempfile.mkdtemp(prefix="frf-local-"))
-    # The container backends are written against the same Protocol and arrive with the scale that
-    # first needs one. Failing here names what is missing rather than raising an AttributeError
-    # from somewhere that has forgotten it asked.
-    raise SandboxError("backend %r is not implemented yet" % name)
+    if name == "docker":
+        return containers.Docker()
+    if name == "remote":
+        return containers.Remote()
+    raise SandboxError("no backend called %r; this installation has %s"
+                       % (name, ", ".join(sorted(available()))))

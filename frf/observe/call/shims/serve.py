@@ -22,7 +22,7 @@ def serve(entry, stdin=sys.stdin, stdout=sys.stdout):
             # TIMED HERE, on this side of the pipe. Measuring from the factory would charge the
             # subject for process startup and JSON transport, which for a quick subject is most of
             # what the clock would see.
-            repeats = int(request.get("n", 1))
+            repeats = int(request.get("repeats", 1))
             failed = False
             started = time.perf_counter()
             for _ in range(repeats):

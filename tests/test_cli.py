@@ -23,9 +23,14 @@ def test_doctor_reports_consequences_not_just_states(capsys):
     assert cli.main(["doctor"]) == 0
     out = capsys.readouterr().out
 
-    assert "subjects can be served in:" in out
-    assert "line coverage can be read for:" in out
+    assert "subjects can be written in:" in out
+    assert "line coverage has a backend:" in out
+    assert "candidates can be sourced from:" in out
     assert "ships tasks, with one quality number fewer" in out, "a gap that degrades says so"
+
+    # What the design can do and what THIS machine can do are reported as separate lines. Merging
+    # them would make a laptop without a Go toolchain read as a factory that cannot serve Go.
+    assert "usable on this host" in out and "served on this host" in out
 
 
 def test_doctor_never_prints_a_credential(capsys, monkeypatch):

@@ -1,0 +1,226 @@
+"""GitHub, for the repo and module scales.
+
+The other five indexes in this package are registries: they list published artefacts. This one lists
+REPOSITORIES, which is what the repo scale needs and what the module scale needs a checkout of, and
+it behaves differently enough to be worth its own file.
+
+THE 1000-RESULT WALL, and it shapes everything here. GitHub's search returns at most 1000 results
+per query no matter how many it says matched -- page 11 at 100 per page is an error, not an empty
+page. A naive client walks 1000 repositories, stops, and reports the supply as exhausted when the
+`total_count` it printed said 400,000. The fix is not to page harder: it is to SEGMENT the query so
+that each segment holds fewer than a thousand, which is what `segments()` below does with star
+ranges. That is the mechanical form of "an index must be enumerable" for a search that refuses to
+enumerate itself.
+
+WHY STAR RANGES AND NOT DATES. Both work, and stars have the property that matters more here: the
+segment boundaries are stable. A repository's creation date never changes, but so does its star
+count only slowly, and a run resumed a week later walks nearly the same segments -- whereas
+`pushed:` moves under the query constantly and would make page 3 of yesterday and page 3 of today
+different sets, which is exactly what the sourcing rule forbids.
+
+RATE LIMITS ARE THE REAL CONSTRAINT. Search is 10 requests/minute unauthenticated and 30 with a
+token, which is the difference between walking a segment in a minute and in three. `GITHUB_TOKEN` is
+therefore read -- through `credentials`, never `os.environ` -- and its absence degrades rather than
+failing, because a slow index still enumerates.
+"""
+from __future__ import annotations
+
+from urllib.parse import quote
+
+from ..core import credentials
+from ..core.scale import Candidate
+from . import filters
+from .http import Http, all_or_nothing
+
+SEARCH = "https://api.github.com/search/repositories?q=%s&sort=%s&order=asc&page=%d&per_page=%d"
+COMMIT = "https://api.github.com/repos/%s/commits/%s"
+
+# What one query can ever return, whatever `total_count` claims. Not a tuning knob: the API answers
+# 422 past it. Everything about segmentation exists because of this number.
+RESULT_CEILING = 1000
+MAX_PER_PAGE = 100
+
+# The star ranges a segmented walk uses, smallest last. Chosen so that each is under the ceiling for
+# a typical language filter, and so that the most-starred repositories -- the ones most likely to be
+# worth building a task from -- are walked first.
+SEGMENTS = ((50000, None), (10000, 49999), (5000, 9999), (2000, 4999), (1000, 1999),
+            (500, 999), (200, 499), (100, 199), (50, 99), (20, 49), (10, 19))
+
+# `stars` rather than `best-match`. Relevance ranking is computed per request and is not promised to
+# be stable; a star ordering with an explicit range is the closest this API comes to a fixed order.
+DEFAULT_SORT = "stars"
+
+
+class GitHub:
+    """Repository search, segmented so that more than a thousand results are reachable.
+
+    One instance walks ONE query -- a language, plus whatever else the caller wants to constrain --
+    across the star segments in order. The segment is part of what is walked, so it appears in the
+    coverage log rather than being an invisible implementation detail.
+    """
+
+    name = "github"
+
+    def __init__(self, http: Http | None = None, *, language: str = "",
+                 query: str = "", scale: str = "repo", sort: str = DEFAULT_SORT,
+                 segments: tuple = SEGMENTS, pin: bool = True) -> None:
+        token = credentials.get("GITHUB_TOKEN") or ""
+        # The token raises the limit from 10 to 30 requests a minute. Its absence is a slower walk,
+        # never a failed one -- so it is applied if present and never required.
+        self._http = http or Http(token=token)
+        self._language = language
+        self._query = query
+        self._scale = scale
+        self._sort = sort
+        self._segments = tuple(segments)
+        # Whether to resolve each repository's branch head to a commit. On by default, and the
+        # default matters: search reports a BRANCH, a branch moves, and `has_pinned_release`
+        # correctly refuses one -- so without this every repository is filtered out for having no
+        # version we could write down. One extra request per repository buys an identity that means
+        # the same thing next month, which is what the sourcing rule asks of an identity.
+        self._pin = pin
+        self._total: int | None = None
+        self._exhausted: set = set()
+
+    def total(self) -> int | None:
+        """What GitHub says matched the unsegmented query.
+
+        Honest but larger than what paging can reach, which is why `reachable()` exists beside it.
+        Reporting only this would overstate the supply by orders of magnitude; reporting only the
+        other would understate what is out there.
+        """
+        if self._total is None:
+            self._fetch(self._query_for(None), 1, 1, counts_the_whole_index=True)
+        return self._total
+
+    def reachable(self) -> int:
+        """The ceiling on what a segmented walk can actually get to."""
+        return RESULT_CEILING * len(self._segments)
+
+    def page(self, number: int, *, size: int = MAX_PER_PAGE):
+        """One page, from whichever segment that page number falls in.
+
+        The segment arithmetic is here rather than in the caller because `walk()` asks for page 0,
+        1, 2 and must not have to know that page 10 is the last of segment one. A segment that runs
+        out early is skipped over, so a caller sees one continuous sequence.
+        """
+        size = min(max(1, size), MAX_PER_PAGE)
+        per_segment = max(1, RESULT_CEILING // size)
+
+        index, offset = divmod(number, per_segment)
+        while index < len(self._segments):
+            if index in self._exhausted:
+                index, offset = index + 1, 0
+                continue
+            rows = self._fetch(self._query_for(self._segments[index]), offset + 1, size)
+            if rows:
+                return all_or_nothing(rows, lambda row: to_candidate(
+                    row, scale=self._scale, commit=self._head_of(row)), index=self.name)
+            # An empty segment is not an exhausted index: there are more segments behind it. Marked
+            # so that later pages do not pay for it again, and the walk continues -- returning []
+            # here would tell `walk()` the whole of GitHub had run out.
+            self._exhausted.add(index)
+            index, offset = index + 1, 0
+        return []
+
+    def _head_of(self, row: dict) -> str:
+        """The commit a repository's default branch currently points at, or "".
+
+        A 404 here is one repository that moved or went private between the search and this call,
+        and `all_or_nothing` turns a page of those into an error rather than into a page that looks
+        like exhaustion.
+        """
+        if not self._pin:
+            return ""
+        full_name = str(row.get("full_name") or "")
+        branch = str(row.get("default_branch") or "")
+        if not full_name or not branch:
+            return ""
+        payload = self._http.json(COMMIT % (full_name, quote(branch)),
+                                  accept="application/vnd.github+json")
+        return str(payload.get("sha") or "")
+
+    def _query_for(self, segment) -> str:
+        parts = [self._query] if self._query else []
+        if self._language:
+            parts.append("language:%s" % self._language)
+        if segment is not None:
+            low, high = segment
+            parts.append("stars:>=%d" % low if high is None else "stars:%d..%d" % (low, high))
+        # Repositories nobody has touched in years are usually unbuildable, and a mirror is somebody
+        # else's repository counted twice. Both are cheap to exclude here and expensive to discover
+        # after a clone.
+        parts.append("archived:false")
+        parts.append("mirror:false")
+        return " ".join(parts) or "stars:>10"
+
+    def _fetch(self, query: str, page_number: int, size: int, *,
+               counts_the_whole_index: bool = False) -> list:
+        """One search request. -> its rows.
+
+        `counts_the_whole_index` is what keeps `total()` honest, and it exists because the obvious
+        version of this method was wrong: caching `total_count` from whichever request happened to
+        run first meant that after a single page of the top star segment, `total()` reported the
+        29 repositories in THAT SEGMENT as the size of the index. A denominator that quietly means
+        something narrower than it says is worse than no denominator, which is the whole argument
+        of core/sourcing.py -- so only the unsegmented query is allowed to set it.
+        """
+        payload = self._http.json(
+            SEARCH % (quote(query), self._sort, page_number, size),
+            accept="application/vnd.github+json")
+        if counts_the_whole_index:
+            self._total = int(payload.get("total_count") or 0)
+        return list(payload.get("items") or ())
+
+
+def to_candidate(row: dict, *, scale: str = "repo", source: str = "github",
+                 commit: str = "") -> Candidate:
+    """One repository -> a Candidate.
+
+    The identity carries the COMMIT when one was resolved. That is what makes a repository identity
+    mean the same thing in a later run: `github:owner/name` alone names a moving target, and a
+    memory of it would suppress a repository whose contents have completely changed.
+    """
+    full_name = str(row.get("full_name") or "")
+    facts = _facts(row, commit)
+    return Candidate(
+        identity="github:%s@%s" % (full_name, commit) if commit else "github:%s" % full_name,
+        scale=scale,
+        language=str(row.get("language") or "").lower(),
+        source=source,
+        detail={
+            "repository": str(row.get("clone_url") or ""),
+            "identity": full_name,
+            "description": str(row.get("description") or ""),
+            "default_branch": str(row.get("default_branch") or ""),
+            "commit": commit,
+            "stars": int(row.get("stargazers_count") or 0),
+            "size_kb": int(row.get("size") or 0),
+            "license": ((row.get("license") or {}) or {}).get("spdx_id") or "",
+            # The repo scale needs these and search cannot supply them: how the project builds and
+            # how it is invoked are read from the checkout. Present and empty so that a scale
+            # reading `detail` finds the key rather than a KeyError.
+            "build": [], "invoke": [],
+            "facts": filters.as_json(facts),
+        })
+
+
+def _facts(row: dict, commit: str = "") -> filters.Facts:
+    topics = tuple(str(t) for t in (row.get("topics") or ()))
+    return filters.Facts(
+        name=str(row.get("full_name") or ""),
+        # THE COMMIT, not the branch. A branch name is not a version: it names wherever the project
+        # has got to, and `has_pinned_release` refuses it -- correctly, since an expectation frozen
+        # against "main" describes whatever main was that afternoon. With no commit resolved this is
+        # empty and the candidate is filtered out, which is the honest outcome rather than a bug.
+        version=commit,
+        summary=str(row.get("description") or ""),
+        keywords=topics,
+        # Search reports neither. Unknown rather than absent, which the filters accept.
+        dependencies=None, has_tests=None,
+        repository=str(row.get("html_url") or ""),
+        yanked=bool(row.get("archived")),
+        documented=bool(row.get("has_wiki") or row.get("homepage")),
+        extra={"stars": int(row.get("stargazers_count") or 0),
+               "forks": int(row.get("forks_count") or 0),
+               "open_issues": int(row.get("open_issues_count") or 0)})

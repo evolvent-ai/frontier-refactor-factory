@@ -24,6 +24,7 @@ import sys
 from . import __version__
 from .core import credentials, sandbox
 from .core.scale import SCALES
+from . import source as indexes
 from .observe import coverage
 from .observe.call import shims
 
@@ -63,9 +64,18 @@ def _doctor_command(_args) -> int:
     """
     print("frontier-refactor-factory %s\n" % __version__)
 
-    print("subjects can be served in:      %s" % ", ".join(shims.available()))
-    print("line coverage can be read for:  %s" % ", ".join(coverage.available()))
+    servable = shims.available()
+    print("subjects can be written in:     %s" % ", ".join(servable))
+    print("  ...and served on this host:   %s"
+          % (", ".join(n for n in servable if shims.usable(n)) or "(none: no toolchain found)"))
+
+    measurable = coverage.available()
+    print("line coverage has a backend:    %s" % ", ".join(measurable))
+    print("  ...usable on this host:       %s"
+          % (", ".join(n for n in measurable if coverage.usable(n)) or "(none)"))
     print("  (a language without a backend still ships tasks, with one quality number fewer)\n")
+
+    print("candidates can be sourced from: %s\n" % ", ".join(indexes.available()))
 
     have = sandbox.available()
     for name, present in sorted(have.items()):

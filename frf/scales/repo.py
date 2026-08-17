@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from ..core import integrity
 from ..core.scale import Candidate, Spec
 from ..observe import coverage
 from ..observe.process.runner import Scenario, run_scenario
@@ -64,8 +65,10 @@ class ProbeSource:
 class Observer:
     """The process seam, bound to a built reference."""
 
-    def __init__(self, material: Material) -> None:
+    def __init__(self, material: Material, *, backend=None) -> None:
         self.material = material
+        # Which sandbox the program runs in, so isolation is reported from what is in force.
+        self._backend = backend
         self._program: list = []
 
     def build(self, spec: Spec) -> None:
@@ -126,8 +129,18 @@ class Observer:
         """
         return []
 
+    def isolation(self):
+        """How the two sides are kept apart while one is timed -- reported, never assumed."""
+        return integrity.isolation_for(self._backend)
+
     def isolated(self) -> bool:
-        return True
+        """Whether timing runs with the two sides separated.
+
+        On this seam the answer matters more than on the other: a repository task times a whole
+        program, and a program can fork. Answered from the backend so that a local run reports
+        INCONCLUSIVE rather than claiming a defence it does not have.
+        """
+        return self.isolation().enforced
 
 
 class Repo:
@@ -135,7 +148,8 @@ class Repo:
 
     name = "repo"
 
-    def __init__(self, index=None, workspace: str = "", *, observer=None, harvest=None) -> None:
+    def __init__(self, index=None, workspace: str = "", *, observer=None, harvest=None,
+                 backend=None) -> None:
         self._index = index
         self._workspace = workspace or os.path.join("work", "repo")
         self._observer = observer
@@ -143,6 +157,8 @@ class Repo:
         # per-repository step -- a project's tests are shell, or a Makefile, or a Python harness --
         # and hard-coding one shape here would quietly restrict which repositories can be used.
         self._harvest = harvest
+        # Threaded to the Observer so the delegation check reports what is really in force.
+        self._backend = backend
         self._material: Material | None = None
 
     def find(self, budget: int):
@@ -167,7 +183,7 @@ class Repo:
             return self._observer
         if self._material is None:
             raise RuntimeError("observe() was asked for before specify() chose a repository")
-        return Observer(self._material)
+        return Observer(self._material, backend=self._backend)
 
     def probes(self, spec: Spec) -> ProbeSource:
         if self._material is None:

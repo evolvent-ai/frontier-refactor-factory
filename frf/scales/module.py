@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass
 
+from ..core import integrity
 from ..core.scale import Candidate, Spec
 from ..observe import coverage
 from ..observe.call import shims
@@ -31,6 +33,18 @@ from ..observe.probes.schema import Schema, sample
 # probe is worth one point, three are held out for timing, and a corpus that only just clears the
 # floor before those are removed does not clear it afterwards.
 PROBE_COUNT = 60
+
+# How long a subject may take to compile. Generous enough for an optimising compiler on a real
+# translation unit, bounded so that a build which will never finish does not stall a batch.
+BUILD_TIMEOUT = 600.0
+
+
+class BuildFailed(RuntimeError):
+    """The subject could not be compiled -- material's fault, not the wire's.
+
+    Distinct from `SubjectFailed`, which is a subject that built and then would not speak. Merging
+    them would send a repair loop to inspect the protocol every time a candidate had a syntax error.
+    """
 
 # The sizes each probe is drawn at. More than one because a candidate that got fast at one
 # convenient size has not made the subject faster, and the timing pass scores the worst of them.
@@ -79,44 +93,104 @@ class Observer:
     subject, measure its coverage, list what it must not reach, and say whether timing is isolated.
     """
 
-    def __init__(self, workspace: str, material: Material) -> None:
+    def __init__(self, workspace: str, material: Material, *, backend=None) -> None:
         self.workspace = workspace
         self.material = material
+        # Which sandbox the subject runs in, so that `isolation()` can answer from what is actually
+        # in force rather than from a hope. None means this process, which isolates nothing.
+        self._backend = backend
         self._argv: list = []
 
     def build(self, spec: Spec) -> None:
-        """Put the subject and its shim where they can be served from."""
-        os.makedirs(self.workspace, exist_ok=True)
-        shutil.copyfile(self.material.source_path, os.path.join(self.workspace, "subject.py"))
+        """Put the subject and its shim where they can be served from, and compile if the language
+        needs compiling.
 
-        source, argv = shims.load(spec.language)
-        entry = os.path.join(self.workspace, "serve%s" % os.path.splitext(argv[-1])[1] or ".py")
-        with open(entry, "w", encoding="utf-8") as handle:
-            handle.write(source)
-        self._argv = [part.format(entry=entry) for part in argv]
+        The build runs HERE rather than at first call, so that a subject which does not compile is a
+        failure of this stage -- named, with the compiler's own message -- instead of a subject that
+        later "exits without answering", which is the same fault wearing a disguise that sends the
+        repair loop to look at the wire.
+        """
+        build, argv = shims.materialise(self.workspace, spec.language, self.material.source_path)
+        for command in build:
+            done = subprocess.run(command, cwd=self.workspace, capture_output=True, text=True,
+                                  timeout=BUILD_TIMEOUT)
+            if done.returncode != 0:
+                raise BuildFailed("%s did not build: %s"
+                                  % (self.material.identity,
+                                     (done.stderr or done.stdout).strip()[-800:]))
+        self._argv = argv
 
     def subject(self, spec: Spec | None = None, *, mutated: bool = False) -> Subject:
-        return Subject(self._argv, cwd=self.workspace)
+        """The subject, served. `mutated` serves a perturbed one instead.
+
+        THE MUTANT IS WHAT MAKES E3 MEAN ANYTHING. That check asks whether the verifier would notice
+        a submission that behaves differently, and it can only answer by being shown one. An
+        observer that accepted `mutated` and ignored it would serve the reference twice: the
+        comparison would find no divergence, and the check would report INCONCLUSIVE forever --
+        which is the honest verdict for a mutation that never happened, and useless.
+
+        Served from a separate directory so that the reference's own workspace is never edited. The
+        alternative -- rewriting the subject in place and putting it back -- leaves a corrupted
+        subject behind on any failure between the two.
+        """
+        if not mutated:
+            return Subject(self._argv, cwd=self.workspace)
+        return Subject(*self._mutant())
+
+    def _mutant(self) -> tuple:
+        """A copy of the workspace whose subject has been perturbed. -> (argv, cwd).
+
+        The perturbation is applied to the SOURCE and the result is rebuilt, because a compiled
+        language has nothing else to perturb. It is deliberately crude -- see `mutate` -- since what
+        E3 needs is any provable difference in behaviour, not a realistic wrong answer.
+        """
+        room = os.path.join(self.workspace, ".mutant")
+        if os.path.isdir(room):
+            shutil.rmtree(room, ignore_errors=True)
+        os.makedirs(room, exist_ok=True)
+
+        original = open(self.material.source_path, encoding="utf-8", errors="replace").read()
+        perturbed = os.path.join(room, os.path.basename(self.material.source_path))
+        with open(perturbed, "w", encoding="utf-8") as handle:
+            handle.write(mutate(original, self.material.language))
+
+        build, argv = shims.materialise(room, self.material.language, perturbed)
+        for command in build:
+            done = subprocess.run(command, cwd=room, capture_output=True, text=True,
+                                  timeout=BUILD_TIMEOUT)
+            if done.returncode != 0:
+                # A mutant that will not build is not a verdict about the verifier. Falling back to
+                # the reference makes E3 report INCONCLUSIVE, which is the truth: nothing was shown.
+                return self._argv, self.workspace
+        return argv, room
 
     def coverage(self):
         return coverage.backend_for(self.material.language)
 
     def forbidden_references(self, spec: Spec) -> list:
-        """What a submission may not reach. Checked mechanically, never by judgement.
+        """What the subject tree reaches that it must not. Checked mechanically, never by judgement.
 
-        The rule comes from the task and the same submission gets the same verdict every time, which
-        is what keeps this an audit rather than an opinion.
+        Reads the workspace rather than returning the task's ban list. The distinction is the whole
+        check: a list of forbidden names is what the task FORBIDS, and returning it here would make
+        the evidence check report a failure for every task that has a rule. What E6 needs is what
+        was actually FOUND, which requires opening the files.
         """
-        return list(self.material.forbidden)
+        found = integrity.inspect(self.workspace, tuple(self.material.forbidden))
+        return [str(hit) for hit in found.hits]
+
+    def isolation(self):
+        """How the two sides are kept apart while one is timed -- reported, never assumed."""
+        return integrity.isolation_for(self._backend)
 
     def isolated(self) -> bool:
         """Whether timing runs with the two sides separated.
 
-        Answered honestly rather than optimistically: with this False the delegation check reports
-        INCONCLUSIVE, which is the correct verdict when work handed to another process would be
-        invisible to the clock.
+        Answered from the backend rather than optimistically: on a local backend this is False, the
+        delegation check reports INCONCLUSIVE, and that is the correct verdict when work handed to
+        another process would be invisible to the clock. Returning a constant True here would make
+        E6 report HOLDS for a defence that was never in force.
         """
-        return True
+        return self.isolation().enforced
 
 
 class Module:
@@ -124,10 +198,14 @@ class Module:
 
     name = "module"
 
-    def __init__(self, index=None, workspace: str = "", *, observer=None) -> None:
+    def __init__(self, index=None, workspace: str = "", *, observer=None, backend=None) -> None:
         self._index = index
         self._workspace = workspace or os.path.join("work", "module")
         self._observer = observer
+        # Passed through to the Observer so the delegation check can report what is really in
+        # force. Threaded rather than looked up globally: two scales in one batch may legitimately
+        # run in different sandboxes.
+        self._backend = backend
         self._material: Material | None = None
 
     # ------------------------------------------------------------------ the four answers
@@ -153,7 +231,8 @@ class Module:
         return Spec(name=_task_name(material), scale=self.name, language=material.language,
                     description=material.description,
                     invoke=["serve", material.symbol], entry=material.symbol,
-                    environment={"subject_path": os.path.join(self._workspace, "subject.py"),
+                    environment={"subject_path": os.path.join(
+                                     self._workspace, shims.load(material.language).subject),
                                  "forbidden": list(material.forbidden)})
 
     def observe(self):
@@ -161,7 +240,7 @@ class Module:
             return self._observer
         if self._material is None:
             raise RuntimeError("observe() was asked for before specify() chose a subject")
-        return Observer(self._workspace, self._material)
+        return Observer(self._workspace, self._material, backend=self._backend)
 
     def probes(self, spec: Spec) -> ProbeSource:
         if self._material is None:
@@ -193,3 +272,37 @@ def _task_name(material: Material) -> str:
     """A stable, readable name. Derived from the symbol rather than from a counter, so that two runs
     over the same material produce the same task name and a report stays comparable."""
     return material.symbol.replace("_", "-").replace(".", "-").lower()
+
+
+# What a perturbation looks like, per language family. Deliberately crude: E3 does not need a
+# realistic wrong answer, it needs a PROVABLE difference in behaviour, and the check establishes
+# that difference by comparing observations rather than by trusting this table.
+#
+# Applied to the source as text because a compiled subject has nothing else to perturb, and because
+# a factory that parsed each language in order to mutate it would have re-acquired exactly the
+# per-language knowledge the wire exists to avoid.
+_PERTURBATIONS = (
+    # Arithmetic first: it changes a returned value without changing control flow, so a subject
+    # that computes anything at all will diverge and still answer.
+    ("+", "-"),
+    ("*", "+"),
+    (">=", ">"),
+    ("<=", "<"),
+)
+
+
+def mutate(source: str, language: str) -> str:
+    """One small change to a subject's source, chosen so the result still compiles.
+
+    Returns the source unchanged when nothing matched, which is not a failure: the mutant then
+    behaves identically, the comparison finds no divergence, and E3 reports INCONCLUSIVE. That is
+    the honest outcome for a subject nobody could perturb this way, and it is why the check asks
+    whether the observation MOVED rather than inferring blindness from a score.
+    """
+    for original, replacement in _PERTURBATIONS:
+        # One occurrence, not all of them. Replacing every `+` in a file tends to produce something
+        # that does not compile, and a mutant that does not build demonstrates nothing.
+        index = source.find(original)
+        if index != -1:
+            return source[:index] + replacement + source[index + len(original):]
+    return source
