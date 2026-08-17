@@ -1,13 +1,23 @@
 /**
  * Serve a JavaScript subject over the wire. Written into the task; not required by the factory.
  *
- * The subject supplies `entry(args) -> value` in subject.js, throwing to refuse. It may also return
+ * The subject supplies `entry(args) -> value` in subject.js or subject.ts, throwing to refuse. It may also return
  * a promise: asynchronous code is ordinary in this language, and a shim that did not await one
  * would freeze every answer as the JSON for a pending promise rather than as the value.
  */
 'use strict';
 
-const { entry } = require('./subject.js');
+// The subject is resolved without an extension so that the same shim serves both JavaScript and
+// TypeScript: Node picks up `subject.js` or, under --experimental-strip-types, `subject.ts`.
+// Naming the extension here would make this file JavaScript-only, and the table would then need a
+// second near-identical template to keep in step for no behaviour of its own.
+// The subject's filename arrives as an argument so that this one template serves both JavaScript
+// and TypeScript, the latter on Node's own type stripping. Resolving it by extension does not
+// work: CommonJS `require('./subject')` will not find a `.ts` file. Hard-coding `subject.js` would
+// make this template JavaScript-only and force a second, near-identical one for TypeScript -- a
+// copy to keep in step for no behaviour of its own.
+const path = require('path');
+const { entry } = require(path.resolve(__dirname, process.argv[2] || './subject.js'));
 
 /** The type and the message, never the stack: a stack carries absolute paths from this machine. */
 function describe(failure) {

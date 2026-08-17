@@ -107,12 +107,18 @@ def test_no_ban_list_means_nothing_to_find():
     assert integrity.inspect(tree, ()).clean
 
 
-def test_isolation_is_reported_from_the_backend_and_never_assumed():
-    """THE test in this file. A constant True here would make E6 certify a defence never in force.
+def test_isolation_is_reported_from_what_was_applied_and_never_from_a_name():
+    """THE test in this file, and it once asserted the bug.
 
-    The local backend runs the subject as this process's user on this process's machine. Work handed
-    to another process would be invisible to the clock, so the honest answer is False -- and the
-    evidence check turns that into INCONCLUSIVE, which is the correct verdict rather than a failure.
+    An earlier version of this test required a backend NAMED `docker` to report enforced=True, on
+    the reasoning that a container is where isolation happens. That was wrong in the exact way the
+    module warns about: `restricted_argv` was called from nowhere, nothing ever suspended the
+    untimed side, and the subject ran as the same user with no process cap -- yet E6 reported HOLDS,
+    "timing runs isolated", for a defence that had never once been applied. The test agreed with the
+    code, so the suite certified it too.
+
+    A container makes the defence POSSIBLE. Only applying it makes the defence real, and only the
+    code that applied it can say so -- which is what `applied` is for.
     """
     class _Local:
         name = "local-process"
@@ -122,8 +128,19 @@ def test_isolation_is_reported_from_the_backend_and_never_assumed():
 
     assert not integrity.isolation_for(_Local()).enforced
     assert not integrity.isolation_for(None).enforced
-    assert integrity.isolation_for(_Container()).enforced
-    assert integrity.isolation_for(_Container()).process_cap > 0
+
+    # A container that nobody wrapped: capable, but nothing is in force.
+    unwrapped = integrity.isolation_for(_Container())
+    assert not unwrapped.enforced
+    assert "nothing wrapped" in unwrapped.reason
+
+    # The same container, with the restriction actually applied.
+    wrapped = integrity.isolation_for(_Container(), applied=True)
+    assert wrapped.enforced and wrapped.process_cap > 0 and wrapped.suspends_idle_side
+
+    # Applied on a backend that shares this machine is still not separation: the account and the cap
+    # are real, the isolation is not, and conflating them is how a local run gets certified.
+    assert not integrity.isolation_for(_Local(), applied=True).enforced
 
     # The reason travels with the verdict: a caller reading provenance months later needs to know
     # WHY a check was inconclusive, not merely that it was.

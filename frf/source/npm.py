@@ -23,7 +23,7 @@ from urllib.parse import quote
 
 from ..core.scale import Candidate
 from . import filters
-from .http import Http, all_or_nothing
+from .http import Http, all_or_nothing, envelope
 
 SEARCH = "https://registry.npmjs.org/-/v1/search?text=%s&size=%d&from=%d"
 PACKUMENT = "https://registry.npmjs.org/%s"
@@ -76,7 +76,8 @@ class Npm:
         total = payload.get("total")
         if isinstance(total, int):
             self._total = total
-        return [row.get("package") or {} for row in (payload.get("objects") or ())]
+        return [row.get("package") or {}
+                for row in envelope(payload, "objects", index=self.name)]
 
     def _candidate(self, row: dict) -> Candidate:
         version = {}

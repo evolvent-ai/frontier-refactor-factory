@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from ..core.scale import Candidate
 from . import filters
-from .http import Http, all_or_nothing
+from .http import Http, all_or_nothing, envelope
 
 SIMPLE_INDEX = "https://pypi.org/simple/"
 SIMPLE_ACCEPT = "application/vnd.pypi.simple.v1+json"
@@ -86,7 +86,7 @@ class PyPI:
         if self._names is not None:
             return self._names
         payload = self._http.json(SIMPLE_INDEX, accept=SIMPLE_ACCEPT)
-        names = sorted(str(p.get("name", "")) for p in payload.get("projects", ())
+        names = sorted(str(p.get("name", "")) for p in envelope(payload, "projects", index=self.name)
                        if p.get("name"))
         if self._subset:
             names = [n for n in names if self._subset in n.lower()]

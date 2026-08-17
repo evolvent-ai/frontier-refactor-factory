@@ -11,8 +11,9 @@ be found together, and gcc names them after the OBJECT it compiled -- so buildin
 `subject.c` into a binary called `sc` produces `sc-subject.gcno`, not `subject.gcno`. Point gcov at
 the source file name and it answers "cannot open notes file", produces an empty report, and the
 whole thing looks exactly like a language with no coverage backend. A zero that means "I looked in
-the wrong place" is the single most misleading number this package could produce, so the stem is
-computed here rather than assumed, and a report that names no file returns UNMEASURED.
+the wrong place" is the single most misleading number this package could produce, so gcov is handed
+every `.gcno` the build produced rather than a source name, the report is matched back by basename,
+and a report that names no file returns UNMEASURED.
 """
 from __future__ import annotations
 

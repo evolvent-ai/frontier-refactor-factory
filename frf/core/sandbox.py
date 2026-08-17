@@ -136,11 +136,17 @@ def find(prefer: str | None = None) -> Backend:
                 "a key frozen somewhere other than where it was asked for describes the wrong "
                 "machine." % (prefer, ", ".join(k for k, v in have.items() if v)))
         return _build(prefer)
-    for candidate in ("docker", "remote"):
+    # REMOTE FIRST, and that order is a decision rather than an accident. A local daemon is faster
+    # and free, but it is the machine this factory happens to be running on -- so a batch would be
+    # frozen against one toolchain here and another on a colleague's laptop, and the difference
+    # would show up as material that mysteriously stopped reproducing. A remote sandbox is one
+    # image for everyone, which is what makes an Expectation portable, and it is also the only
+    # backend available where this factory increasingly runs: inside a container, with no socket.
+    for candidate in ("remote", "docker"):
         if have.get(candidate):
             return _build(candidate)
     raise SandboxError(
-        "no container backend: docker is unreachable and no remote sandbox key is set. Freezing "
+        "no container backend: no remote sandbox key is set and docker is unreachable. Freezing "
         "would describe this host rather than the image the task ships with. Set E2B_API_KEY, or "
         "start a docker daemon, or ask for 'local-process' explicitly if this is a dry run.")
 

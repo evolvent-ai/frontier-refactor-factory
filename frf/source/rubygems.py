@@ -22,7 +22,7 @@ from urllib.parse import quote
 
 from ..core.scale import Candidate
 from . import filters
-from .http import Http, all_or_nothing
+from .http import Http, SourceError, all_or_nothing
 
 SEARCH = "https://rubygems.org/api/v1/search.json?query=%s&page=%d"
 GEM = "https://rubygems.org/api/v1/gems/%s.json"
@@ -65,7 +65,12 @@ class RubyGems:
         """
         rows = self._http.json(SEARCH % (quote(self._query), number + 1))
         if not isinstance(rows, list):
-            return []
+            # RubyGems answers a search with a bare JSON list. Anything else -- an error object, a
+            # maintenance page -- is a body this client cannot read, and returning it as an empty
+            # page would tell walk() the registry had run out rather than that it misbehaved.
+            raise SourceError(
+                "%s answered with %s rather than a list of gems, so the page cannot be read"
+                % (self.name, type(rows).__name__))
         rows = rows[:size] if size and size < len(rows) else rows
         if not self._hydrate:
             return [self._candidate(row, None) for row in rows]

@@ -29,7 +29,7 @@ from urllib.parse import quote
 
 from ..core.scale import Candidate
 from . import filters
-from .http import Http, NotFound
+from .http import Http, NotFound, SourceError, envelope
 
 SEARCH = "https://search.maven.org/solrsearch/select?q=%s&start=%d&rows=%d&wt=json"
 POM = "https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom"
@@ -73,11 +73,17 @@ class MavenCentral:
 
     def _fetch(self, start: int, rows: int) -> list:
         payload = self._http.json(SEARCH % (quote(self._query, safe=":*"), start, rows))
-        response = payload.get("response") or {}
+        # The envelope, insisted upon: a Solr error reply is a 200 with no `response` at all,
+        # and reading that as an empty page would report Maven Central as exhausted.
+        response = payload.get("response")
+        if not isinstance(response, dict):
+            raise SourceError(
+                "%s answered without a response envelope, so the page cannot be read; "
+                "returning it empty would report the index as exhausted" % self.name)
         found = response.get("numFound")
         if isinstance(found, int):
             self._total = found
-        return list(response.get("docs") or ())
+        return list(envelope(response, "docs", index=self.name))
 
     def _dependencies(self, row: dict) -> int | None:
         """Direct `<dependency>` elements in the POM, or None when not hydrating.

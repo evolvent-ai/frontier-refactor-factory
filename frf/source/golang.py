@@ -34,7 +34,7 @@ from urllib.parse import quote
 
 from ..core.scale import Candidate
 from . import filters
-from .http import Http, NotFound, all_or_nothing
+from .http import Http, NotFound, SourceError, all_or_nothing
 
 INDEX = "https://index.golang.org/index?since=%s&limit=%d"
 LATEST = "https://proxy.golang.org/%s/@latest"
@@ -96,16 +96,26 @@ class GoModules:
         return self._cursors[number]
 
     def _window(self, since: str, limit: int) -> list:
-        """One window of the stream. Rows, parsed; a failure raises rather than reading as empty."""
+        """One window of the stream. Rows, parsed; a body it cannot read raises.
+
+        A genuinely empty window IS how this index says exhausted -- the stream has an end -- so an
+        empty answer is returned as it stands. What must not pass is a body that had lines and
+        none of them parsed: an HTML maintenance page has plenty of lines and yields no rows, and
+        forwarding that as an empty window would report the whole of pkg.go.dev as walked.
+        """
+        lines = self._http.lines(INDEX % (quote(since), limit))
         rows = []
-        for line in self._http.lines(INDEX % (quote(since), limit)):
+        for line in lines:
             try:
                 rows.append(json.loads(line))
             except ValueError:
-                # One malformed line in a stream is a row lost, not a window lost. If every line is
-                # malformed the window comes back empty and `all_or_nothing` is not what catches it
-                # -- so this is the one place the count is checked directly.
+                # One malformed line in a stream is a row lost, not a window lost.
                 continue
+        if lines and not rows:
+            raise SourceError(
+                "%s returned %d line(s) and none of them were JSON, so the window cannot be read; "
+                "returning it empty would report the index as exhausted"
+                % (self.name, len(lines)))
         if not rows:
             return []
         # The next window starts at this one's last timestamp, and that row is INCLUSIVE -- verified

@@ -20,7 +20,7 @@ from urllib.parse import quote
 
 from ..core.scale import Candidate
 from . import filters
-from .http import Http
+from .http import Http, envelope
 
 LIST = "https://crates.io/api/v1/crates?page=%d&per_page=%d&sort=%s"
 CRATE = "https://crates.io/api/v1/crates/%s"
@@ -90,7 +90,7 @@ class Crates:
         total = (payload.get("meta") or {}).get("total")
         if isinstance(total, int):
             self._total = total
-        return list(payload.get("crates") or ())
+        return list(envelope(payload, "crates", index=self.name))
 
     def _dependencies(self, row: dict) -> int | None:
         if not self._hydrate:

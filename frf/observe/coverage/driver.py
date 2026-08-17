@@ -104,16 +104,31 @@ class Run:
 
         environment = dict(os.environ)
         environment.update(self.extra_env)
+        lines = probe_lines(self.probes)
         try:
             for command in build:
                 done = subprocess.run(command, cwd=self.work, env=environment,
                                       capture_output=True, text=True, timeout=TIMEOUT)
                 if done.returncode != 0:
                     return False
-            subprocess.run(argv, cwd=self.work, env=environment,
-                           input="".join(probe_lines(self.probes)),
-                           capture_output=True, text=True, timeout=TIMEOUT)
+            served = subprocess.run(argv, cwd=self.work, env=environment,
+                                    input="".join(lines),
+                                    capture_output=True, text=True, timeout=TIMEOUT)
         except (OSError, subprocess.SubprocessError):
+            return False
+
+        # DID THE SUBJECT ACTUALLY ANSWER? The build succeeding only says it compiles, and the
+        # process starting only says the interpreter launched. A subject that throws while being
+        # loaded -- a syntax error in a scripting language, a static initialiser that fails --
+        # starts, dies, and leaves whatever its instrumentation had written so far. For a tool that
+        # writes on exit anyway, that is a well-formed report in which nothing executed, and the
+        # backend would return a MEASURED ZERO: the verdict for a broken tracer, delivered for a
+        # subject that never ran.
+        #
+        # Answering at least once is the evidence that it ran, and it is checked HERE rather than
+        # in each backend, because the ones that currently escape this do so only because their
+        # tool happens to leave nothing behind.
+        if lines and not served.stdout.strip():
             return False
         return True
 

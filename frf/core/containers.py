@@ -69,21 +69,36 @@ def _tar_bytes(local_dir: str) -> bytes:
 
 
 def _untar_bytes(blob: bytes, local_dir: str) -> None:
-    """Unpack a tar stream, refusing members that would write outside the destination.
+    """Unpack a tar stream, refusing anything that would write outside the destination.
 
     The check is not paranoia about a hostile registry: the streams here come back from a sandbox
     that just ran code we did not write, and a member named `../../etc/something` is exactly what a
     submission trying to escape the measurement would produce.
+
+    CHECKING EACH MEMBER'S OWN PATH IS NOT ENOUGH, and the first version of this did only that. A
+    tar can carry a SYMLINK whose own name is innocent -- `escape` -> `/tmp/victim` -- followed by a
+    perfectly ordinary `escape/note.txt`, and the second member is then written through the first,
+    outside the destination, with every path check satisfied. Links are therefore dropped outright:
+    nothing this factory pulls back from a sandbox needs one, and a link is the only member whose
+    meaning depends on what was extracted before it.
     """
     os.makedirs(local_dir, exist_ok=True)
     destination = os.path.abspath(local_dir)
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r:*") as archive:
         safe = []
         for member in archive.getmembers():
+            if member.issym() or member.islnk():
+                continue
             target = os.path.abspath(os.path.join(destination, member.name))
             if target == destination or target.startswith(destination + os.sep):
                 safe.append(member)
-        archive.extractall(destination, members=safe)
+        # `filter="data"` is the interpreter's own version of this reasoning and is used where it
+        # exists; the explicit checks above stay because they are what runs on 3.10 and 3.11, which
+        # this package supports.
+        try:
+            archive.extractall(destination, members=safe, filter="data")
+        except TypeError:                                  # pragma: no cover -- Python < 3.11.4
+            archive.extractall(destination, members=safe)
 
 
 class Docker:
@@ -210,8 +225,20 @@ class Remote:
         key = credentials.get("E2B_API_KEY")
         if not key:
             raise SandboxError("E2B_API_KEY is not set, so no remote sandbox can be opened.")
-        self._template = template or credentials.get("E2B_TEMPLATE") or "base"
-        self._sandbox = Sandbox(template=self._template, api_key=key, timeout=int(timeout))
+        # `Sandbox.create`, not `Sandbox(...)`. In the 2.x SDK the constructor takes an internal
+        # options object and calling it as though it took keywords fails at the first use -- which
+        # is a poor place to find out, because the first use is the most expensive stage.
+        self._template = template or credentials.get("E2B_TEMPLATE") or ""
+        try:
+            if self._template:
+                self._sandbox = Sandbox.create(template=self._template, timeout=int(timeout),
+                                               api_key=key)
+            else:
+                self._sandbox = Sandbox.create(timeout=int(timeout), api_key=key)
+        except Exception as exc:                              # noqa: BLE001 -- the SDK's own errors
+            raise SandboxError(
+                "could not open a remote sandbox%s: %s"
+                % (" from template %r" % self._template if self._template else "", exc)) from exc
 
     def close(self) -> None:
         try:
@@ -245,6 +272,17 @@ class Remote:
 
     def run(self, argv: list[str], *, workdir: str | None = None,
             env: dict | None = None, timeout: float = 3600.0) -> Result:
+        """One command. -> its exit code and streams, exactly as every other backend reports them.
+
+        A NON-ZERO EXIT IS NOT AN ERROR HERE, and this SDK disagrees: it raises
+        `CommandExitException` for any command that exits non-zero, so the ordinary case of "the
+        build failed, read the message" arrives as an exception. Letting that propagate would make
+        `Result.ok` unreachable on this backend and every caller need a second code path for the
+        remote case. Verified live: `commands.run("false")` raises rather than returning 1.
+
+        The exception carries the exit code and both streams, so the honest translation is back into
+        a Result. A failure with no exit code to report is a transport problem and keeps 1.
+        """
         started = time.perf_counter()
         try:
             handle = self._sandbox.commands.run(
@@ -252,12 +290,13 @@ class Remote:
                 cwd=workdir or "/home/user", envs=dict(env or {}),
                 timeout=int(timeout))
         except Exception as exc:                              # noqa: BLE001 -- the SDK's own errors
-            # A non-zero exit arrives here as an exception in some SDK versions, and a genuinely
-            # broken connection arrives the same way. Both are reported as a Result so that the
-            # caller routes on the exit code as it does for every other backend.
-            return Result(1, "", str(exc)[-2000:], time.perf_counter() - started)
-        return Result(getattr(handle, "exit_code", 0), getattr(handle, "stdout", "") or "",
-                      getattr(handle, "stderr", "") or "", time.perf_counter() - started)
+            code = getattr(exc, "exit_code", None)
+            return Result(1 if code is None else int(code),
+                          _text(getattr(exc, "stdout", "")),
+                          _text(getattr(exc, "stderr", "")) or str(exc)[-2000:],
+                          time.perf_counter() - started)
+        return Result(getattr(handle, "exit_code", 0), _text(getattr(handle, "stdout", "")),
+                      _text(getattr(handle, "stderr", "")), time.perf_counter() - started)
 
     def pull(self, remote_dir: str, local_dir: str) -> None:
         staged = "/tmp/frf-pull-%s.tar" % uuid.uuid4().hex[:8]
@@ -265,7 +304,9 @@ class Remote:
         if not done.ok:
             raise SandboxError("could not pack the sandbox directory %s: %s"
                                % (remote_dir, done.tail()))
-        blob = self._sandbox.files.read(staged, format="bytes")
+        # `bytes` comes back as a bytearray from this SDK, and tarfile wants something it can wrap
+        # in a BytesIO -- so it is normalised here rather than at the one place that noticed.
+        blob = bytes(self._sandbox.files.read(staged, format="bytes"))
         self.run(["rm", "-f", staged], timeout=60)
         _untar_bytes(blob, local_dir)
 

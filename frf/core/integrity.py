@@ -46,10 +46,18 @@ SOURCE_SUFFIXES = (".py", ".js", ".mjs", ".cjs", ".ts", ".go", ".rs", ".c", ".h"
 # in plain sight. A submission that assembles the name at run time is out of reach of any of them,
 # which is stated in the module docstring rather than papered over here.
 _REACHES = (
-    re.compile(r"^\s*import\s+([\w.]+)", re.M),                        # python, java, go, js
+    re.compile(r"^\s*import\s+([\w.]+)", re.M),                        # python, java
     re.compile(r"^\s*from\s+([\w.]+)\s+import\b", re.M),               # python
     re.compile(r"""\brequire\s*\(\s*['"]([^'"]+)['"]""", re.M),        # node
     re.compile(r"""\bimport\s+.*?from\s*['"]([^'"]+)['"]""", re.M),    # es modules, typescript
+    # A QUOTED IMPORT PATH, which is the only way Go can write one -- `import "reference"` and,
+    # inside a grouped block, a bare `"reference/fast"` on its own line, optionally with a local
+    # alias in front of it. None of the patterns above accept it: the first requires a word
+    # character where Go puts a quote, and the fourth requires a `from`. So Go delegation was
+    # invisible to the whole inspection while Go is a language this factory serves and sources for
+    # -- E6's source half was a no-op for every Go task. Also catches a bare ES-module
+    # side-effect import (`import 'reference';`), which had the same hole.
+    re.compile(r"""^\s*(?:import\s+)?(?:[\w.]+\s+)?["`']([\w./-]+)["`']\s*$""", re.M),
     re.compile(r"""^\s*#\s*include\s*[<"]([^>"]+)[>"]""", re.M),       # c, c++
     re.compile(r"^\s*(?:pub\s+)?use\s+([\w:]+)", re.M),                # rust
     re.compile(r"^\s*(?:extern\s+)?crate\s+(\w+)", re.M),              # rust
@@ -208,22 +216,45 @@ class Isolation:
 PROCESS_CAP = 64
 
 
-def isolation_for(backend) -> Isolation:
-    """What isolation a given sandbox backend can actually provide.
+def isolation_for(backend, *, applied: bool = False) -> Isolation:
+    """What isolation is ACTUALLY IN FORCE for a subject served through this backend.
 
-    ANSWERED FROM THE BACKEND, not from configuration. The local backend genuinely cannot isolate
-    -- it is this process's machine, with this process's user -- and letting a config file claim
-    otherwise would produce a task whose provenance records a defence that was never in force.
+    `applied` is the whole of the answer, and it must be passed by whatever started the subject --
+    it means "I wrapped the command with `restricted_argv` and I suspend the untimed side". A
+    backend NAME is not evidence of any of that.
+
+    THIS FUNCTION WAS WRONG IN EXACTLY THE WAY IT WARNS AGAINST. It used to return enforced=True
+    for any backend called `docker` or `remote`, on the reasoning that a container is where
+    isolation happens. But nothing wrapped anything: `restricted_argv` existed and was called from
+    nowhere, nothing ever sent SIGSTOP, and the subject was started as the same user with no
+    process cap. E6 then reported HOLDS -- "no forbidden import or call, and timing runs isolated"
+    -- for a defence that had never once been applied. A check that certifies an absent measure is
+    worse than no check, because it is indistinguishable from a real one in the provenance.
+
+    So the name buys nothing. A container makes the defence POSSIBLE; only applying it makes the
+    defence real, and only the code that applied it can say so.
     """
-    name = getattr(backend, "name", "")
-    if name in ("docker", "remote"):
+    name = getattr(backend, "name", "") or "none"
+    if applied and name in ("docker", "remote"):
         return Isolation(enforced=True, accounts=True, process_cap=PROCESS_CAP,
                          suspends_idle_side=True,
-                         reason="each side runs in its own container with a process cap, and the "
-                                "untimed side is stopped while the other is measured")
+                         reason="each side runs in its own container under an unprivileged account "
+                                "with a process cap, and the untimed side is stopped while the "
+                                "other is measured")
+    if applied:
+        # Wrapped, but on a backend that shares this machine. The account and the cap are real; the
+        # separation is not, because both sides still see the same kernel and the same filesystem.
+        return Isolation(enforced=False, accounts=True, process_cap=PROCESS_CAP,
+                         reason="the command was restricted, but %r shares this machine with the "
+                                "factory, so the two sides are not genuinely separated" % name)
+    if name in ("docker", "remote"):
+        return Isolation(enforced=False,
+                         reason="%r could isolate the two sides, but nothing wrapped the subject "
+                                "with an unprivileged account or a process cap, so no isolation is "
+                                "actually in force" % name)
     return Isolation(enforced=False,
                      reason="%r shares this machine and this user with the factory, so work handed "
-                            "to another process would be invisible to the clock" % (name or "none"))
+                            "to another process would be invisible to the clock" % name)
 
 
 def restricted_argv(argv: list, *, user: str = "nobody", cap: int = PROCESS_CAP) -> list:

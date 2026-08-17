@@ -30,7 +30,7 @@ from urllib.parse import quote
 from ..core import credentials
 from ..core.scale import Candidate
 from . import filters
-from .http import Http, all_or_nothing
+from .http import Http, all_or_nothing, envelope
 
 SEARCH = "https://api.github.com/search/repositories?q=%s&sort=%s&order=asc&page=%d&per_page=%d"
 COMMIT = "https://api.github.com/repos/%s/commits/%s"
@@ -80,7 +80,9 @@ class GitHub:
         # the same thing next month, which is what the sourcing rule asks of an identity.
         self._pin = pin
         self._total: int | None = None
-        self._exhausted: set = set()
+        # Where each page number begins, as (segment, offset). Recorded rather than computed --
+        # see `page` for the failure the computation had.
+        self._positions: dict = {0: (0, 0)}
 
     def total(self) -> int | None:
         """What GitHub says matched the unsegmented query.
@@ -103,25 +105,63 @@ class GitHub:
         The segment arithmetic is here rather than in the caller because `walk()` asks for page 0,
         1, 2 and must not have to know that page 10 is the last of segment one. A segment that runs
         out early is skipped over, so a caller sees one continuous sequence.
+
+        WHY A RECORDED POSITION AND NOT `divmod`. The obvious arithmetic -- page N lives in segment
+        `N // pages_per_segment` -- is wrong the moment a segment runs out early, and it fails in a
+        way that looks like it is working. A short segment is retired, every later page number still
+        maps into it, and each one is bumped forward to the NEXT segment at offset zero: page 3,
+        page 4 and page 20 all return page 1 of segment 1 again, for ever. `walk()`'s deduplication
+        hides the repetition from the output but not the cost -- a hundred candidates were measured
+        costing fifty-six search requests instead of six, against an index that allows ten a minute
+        -- and the material behind the repeated page is never reached at all, while the coverage
+        record claims it was walked.
+
+        So where each page ended is REMEMBERED. Sequential walking is then exact, re-asking for a
+        page returns the same page, and the index still satisfies the rule it exists to serve:
+        asking twice is a question with a stable answer.
         """
         size = min(max(1, size), MAX_PER_PAGE)
-        per_segment = max(1, RESULT_CEILING // size)
+        index, offset = self._position_of(number, size)
 
-        index, offset = divmod(number, per_segment)
         while index < len(self._segments):
-            if index in self._exhausted:
-                index, offset = index + 1, 0
-                continue
             rows = self._fetch(self._query_for(self._segments[index]), offset + 1, size)
             if rows:
+                self._positions[number + 1] = self._after(index, offset, len(rows), size)
                 return all_or_nothing(rows, lambda row: to_candidate(
                     row, scale=self._scale, commit=self._head_of(row)), index=self.name)
-            # An empty segment is not an exhausted index: there are more segments behind it. Marked
-            # so that later pages do not pay for it again, and the walk continues -- returning []
-            # here would tell `walk()` the whole of GitHub had run out.
-            self._exhausted.add(index)
+            # An empty segment is not an exhausted index: there are more segments behind it. The
+            # walk moves to the next one -- returning [] here would tell `walk()` that the whole of
+            # GitHub had run out after one star range.
             index, offset = index + 1, 0
+
+        self._positions[number + 1] = (index, 0)
         return []
+
+    def _position_of(self, number: int, size: int) -> tuple:
+        """Where page `number` starts. -> (segment index, offset within it).
+
+        Recorded when the previous page was served. A caller that skips ahead to a page nobody has
+        walked to gets the furthest position known, which is honest: this index cannot address an
+        arbitrary page without walking to it, and pretending otherwise is what the arithmetic above
+        was doing.
+        """
+        if number in self._positions:
+            return self._positions[number]
+        if not self._positions:
+            return (0, 0)
+        furthest = max(self._positions)
+        return self._positions[furthest] if number >= furthest else (0, 0)
+
+    def _after(self, index: int, offset: int, got: int, size: int) -> tuple:
+        """Where the page after this one begins.
+
+        A short page means the segment is spent -- GitHub gave everything it had -- so the next page
+        starts the following segment. A full page advances within the segment until the thousandth
+        result, which is the wall this whole class exists to work around.
+        """
+        if got < size or (offset + 1) * size >= RESULT_CEILING:
+            return (index + 1, 0)
+        return (index, offset + 1)
 
     def _head_of(self, row: dict) -> str:
         """The commit a repository's default branch currently points at, or "".
@@ -170,7 +210,11 @@ class GitHub:
             accept="application/vnd.github+json")
         if counts_the_whole_index:
             self._total = int(payload.get("total_count") or 0)
-        return list(payload.get("items") or ())
+        # `items` insisted upon rather than defaulted. An empty `items` is how a segment says it is
+        # spent, and the loop above relies on that -- so a body with NO `items` at all must not be
+        # allowed to look the same, or an error envelope would silently retire a star segment and
+        # the walk would report material it never reached as walked.
+        return envelope(payload, "items", index=self.name)
 
 
 def to_candidate(row: dict, *, scale: str = "repo", source: str = "github",

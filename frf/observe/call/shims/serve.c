@@ -98,6 +98,15 @@ static void buf_reserve(Buf *b, size_t extra)
         return;
     }
     b->data = grown;
+    /* Terminate immediately rather than leaving that to buf_append.
+     *
+     * A buffer that is reserved and never appended to is a real case: an empty JSON string reserves
+     * nought bytes and returns the buffer as it stands. Without this line that buffer is
+     * uninitialised heap -- or, after a realloc, whatever was there before -- and every reader
+     * walks it until it happens on a zero byte. It does not crash; it silently substitutes garbage
+     * for "", so a probe containing an empty string freezes an expectation against data that was
+     * never sent, and the value differs from one run to the next. */
+    b->data[b->len] = '\0';
 }
 
 static void buf_append(Buf *b, const char *text, size_t len)

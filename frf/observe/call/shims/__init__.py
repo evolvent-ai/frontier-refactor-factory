@@ -69,8 +69,14 @@ class Shim:
 # a missing symbol rather than as a statement about file naming.
 TEMPLATES = {
     "python": Shim("serve.py", "subject.py", ("python3", "{entry}"), tool="python3"),
-    "javascript": Shim("serve.js", "subject.js", ("node", "{entry}"), tool="node"),
-    "typescript": Shim("serve.js", "subject.js", ("node", "{entry}"), tool="node"),
+    "javascript": Shim("serve.js", "subject.js", ("node", "{entry}", "subject.js"), tool="node"),
+    # TypeScript runs through the same shim on Node's own type stripping (22.6+). No compiler and
+    # no third-party loader: the alternative was to copy a .ts subject to `subject.js` and hand it
+    # to a runtime that cannot read it, which failed at the first type annotation and made the
+    # typescript row a claim rather than a capability.
+    "typescript": Shim("serve.js", "subject.ts",
+                       ("node", "--experimental-strip-types", "{entry}", "subject.ts"),
+                       tool="node"),
     "ruby": Shim("serve.rb", "subject.rb", ("ruby", "{entry}"), tool="ruby"),
     "go": Shim("serve.go", "subject.go", ("{binary}",), tool="go",
                build=(("go", "build", "-o", "{binary}", "{entry}", "{subject}"),)),
@@ -146,7 +152,14 @@ def materialise(workdir: str, language: str, subject_path: str) -> tuple:
     """
     shim = load(language)
     os.makedirs(workdir, exist_ok=True)
-    shutil.copyfile(subject_path, os.path.join(workdir, shim.subject))
+    destination = os.path.join(workdir, shim.subject)
+    # A source that is ALREADY where it needs to be is not an error. It happens whenever the file
+    # is conventionally named -- `subject.py` served as python -- and most of all in the mutant
+    # path, which writes a perturbed copy into a scratch directory under exactly this name and then
+    # asks to have it materialised. `copyfile` raises SameFileError for that, which subclasses
+    # OSError and so escapes the build-failure handling below it, taking E3 down with it.
+    if not (os.path.exists(destination) and os.path.samefile(subject_path, destination)):
+        shutil.copyfile(subject_path, destination)
     with open(os.path.join(workdir, shim.template), "w", encoding="utf-8") as handle:
         handle.write(source(shim))
     return shim.commands(workdir)

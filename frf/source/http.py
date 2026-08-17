@@ -251,3 +251,36 @@ def all_or_nothing(rows: list, hydrate, *, index: str) -> list:
             "that is not exhaustion. Returning it would tell walk() the index ran out. First: %s"
             % (index, len(rows), lost[0] if lost else "unknown"))
     return kept
+
+
+def envelope(payload, key: str, *, index: str, url: str = ""):
+    """One list out of a registry's JSON envelope, insisting the envelope had the shape it promised.
+
+    THE SECOND HALF OF THIS MODULE'S CONTRACT, and the half that is easy to lose. `Http` guarantees
+    that a transport failure raises, but it cannot guarantee the BODY means what the client assumes:
+    a registry answering 200 with a maintenance page, an error envelope, or a renamed field is a
+    successful request carrying nothing the client can read. Written the obvious way --
+    `payload.get("objects") or ()` -- every one of those becomes an empty page, and an empty page is
+    how an index says "exhausted". The batch then ends early and writes a coverage record saying the
+    supply ran out, with nothing anywhere having failed.
+
+    So a MISSING key raises and an EMPTY list is returned as it stands. The difference is the whole
+    point: a registry that says "no more results" is answering the question, and a registry that
+    does not answer in the shape it documents is not.
+    """
+    if not isinstance(payload, dict):
+        raise SourceError("%s answered with %s rather than an object%s; the page cannot be read, "
+                          "and returning it empty would report the index as exhausted"
+                          % (index, type(payload).__name__, " (%s)" % url if url else ""))
+    if key not in payload:
+        raise SourceError(
+            "%s answered without a %r field%s. Returning an empty page here would tell walk() the "
+            "index had run out, so this is raised instead. Keys present: %s"
+            % (index, key, " (%s)" % url if url else "", ", ".join(sorted(payload)[:8]) or "none"))
+    rows = payload[key]
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise SourceError("%s answered with a %r field that is not a list but a %s"
+                          % (index, key, type(rows).__name__))
+    return rows
