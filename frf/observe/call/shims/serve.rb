@@ -1,6 +1,7 @@
 # Serve a Ruby subject over the wire. Written into the task; not required by the factory.
 #
-# The subject supplies `entry(args)` in subject.rb, raising to refuse. Everything else is this file.
+# The subject supplies `entry(...)` in subject.rb, raising to refuse; its parameters are the
+# wire's `args`, splatted. Everything else is this file.
 
 require 'json'
 
@@ -36,7 +37,7 @@ def handle(request)
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     repeats.times do
       begin
-        entry(args)
+        entry(*args)
       rescue StandardError => e
         failure = e
         break
@@ -48,7 +49,9 @@ def handle(request)
   end
 
   begin
-    value = entry(args)
+    # Splatted: `args` is the argument LIST, so `entry(a, b)` receives two arguments. See
+    # the contract in protocol.py.
+    value = entry(*args)
   rescue StandardError => e
     # A REFUSAL IS AN ANSWER. How the subject rejects bad input is behaviour a reimplementation has
     # to reproduce, so it is reported rather than raised, and the loop carries on reading.

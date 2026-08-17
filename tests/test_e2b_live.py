@@ -161,8 +161,7 @@ def test_a_subject_can_be_served_over_the_wire_inside_the_sandbox(remote):
 
     local = tempfile.mkdtemp(prefix="frf-e2b-serve-")
     with open(os.path.join(local, "subject.py"), "w") as handle:
-        handle.write("def entry(args):\n"
-                     "    values = args[0]\n"
+        handle.write("def entry(values):\n"
                      "    if not values:\n"
                      "        raise ValueError('empty')\n"
                      "    return sum(values)\n")

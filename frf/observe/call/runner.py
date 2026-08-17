@@ -18,9 +18,18 @@ from dataclasses import dataclass
 from .observation import Observation
 from .protocol import Request, Response
 
-# How long one call may take before the subject is presumed hung. Generous, because a probe may
-# legitimately be heavy; bounded, because a candidate that deadlocks must not stall the batch.
-DEFAULT_CALL_TIMEOUT = 120.0
+# How long one call may take before the subject is presumed hung.
+#
+# WHY THIS IS SECONDS AND NOT MINUTES. A freeze runs every probe FIVE times, so a corpus of sixty
+# costs three hundred calls, and the timeout is paid once per call in the worst case. At two minutes
+# a single unresponsive candidate could hold a batch for ten hours; at ten seconds it costs fifty
+# minutes at the very worst and almost always far less, because a subject that answers at all
+# answers in milliseconds.
+#
+# The cost of being wrong in the other direction is small and visible: a genuinely heavy probe is
+# refused as material this factory cannot time, which is an honest verdict and appears in the
+# refusal log rather than as a batch that stopped.
+DEFAULT_CALL_TIMEOUT = 10.0
 
 
 class SubjectFailed(RuntimeError):
@@ -78,7 +87,7 @@ class Subject:
         except (BrokenPipeError, OSError) as exc:
             raise SubjectFailed("the subject closed its input: %s" % exc) from exc
 
-        line = self._proc.stdout.readline()
+        line = self._read_line()
         if line == "":
             # EOF: the subject exited. Its stderr is the only evidence of why, and a solver reading
             # a failure report needs it -- "the candidate crashed" without the message is a bug
@@ -92,6 +101,47 @@ class Subject:
             raise SubjectFailed("the subject exited without answering. stderr: %s"
                                 % (stderr.strip() or "(empty)"))
         return Response.decode(line)
+
+    def _read_line(self) -> str:
+        """One reply line, or a failure if the subject takes too long over it.
+
+        THE TIMEOUT WAS DECLARED AND NEVER APPLIED. `readline()` blocks for as long as the far side
+        cares to think, so a subject that does not return on some input stops the whole batch --
+        with no output, no error, and nothing to say which candidate did it. Found on a real run:
+        a naive `fibonacci_recursion` mined from PyPI is exponential in its argument, and at the
+        sizes the schema draws it simply never came back.
+
+        A subject that is too slow to answer is the MATERIAL's fault and an ordinary outcome, so it
+        arrives as `SubjectFailed` -- which the freeze stage already turns into an honest refusal.
+
+        `select` rather than a thread or a signal: the pipe is the only thing being waited on, and
+        the alternatives either need a reader per subject or interfere with whatever the caller has
+        installed.
+        """
+        import select
+
+        remaining = self.timeout
+        chunks: list[str] = []
+        while True:
+            started = time.perf_counter()
+            ready, _, _ = select.select([self._proc.stdout], [], [], max(0.0, remaining))
+            if not ready:
+                self._proc.kill()
+                raise SubjectFailed(
+                    "the subject did not answer within %.0fs, so it was stopped. A subject that "
+                    "cannot answer a probe in that time cannot be graded on it." % self.timeout)
+            chunk = self._proc.stdout.readline()
+            if chunk == "":
+                return "".join(chunks)
+            chunks.append(chunk)
+            if chunk.endswith("\n"):
+                return "".join(chunks)
+            # A partial line: the far side flushed mid-reply. Keep reading, but against the same
+            # deadline, so a subject dribbling one byte at a time cannot hold the batch either.
+            remaining -= time.perf_counter() - started
+            if remaining <= 0:
+                self._proc.kill()
+                raise SubjectFailed("the subject stopped part-way through a reply line")
 
     def call(self, name: str, args: list) -> Observation:
         """One call -> what it produced. A refusal is an outcome, not an exception."""

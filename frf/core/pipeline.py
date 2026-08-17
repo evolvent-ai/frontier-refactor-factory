@@ -118,12 +118,34 @@ class Hooks:
 
 def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
               log: Callable[[str], None] = lambda _m: None) -> Refused | Emitted:
-    """One candidate -> a task, or the reason there is none."""
+    """One candidate -> a task, or the reason there is none.
+
+    ONE CANDIDATE MAY NEVER END A BATCH, and that is what the second clause below is for. In a real
+    run most candidates fail: a mined function imports its own package and will not load standing
+    alone, a build times out, a subject dies on its third probe. Every one of those is an ordinary
+    fact about the material, and letting it propagate turns a twenty-candidate run into a stack
+    trace after the fourth -- which reports no yield at all, and looks like the factory is broken
+    when it is working exactly as intended.
+
+    THE ATTRIBUTION STILL HAS TO BE HONEST, so the two are not collapsed. A refusal a stage raised
+    deliberately carries its own verdict. Anything else is UNCLASSIFIED and counted as OURS: we did
+    not anticipate it, and a batch dominated by these has measured our bugs rather than the supply.
+    Calling an unknown failure "material" would be the comfortable lie -- the yield would look fine
+    and the denominator would be quietly wrong.
+    """
     try:
         return _run(scale, candidate, hooks, log)
     except Stage as refusal:
         log("refused at %s: %s (%s)" % (refusal.stage, refusal.reason, refusal.fault.value))
         return Refused(refusal.stage, refusal.reason, refusal.fault, refusal.detail)
+    except KeyboardInterrupt:
+        # An operator stopping a batch is not a candidate failing. Re-raised so that Ctrl-C is not
+        # silently recorded as twenty unsuitable packages.
+        raise
+    except BaseException as unexpected:                        # noqa: BLE001 -- see the docstring
+        detail = "%s: %s" % (type(unexpected).__name__, unexpected)
+        log("refused at unclassified: %s (factory)" % detail.splitlines()[0][:160])
+        return Refused("unclassified", type(unexpected).__name__, Fault.FACTORY, detail[:2000])
 
 
 def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], None]) -> Emitted:
@@ -204,7 +226,12 @@ def _specify(scale: Scale, candidate: Candidate) -> Spec:
 def _check_corpus(report) -> None:
     """The two floors, and the discard rate that decides whether the subject is usable at all."""
     if not report.usable:
+        # A seam may say WHY in its own words. Without that, every refusal here reads as "the
+        # reference did not reproduce its probes" -- a specific diagnosis, and the wrong one for a
+        # subject that never started, which is the commonest outcome on real mined material.
+        given = getattr(report, "unusable_reason", "")
         raise Stage("freeze", "will-not-repeat-itself", Fault.MATERIAL,
+                    given or
                     "%.0f%% of probes were discarded because the reference did not reproduce them; "
                     "what survives was selected by luck rather than by being representative"
                     % (100 * report.discard_rate))

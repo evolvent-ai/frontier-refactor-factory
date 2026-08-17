@@ -41,22 +41,19 @@ from frf.observe.call.runner import Subject                              # noqa:
 # arrive as an answer in every one of these languages without killing the process.
 SUBJECTS = {
     "python": ("subject.py", '''\
-def entry(args):
-    values = args[0]
+def entry(values):
     if not values:
         raise ValueError("empty")
     return sum(values)
 '''),
     "javascript": ("subject.js", '''\
-module.exports.entry = (args) => {
-  const values = args[0];
+module.exports.entry = (values) => {
   if (values.length === 0) { throw new Error('empty'); }
   return values.reduce((a, b) => a + b, 0);
 };
 '''),
     "ruby": ("subject.rb", '''\
-def entry(args)
-  values = args[0]
+def entry(values)
   raise ArgumentError, 'empty' if values.empty?
   values.sum
 end

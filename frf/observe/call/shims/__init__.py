@@ -51,10 +51,18 @@ class Shim:
     build: tuple = ()              # argv lists run once, in the workspace, before serving
     tool: str = ""                 # the executable that must exist for any of this to work
 
-    def commands(self, workdir: str) -> tuple:
-        """-> (build argv lists, run argv), resolved against a real directory."""
+    def commands(self, workdir: str, symbol: str = "entry") -> tuple:
+        """-> (build argv lists, run argv), resolved against a real directory.
+
+        `symbol` is WHICH function to serve, and it travels to the shim as an argument rather than
+        being written into it. A shim that could only serve a function literally called `entry`
+        could only serve a subject somebody had written for the occasion, and the material this
+        factory sources is real code where the function is called `camel_to_snake`.
+        """
         slots = {"entry": os.path.join(workdir, self.template),
                  "subject": os.path.join(workdir, self.subject),
+                 "module": os.path.splitext(self.subject)[0],
+                 "symbol": symbol,
                  "binary": os.path.join(workdir, "serve.bin"),
                  "workdir": workdir}
         build = tuple([part.format(**slots) for part in argv] for argv in self.build)
@@ -68,7 +76,8 @@ class Shim:
 # copied to `subject.py` compiles into nothing, and the failure arrives later as a link error about
 # a missing symbol rather than as a statement about file naming.
 TEMPLATES = {
-    "python": Shim("serve.py", "subject.py", ("python3", "{entry}"), tool="python3"),
+    "python": Shim("serve.py", "subject.py", ("python3", "{entry}", "{module}", "{symbol}"),
+                   tool="python3"),
     "javascript": Shim("serve.js", "subject.js", ("node", "{entry}", "subject.js"), tool="node"),
     # TypeScript runs through the same shim on Node's own type stripping (22.6+). No compiler and
     # no third-party loader: the alternative was to copy a .ts subject to `subject.js` and hand it
@@ -143,7 +152,8 @@ def source(shim: Shim) -> str:
     return open(os.path.join(_HERE, shim.template), encoding="utf-8").read()
 
 
-def materialise(workdir: str, language: str, subject_path: str) -> tuple:
+def materialise(workdir: str, language: str, subject_path: str,
+                symbol: str = "entry") -> tuple:
     """Put a subject and its shim in one directory. -> (build argv lists, run argv).
 
     One implementation because there are two callers -- serving a subject and measuring its
@@ -162,4 +172,4 @@ def materialise(workdir: str, language: str, subject_path: str) -> tuple:
         shutil.copyfile(subject_path, destination)
     with open(os.path.join(workdir, shim.template), "w", encoding="utf-8") as handle:
         handle.write(source(shim))
-    return shim.commands(workdir)
+    return shim.commands(workdir, symbol)

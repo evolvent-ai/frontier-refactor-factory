@@ -27,8 +27,7 @@ from frf.observe.call.runner import Subject                            # noqa: E
 # A subject with a branch and a refusal, so that a corpus can be inadequate in a visible way and a
 # mutation has something to change.
 _SUBJECT = """
-def entry(args):
-    values, threshold = args
+def entry(values, threshold):
     if threshold < 0:
         raise ValueError("threshold must not be negative")
     kept = [v for v in values if v >= threshold]
@@ -221,7 +220,7 @@ def test_a_subject_that_will_not_repeat_itself_is_refused_as_material():
         def flaky(spec, *, mutated: bool = False):
             observer._write_subject(
                 "import random\n"
-                "def entry(args):\n"
+                "def entry(values, threshold):\n"
                 "    return random.random()\n")
             return Subject(observer._argv, cwd=observer.workspace)
 

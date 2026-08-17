@@ -44,6 +44,17 @@ ATTEMPTS = 4
 # through it holding a sandbox open.
 MAX_BACKOFF = 60.0
 
+# The largest body this client will read, in bytes. Not a tuning knob: `read()` with no argument
+# will accept as much as a server cares to send, and a socket timeout does not bound it -- a host
+# dripping one byte every few seconds resets the timeout on every read and holds the batch for ever
+# while looking, from the outside, like a slow download. Measured on a real run: sourcing stalled
+# with no output and no error, and there was nothing in the log to say which host had it.
+MAX_BODY = 64 * 1024 * 1024
+
+# The longest one `get` may take in total, including every retry and backoff. The per-socket timeout
+# bounds one operation; this bounds the call, which is what a caller actually waits on.
+MAX_ELAPSED = 180.0
+
 
 class SourceError(RuntimeError):
     """Something went wrong reaching an index. ALWAYS raised, never swallowed into an empty page.
@@ -111,6 +122,8 @@ class Http:
     delay: float = POLITE_DELAY
     timeout: float = 30.0
     attempts: int = ATTEMPTS
+    max_body: int = MAX_BODY
+    max_elapsed: float = MAX_ELAPSED
     token: str = ""                       # bearer credential, when an index has one
     _last_call: float = field(default=0.0, init=False, repr=False)
     calls: int = field(default=0, init=False, repr=False)
@@ -125,13 +138,21 @@ class Http:
         request_headers.update(headers or {})
 
         last: Exception | None = None
+        deadline = time.monotonic() + self.max_elapsed
         for attempt in range(max(1, self.attempts)):
+            if time.monotonic() > deadline:
+                # Out of time rather than out of attempts. Reported distinctly because the two say
+                # different things to whoever reads the log: attempts exhausted means the host kept
+                # refusing, and this means it kept us waiting.
+                raise TransportError(
+                    "%s did not finish within %.0fs across %d attempt(s); giving up so that one "
+                    "unresponsive host cannot stall a batch" % (url, self.max_elapsed, attempt))
             self._wait()
             try:
                 self.calls += 1
                 request = urllib.request.Request(url, headers=request_headers)
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    return response.read()
+                    return _read_bounded(response, url, self.max_body)
             except urllib.error.HTTPError as error:
                 last = _translate(error, url)
                 # Only two statuses are worth trying again. A 404 or a 400 will be a 404 or a 400
@@ -169,6 +190,25 @@ class Http:
         if self._last_call and elapsed < self.delay:
             time.sleep(self.delay - elapsed)
         self._last_call = time.monotonic()
+
+
+def _read_bounded(response, url: str, limit: int) -> bytes:
+    """Read a body, refusing one that will not end.
+
+    In chunks with a running total rather than a bare `read()`. The bare call is bounded by nothing:
+    the socket timeout resets on every byte that arrives, so a host trickling data holds the caller
+    for ever and shows up as a batch that simply stopped making progress.
+    """
+    chunks, total = [], 0
+    while True:
+        chunk = response.read(262144)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > limit:
+            raise TransportError("%s sent more than %d bytes; refusing to keep reading"
+                                 % (url, limit))
+        chunks.append(chunk)
 
 
 def _translate(error: urllib.error.HTTPError, url: str) -> SourceError:

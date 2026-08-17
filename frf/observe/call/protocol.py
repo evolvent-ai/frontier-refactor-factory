@@ -7,6 +7,27 @@ the smallest thing that can express "call this with these arguments and tell me 
     <-  {"id": 3, "ok": true,  "value": 2.8284271247461903}
     <-  {"id": 3, "ok": false, "error": "expected two points"}
 
+`args` IS THE ARGUMENT LIST, NOT ONE PACKED ARGUMENT. In the example above `distance` is called
+with TWO arguments, each a point -- not with one argument that happens to be a list of two points.
+Every shim spreads it into the subject's own parameters, which is what lets a real function be
+served unedited: material sourced from a registry is called `camel_to_snake(s)` and takes a string,
+and a convention that handed it `["fooBar"]` would require editing somebody else's code before
+grading it -- and then the task would grade the edit.
+
+The distinction is easy to get wrong in a way that stays green: a subject written to unpack `args`
+itself works perfectly against a shim that packs, so the two halves can disagree for as long as
+nobody serves a function they did not also write. Nine shims agreeing is not evidence; the
+`test_any_language` subjects are written to this contract in every language, which is.
+
+WHERE THE LANGUAGE WILL NOT ALLOW IT. Python, JavaScript, TypeScript and Ruby spread `args` into the
+subject's own parameters, so a function found in a real package is served exactly as its author
+wrote it. Go, Rust, C, C++ and Java have no way to apply a runtime-length argument list to a fixed
+signature without reflection this deliberately avoids, so their subjects receive the whole list and
+index it. That is a limit of those languages rather than a second convention, and it costs nothing
+where it applies: a subject in one of them is written for the task in any case, because the module
+scale sources functions from registries that publish readable source, and those are the interpreted
+ones.
+
 WHY A WIRE AND NOT AN IMPORT. The candidate may be written in any language. If the factory imported
 it, the factory would have to know how to import that language, and "supports any language" would
 quietly become "supports the two we wrote loaders for". A subprocess speaking JSON over a pipe is

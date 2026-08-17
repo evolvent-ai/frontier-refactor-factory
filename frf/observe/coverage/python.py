@@ -45,14 +45,18 @@ source = open(target).read()
 compiled = compile(source, target, "exec")
 
 probes = json.load(open(probes_path))
+symbol = sys.argv[4] if len(sys.argv) > 4 else "entry"
 def drive():
     tracer.runctx(compiled, namespace, namespace)
-    entry = namespace.get("entry")
+    # THE SAME SYMBOL AND THE SAME CALLING CONVENTION AS THE SHIM. Measuring coverage by calling
+    # the subject differently from the way it is graded would report the reach of a program nobody
+    # runs -- and the disagreement is silent, because both halves work perfectly on their own.
+    entry = namespace.get(symbol)
     if entry is None:
         return
     for args in probes:
         try:
-            tracer.runfunc(entry, args)
+            tracer.runfunc(entry, *args)
         except Exception:
             # A refusal is a path through the subject like any other, and its lines count.
             pass
@@ -131,7 +135,8 @@ class PythonTrace:
             with open(probes_path, "w") as handle:
                 json.dump(list(self._as_args(probes)), handle)
 
-            done = subprocess.run([sys.executable, harness, target, probes_path, out_path],
+            done = subprocess.run([sys.executable, harness, target, probes_path, out_path,
+                                   self._symbol_of(spec)],
                                   capture_output=True, text=True, timeout=600)
             if done.returncode != 0 or not os.path.exists(out_path):
                 return Reach(backend=self.name)
@@ -155,6 +160,11 @@ class PythonTrace:
         ranked = tuple("%s (%d line(s) unreached)" % (name, missed)
                        for missed, name in sorted(dark, reverse=True)[:DARK_LIMIT])
         return Reach(reached=reached, total=total, dark=ranked, backend=self.name)
+
+    @staticmethod
+    def _symbol_of(spec) -> str:
+        """Which function to drive. Read from the spec, exactly as the shim reads it."""
+        return getattr(spec, "entry", "") or "entry"
 
     @staticmethod
     def _subject_path(spec) -> str:

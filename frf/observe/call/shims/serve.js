@@ -1,7 +1,8 @@
 /**
  * Serve a JavaScript subject over the wire. Written into the task; not required by the factory.
  *
- * The subject supplies `entry(args) -> value` in subject.js or subject.ts, throwing to refuse. It may also return
+ * The subject supplies `entry(...) -> value` in subject.js or subject.ts, throwing to refuse.
+ * Its parameters are the wire's `args`, spread. It may also return
  * a promise: asynchronous code is ordinary in this language, and a shim that did not await one
  * would freeze every answer as the JSON for a pending promise rather than as the value.
  */
@@ -42,7 +43,10 @@ function isThenable(value) {
  * this pipeline produces that turn is a measurable part of what op="time" reports.
  */
 async function callEntry(args) {
-  const value = entry(args);
+  // Spread: `args` is the argument LIST, so a subject declared `entry(a, b)` is called with
+  // two arguments. See the contract in protocol.py -- packing instead would mean editing
+  // real material to serve it, and then grading the edit.
+  const value = entry(...args);
   return isThenable(value) ? await value : value;
 }
 

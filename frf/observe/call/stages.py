@@ -28,6 +28,7 @@ from typing import Callable
 from ...core import adequacy, evidence, harbor, statement
 from ...core.scale import Spec
 from . import observation as obs
+from .runner import SubjectFailed
 
 
 @dataclass
@@ -43,6 +44,10 @@ class Corpus:
     inputs: dict = field(default_factory=dict)
     discard_rate: float = 0.0
     usable: bool = True
+    # Why the corpus is unusable, when the reason is not the discard rate. Without it every refusal
+    # at this stage reads "the reference did not reproduce its probes", which is a specific and
+    # wrong diagnosis for a subject that never started at all.
+    unusable_reason: str = ""
     adequacy_note: str = ""
     adequacy: dict = field(default_factory=dict)
     timed: list = field(default_factory=list)
@@ -69,10 +74,24 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
     inputs = {"probe-%04d" % i: args for i, args in enumerate(source.draw(source.count))}
     observed: dict = {probe_id: [] for probe_id in inputs}
 
-    for _ in range(runs):
-        with observer.subject(spec) as subject:
-            for probe_id, args in inputs.items():
-                observed[probe_id].append(subject.call("run", args))
+    try:
+        for _ in range(runs):
+            with observer.subject(spec) as subject:
+                for probe_id, args in inputs.items():
+                    observed[probe_id].append(subject.call("run", args))
+    except SubjectFailed as failure:
+        # A SUBJECT THAT WILL NOT SPEAK IS THE MATERIAL'S FAULT, and reporting it through `usable`
+        # is the whole reason this is caught. The commonest cause by far is a mined function whose
+        # file imports its own package -- `from .core import x` resolves inside the distribution and
+        # not beside a shim -- which is an ordinary fact about real source rather than a defect in
+        # this factory. Left uncaught it arrives at `build_one` as an unclassified failure counted
+        # as OURS, and a batch of twenty then computes a yield against a denominator of our own bugs.
+        #
+        # Reported as an unusable corpus rather than as a new exception type because that is the
+        # channel the pipeline already reads. A second mechanism would mean `core/` learning what a
+        # subject is, which is the boundary this seam exists to keep.
+        return Corpus(inputs=inputs, discard_rate=1.0, usable=False,
+                      unusable_reason="the subject never answered: %s" % str(failure)[:600])
 
     report = obs.freeze_corpus(observed)
     timed = _pick_timed(report.expectations)

@@ -18,8 +18,7 @@ _SUBJECT = '''
 def never_called(x):
     return x * 999
 
-def entry(args):
-    n = args[0]
+def entry(n):
     if n < 0:
         raise ValueError("negative")
     if n > 100:
@@ -109,16 +108,14 @@ def entry(args):
 # which is exactly the knowledge this design claims not to need.
 SUBJECTS = {
     "python": ("subject.py", '''\
-def entry(args):
-    values = args[0]
+def entry(values):
     if len(values) > 0:
         return sum(values)
     else:
         return -1
 '''),
     "javascript": ("subject.js", '''\
-module.exports.entry = (a) => {
-  const values = a[0];
+module.exports.entry = (values) => {
   if (values.length > 0) {
     return values.reduce((x, y) => x + y, 0);
   } else {
@@ -127,8 +124,7 @@ module.exports.entry = (a) => {
 };
 '''),
     "ruby": ("subject.rb", '''\
-def entry(args)
-  values = args[0]
+def entry(values)
   if values.length > 0
     values.sum
   else
@@ -254,6 +250,10 @@ def test_this_language_responds_to_how_much_the_corpus_reaches(language):
     with tempfile.TemporaryDirectory() as work:
         spec = _subject_for(work, language)
         backend = coverage.backend_for(language)
+        # One probe per line, each an ARGUMENT LIST: `[[1, 2, 3]]` is a single argument that is a
+        # list of three. The interpreted shims spread it into the subject's parameters -- see the
+        # contract in protocol.py -- and the compiled ones index it, which is why the same probes
+        # drive all nine.
         narrow = backend.measure(spec, [[[1, 2, 3]]])
         wide = backend.measure(spec, [[[1, 2, 3]], [[]]])
 

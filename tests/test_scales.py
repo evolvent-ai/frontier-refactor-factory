@@ -47,7 +47,7 @@ def test_a_module_needs_enough_detail_to_call_the_subject():
 def test_a_module_samples_its_probes_from_a_schema():
     with tempfile.TemporaryDirectory() as work:
         subject = os.path.join(work, "s.py")
-        open(subject, "w").write("def entry(args):\n    return args[0]\n")
+        open(subject, "w").write("def entry(values):\n    return values\n")
 
         module = Module(workspace=work)
         spec = module.specify(_candidate("module", source_path=subject, symbol="scale_values",
@@ -63,7 +63,7 @@ def test_a_kernel_is_a_module_with_a_numeric_profile():
     """The design claim, checked rather than asserted: a kernel adds three things and no pipeline."""
     with tempfile.TemporaryDirectory() as work:
         subject = os.path.join(work, "s.py")
-        open(subject, "w").write("def entry(args):\n    return sum(args[0])\n")
+        open(subject, "w").write("def entry(values):\n    return sum(values)\n")
 
         kernel = Kernel(workspace=work)
         spec = kernel.specify(_candidate("kernel", source_path=subject, symbol="dot",
@@ -84,7 +84,7 @@ def test_a_kernel_refuses_material_that_is_not_numeric():
     per-scale number afterwards a measurement of a mixture."""
     with tempfile.TemporaryDirectory() as work:
         subject = os.path.join(work, "s.py")
-        open(subject, "w").write("def entry(args):\n    return args[0]\n")
+        open(subject, "w").write("def entry(values):\n    return values\n")
 
         try:
             Kernel(workspace=work).specify(
@@ -192,15 +192,14 @@ def test_a_batch_serves_each_candidate_its_own_subject():
                                                      "size": "n"}]},
                               "description": "d"})
 
-        squares = ("def entry(args):\n"
-                   "    values = args[0]\n"
+        squares = ("def f%d(values):\n"
                    "    if not values:\n"
                    "        raise ValueError('empty')\n"
                    "    return sum(x * x for x in values)\n")
         cubes = squares.replace("x * x", "x * x * x")
 
         scale = Module(workspace=os.path.join(work, "ws"))
-        first, second = candidate(1, squares), candidate(2, cubes)
+        first, second = candidate(1, squares % 1), candidate(2, cubes % 2)
 
         # Each candidate must be observed through a subject built from ITS OWN source. Asked
         # directly, because the whole failure is that these come out the same.

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from .crates import Crates
 from .filters import Facts, accepts, keep, refusals
+from .functions import PythonFunctions
 from .github import GitHub
 from .golang import GoModules
 from .http import (Http, HttpError, NotFound, RateLimited, SourceError, TransportError,
@@ -56,6 +57,10 @@ INDEXES = {
     "maven": MavenCentral,
     "rubygems": RubyGems,
     "github": GitHub,
+    # Not a registry: it widens any package index into the FUNCTIONS inside each package, which
+    # is what the module scale sources from. See its module docstring for why that is sourcing
+    # rather than specifying.
+    "python-functions": PythonFunctions,
 }
 
 
@@ -78,6 +83,6 @@ def index_for(name: str):
 
 
 __all__ = ["Crates", "Facts", "GitHub", "GoModules", "Http", "HttpError", "INDEXES",
-           "MavenCentral", "NotFound", "Npm", "PyPI", "RateLimited", "RubyGems", "SourceError",
+           "MavenCentral", "NotFound", "Npm", "PyPI", "PythonFunctions", "RateLimited", "RubyGems", "SourceError",
            "TransportError", "Unauthorized", "accepts", "available", "index_for", "keep",
            "refusals"]

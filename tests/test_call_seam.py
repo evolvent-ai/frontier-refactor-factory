@@ -227,8 +227,7 @@ def test_the_shipped_python_shim_serves_the_wire_the_factory_speaks():
 
     with tempfile.TemporaryDirectory() as work:
         with open(os.path.join(work, "subject.py"), "w") as fh:
-            fh.write("def entry(args):\n"
-                     "    a, b = args\n"
+            fh.write("def entry(a, b):\n"
                      "    if b == 0:\n"
                      "        raise ValueError('cannot divide by zero')\n"
                      "    return a / b\n")
@@ -293,9 +292,9 @@ def test_a_timing_request_really_runs_the_subject_that_many_times():
     with tempfile.TemporaryDirectory() as work:
         with open(os.path.join(work, "subject.py"), "w") as fh:
             fh.write("CALLS = [0]\n"
-                     "def entry(args):\n"
+                     "def entry(value):\n"
                      "    CALLS[0] += 1\n"
-                     "    return CALLS[0] if args == ['count'] else args\n")
+                     "    return CALLS[0] if value == 'count' else value\n")
         with open(os.path.join(work, shim.template), "w") as fh:
             fh.write(shims.source(shim))
         _, command = shim.commands(work)

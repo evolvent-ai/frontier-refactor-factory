@@ -57,6 +57,18 @@ def serve(entry, stdin=sys.stdin, stdout=sys.stdout):
 
 if __name__ == "__main__":
     sys.path.insert(0, ".")
-    from subject import entry                          # noqa: E402  -- written beside this file
+    import importlib
 
-    serve(entry)
+    # WHICH SYMBOL, from the command line. A shim that could only serve a function literally called
+    # `entry` could only serve a subject somebody had written for it -- and the whole point is to
+    # serve real code, where the function is called `camel_to_snake` and lives beside its own
+    # imports. The name travels as an argument rather than being edited into this file, so the
+    # template stays data and one copy serves every subject.
+    _module = sys.argv[1] if len(sys.argv) > 1 else "subject"
+    _symbol = sys.argv[2] if len(sys.argv) > 2 else "entry"
+    _entry = getattr(importlib.import_module(_module.removesuffix(".py")), _symbol)
+
+    # The wire always passes ONE argument: the list of arguments. A real function takes them
+    # spread out, so the adaptation happens here rather than in every subject -- which would mean
+    # editing somebody else's code to serve it, and then grading the edit.
+    serve(lambda args: _entry(*args))

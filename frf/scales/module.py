@@ -114,7 +114,8 @@ class Observer:
         later "exits without answering", which is the same fault wearing a disguise that sends the
         repair loop to look at the wire.
         """
-        build, argv = shims.materialise(self.workspace, spec.language, self.material.source_path)
+        build, argv = shims.materialise(self.workspace, spec.language,
+                                        self.material.source_path, self.material.symbol)
         for command in build:
             done = subprocess.run(command, cwd=self.workspace, capture_output=True, text=True,
                                   timeout=BUILD_TIMEOUT)
@@ -177,9 +178,10 @@ class Observer:
         original = open(self.material.source_path, encoding="utf-8", errors="replace").read()
         perturbed = os.path.join(room, os.path.basename(self.material.source_path))
         with open(perturbed, "w", encoding="utf-8") as handle:
-            handle.write(mutate(original, self.material.language))
+            handle.write(mutate(original, self.material.language, self.material.symbol))
 
-        build, argv = shims.materialise(room, self.material.language, perturbed)
+        build, argv = shims.materialise(room, self.material.language, perturbed,
+                                        self.material.symbol)
         for command in build:
             done = subprocess.run(command, cwd=room, capture_output=True, text=True,
                                   timeout=BUILD_TIMEOUT)
@@ -325,21 +327,83 @@ _PERTURBATIONS = (
     ("*", "+"),
     (">=", ">"),
     ("<=", "<"),
+    ("==", "!="),
+    (" and ", " or "),
+    # INDEXING AND SLICING, which is what real code does when it does no arithmetic at all. The
+    # first four were enough for subjects written for this factory and left a great many mined
+    # functions unperturbable -- a routine that filters a list and returns `xs[-1]` contains not one
+    # of them, so its mutant was identical, E3 said INCONCLUSIVE, and the candidate was refused for
+    # a gap in this table rather than for anything true about the material.
+    ("[-1]", "[0]"),
+    ("[0]", "[-1]"),
+    ("[1:]", "[:-1]"),
+    (".sort()", ".reverse()"),
+    ("sorted(", "reversed("),
+    ("min(", "max("),
+    ("max(", "min("),
+    ("len(", "id("),
 )
 
 
-def mutate(source: str, language: str) -> str:
+def mutate(source: str, language: str, symbol: str = "") -> str:
     """One small change to a subject's source, chosen so the result still compiles.
 
     Returns the source unchanged when nothing matched, which is not a failure: the mutant then
     behaves identically, the comparison finds no divergence, and E3 reports INCONCLUSIVE. That is
     the honest outcome for a subject nobody could perturb this way, and it is why the check asks
     whether the observation MOVED rather than inferring blindness from a score.
+
+    THE CHANGE MUST LAND IN THE FUNCTION BEING GRADED, which `symbol` is for. Perturbing the first
+    `+` in the FILE was the obvious implementation and it is wrong on real material: a mined module
+    holds a dozen functions, only one of them is the subject, and the first `+` is almost always in
+    a different one -- or in an import, or a docstring. The mutant then behaves identically, E3
+    reports INCONCLUSIVE, and the candidate is refused for a defect in this function rather than in
+    the material. Measured on a real batch, that was two refusals in three.
+
+    Located by text rather than by parsing, because a factory that parsed each language in order to
+    mutate it would have re-acquired exactly the per-language knowledge the wire exists to avoid.
+    The window is from the symbol's definition to the next line that starts in the first column,
+    which is where a function ends in every language whose blocks are indented, and is a harmless
+    over-approximation in the braced ones.
     """
+    start, end = _window_of(source, symbol)
     for original, replacement in _PERTURBATIONS:
         # One occurrence, not all of them. Replacing every `+` in a file tends to produce something
         # that does not compile, and a mutant that does not build demonstrates nothing.
-        index = source.find(original)
+        index = source.find(original, start, end)
         if index != -1:
             return source[:index] + replacement + source[index + len(original):]
     return source
+
+
+def _window_of(source: str, symbol: str) -> tuple:
+    """Where in the file the named function lives. -> (start, end) offsets over the whole file.
+
+    Falls back to the whole file when the symbol cannot be found, which keeps a subject written for
+    this factory -- one function, called `entry` -- working exactly as before.
+    """
+    if not symbol:
+        return (0, len(source))
+    for marker in ("def %s(" % symbol, "func %s(" % symbol, "fn %s(" % symbol,
+                   "function %s(" % symbol, "%s(" % symbol):
+        opened = source.find(marker)
+        if opened == -1:
+            continue
+        body = source.find("\n", opened)
+        if body == -1:
+            return (opened, len(source))
+        # The end of the definition: the next line that begins in the first column. A blank line
+        # does not end it, and neither does a decorator or a comment at the same indent.
+        closed = len(source)
+        offset = body + 1
+        while offset < len(source):
+            newline = source.find("\n", offset)
+            line = source[offset:newline if newline != -1 else len(source)]
+            if line.strip() and not line[:1].isspace() and not line.startswith(("}", ")")):
+                closed = offset
+                break
+            if newline == -1:
+                break
+            offset = newline + 1
+        return (opened, closed)
+    return (0, len(source))
