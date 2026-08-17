@@ -187,7 +187,13 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
         name=spec.name, scale=spec.scale, description=spec.description,
         instruction=statement.render(facts), source_language=spec.language,
         target_language=spec.target_language,
-        provenance={"adequacy": corpus.adequacy, "evidence": checks.to_json(),
+        provenance={"origin": spec.environment.get("origin") or spec.name,
+                    # The same three numbers the statement quotes. Passed explicitly because the
+                    # sentence in the shipped description is built from them, and defaulting them
+                    # to zero produced a task whose provenance said "0 probes, 0 runs" beside an
+                    # instruction that correctly said 57 and 5 -- the one claim a reader checks.
+                    "probes": corpus.probes, "freeze_runs": facts.freeze_runs,
+                    "adequacy": corpus.adequacy, "evidence": checks.to_json(),
                     "discard_rate": round(corpus.discard_rate, 4)})
 
     path = os.path.join(destination, spec.name)

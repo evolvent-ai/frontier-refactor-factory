@@ -112,9 +112,18 @@ def _provenance_sentence(package: Package) -> str:
     claim someone quotes months later: where the reference came from, and that nothing here was
     hand-authored.
     """
-    origin = package.provenance.get("origin", "(origin not recorded)")
-    probes = package.provenance.get("probes", 0)
-    runs = package.provenance.get("freeze_runs", 0)
+    origin = package.provenance.get("origin") or "(origin not recorded)"
+    probes = package.provenance.get("probes")
+    runs = package.provenance.get("freeze_runs")
+    # ZERO IS NOT A DEFAULT HERE. An earlier version used `.get(key, 0)` and shipped a task whose
+    # provenance read "0 probe(s), distilled from 0 repeated runs" beside an instruction that
+    # correctly said 57 and 5. Both were generated from the same package, so a reader comparing the
+    # two had no way to tell which was lying -- and this sentence is the one someone quotes months
+    # later. A caller that does not supply the numbers now gets a sentence that says so.
+    if not probes or not runs:
+        return ("Reference is %s. The expectations are a frozen capture of that reference's own "
+                "observable behaviour; the corpus size and repeat count were not recorded at "
+                "emission. No expected output was hand-authored." % origin)
     return ("Reference is %s. The expectations are a frozen capture of that reference's own "
             "observable behaviour over %d probe(s), distilled from %d repeated runs so that only "
             "what it reproduces every time is graded. No expected output was hand-authored."

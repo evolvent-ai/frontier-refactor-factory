@@ -27,6 +27,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Callable, Iterable
 
 from .core import pipeline
+from .core import sandbox
 from .core.scale import SCALES, Candidate, Scale
 
 
@@ -42,6 +43,11 @@ class Settings:
     """
 
     sandboxed: bool = True
+    # Which backend to insist on, or empty for "whichever is available, best first". Named rather
+    # than inferred so that a run can REQUIRE the remote one: `sandbox.find` refuses a preference it
+    # cannot honour instead of substituting another, and a batch frozen half remotely and half on a
+    # local daemon would carry two different meanings under one provenance record.
+    backend: str = ""
     freeze_runs: int = pipeline.FREEZE_RUNS
     min_probes: int = pipeline.MIN_PROBES
     min_graded_points: int = pipeline.MIN_GRADED_POINTS
@@ -89,6 +95,8 @@ class Factory:
         self.settings = settings or Settings()
         self.log = log or (lambda _message: None)
         self._scales: dict = {}
+        # Opened on first use and shared by every candidate in the batch. See `backend()`.
+        self._backend = None
         # Shared stage implementations, keyed by name. Empty until a seam installs them, which is
         # what `install_stages` is for -- keeping them here rather than importing a fixed set is
         # what lets the two seams supply different freezes without the pipeline knowing.
@@ -167,6 +175,37 @@ class Factory:
     def build_all(self, budget: int = 1) -> dict:
         """`budget` candidates at every registered scale. -> {scale: Result}."""
         return {name: self.build(name, budget) for name in self.scales}
+
+    # ---------------------------------------------------------------- the sandbox
+    def backend(self):
+        """The sandbox this run freezes in, opened once and shared. -> a Backend, or None.
+
+        OPENED ONCE PER FACTORY, not per candidate. A remote sandbox costs seconds and money to
+        start, and a batch of twenty would otherwise pay for twenty of them; the scales are handed
+        the same one so that every expectation in a batch was frozen in the same place.
+
+        `Settings.sandboxed` used to be documented as load-bearing and read by nothing, which made
+        it worse than absent: a run could say `sandboxed=True` in its provenance while every stage
+        ran on the factory's own host. This is the method that gives that setting a mechanism.
+        """
+        if not self.settings.sandboxed:
+            return None
+        if self._backend is None:
+            self._backend = sandbox.find(prefer=self.settings.backend or None)
+            self.log("[sandbox] %s" % self._backend.name)
+        return self._backend
+
+    def close(self) -> None:
+        """Release the sandbox, if one was opened. Safe to call more than once."""
+        if self._backend is not None:
+            self._backend.close()
+            self._backend = None
+
+    def __enter__(self) -> "Factory":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
 
     # ---------------------------------------------------------------- internals
     def _require(self, scale: str) -> Scale:

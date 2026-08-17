@@ -99,6 +99,10 @@ class Observer:
         # Which sandbox the subject runs in, so that `isolation()` can answer from what is actually
         # in force rather than from a hope. None means this process, which isolates nothing.
         self._backend = backend
+        # Set by `_restricted` when the wrapper is genuinely applied, and read by `isolation`. A
+        # flag rather than an inference from the backend's name: naming a container says the
+        # defence is POSSIBLE, and only applying it makes the defence real.
+        self._isolated = False
         self._argv: list = []
 
     def build(self, spec: Spec) -> None:
@@ -120,6 +124,26 @@ class Observer:
                                      (done.stderr or done.stdout).strip()[-800:]))
         self._argv = argv
 
+    def _restricted(self, argv: list) -> list:
+        """The argv, wrapped so the subject runs unprivileged and cannot fork a fleet.
+
+        Applied only where it means something. On a backend that shares this machine the wrapper
+        would be theatre -- the two sides still see the same kernel -- and on a host with neither
+        `setpriv` nor `su` it cannot be applied at all. Both cases leave `_isolated` False, which is
+        what makes E6 report INCONCLUSIVE rather than certifying a defence that is not in force.
+
+        BOTH SIDES ARE WRAPPED OR NEITHER IS. The reference and the candidate must start the same
+        way, or the comparison measures the wrapper rather than the subjects.
+        """
+        if getattr(self._backend, "name", "") not in ("docker", "remote"):
+            return argv
+        try:
+            wrapped = integrity.restricted_argv(argv)
+        except LookupError:
+            return argv
+        self._isolated = True
+        return wrapped
+
     def subject(self, spec: Spec | None = None, *, mutated: bool = False) -> Subject:
         """The subject, served. `mutated` serves a perturbed one instead.
 
@@ -134,8 +158,9 @@ class Observer:
         subject behind on any failure between the two.
         """
         if not mutated:
-            return Subject(self._argv, cwd=self.workspace)
-        return Subject(*self._mutant())
+            return Subject(self._restricted(self._argv), cwd=self.workspace)
+        argv, room = self._mutant()
+        return Subject(self._restricted(argv), cwd=room)
 
     def _mutant(self) -> tuple:
         """A copy of the workspace whose subject has been perturbed. -> (argv, cwd).
@@ -180,7 +205,7 @@ class Observer:
 
     def isolation(self):
         """How the two sides are kept apart while one is timed -- reported, never assumed."""
-        return integrity.isolation_for(self._backend)
+        return integrity.isolation_for(self._backend, applied=self._isolated)
 
     def isolated(self) -> bool:
         """Whether timing runs with the two sides separated.

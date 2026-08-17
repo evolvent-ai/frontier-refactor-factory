@@ -143,3 +143,29 @@ def test_a_verifier_that_writes_nothing_scores_zero_and_says_which_zero():
         assert "no report" in flat["note"], flat["note"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_the_provenance_sentence_never_invents_a_number():
+    """It shipped "0 probe(s), distilled from 0 repeated runs" beside an instruction saying 57 and 5.
+
+    Both came from the same package, so a reader comparing the two could not tell which was lying --
+    and this sentence is the one someone quotes months later. The cause was `.get(key, 0)`: a
+    default that turns "the caller forgot" into a confident, specific, wrong claim. Silence is the
+    only honest answer to a number nobody supplied.
+    """
+    from frf.core import harbor
+
+    complete = harbor.Package(name="n", scale="module", description="d", instruction="i",
+                              source_language="python",
+                              provenance={"origin": "o", "probes": 57, "freeze_runs": 5})
+    said = harbor._provenance_sentence(complete)                 # noqa: SLF001
+    assert "57 probe(s)" in said and "5 repeated runs" in said
+
+    for missing in ({"origin": "o"},
+                    {"origin": "o", "probes": 57},
+                    {"origin": "o", "freeze_runs": 5}):
+        bare = harbor.Package(name="n", scale="module", description="d", instruction="i",
+                              source_language="python", provenance=missing)
+        said = harbor._provenance_sentence(bare)                  # noqa: SLF001
+        assert "were not recorded" in said, said
+        assert "0 probe" not in said, "a missing number must not be reported as zero: %s" % said

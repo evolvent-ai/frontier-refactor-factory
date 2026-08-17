@@ -178,6 +178,54 @@ def test_settings_travel_whole_so_a_run_can_be_explained_later():
     assert Settings().sandboxed is True, "sandboxing is the default, not an opt-in"
 
 
+def test_the_sandboxed_setting_actually_reaches_a_backend():
+    """A setting that nothing reads is worse than a setting that is absent.
+
+    `sandboxed` was documented as load-bearing -- "an expectation frozen against the factory's own
+    toolchain describes a program the solver will never receive" -- and was read by no code at all.
+    A run could record `sandboxed: true` in its provenance while every stage ran on this host, and
+    nothing anywhere would disagree. So the wiring is asserted, not the docstring.
+    """
+    assert Factory(Settings(sandboxed=False)).backend() is None
+
+    opened = []
+
+    class _Fake:
+        name = "fake"
+
+        def close(self):
+            opened.append("closed")
+
+    factory = Factory(Settings(sandboxed=True))
+    factory._backend = _Fake()                       # noqa: SLF001 -- standing in for a real one
+
+    # Opened ONCE and shared: a batch of twenty must not pay for twenty sandboxes, and every
+    # expectation in one batch has to have been frozen in the same place.
+    assert factory.backend() is factory.backend()
+    factory.close()
+    assert opened == ["closed"]
+    assert factory.backend() is not None, "a closed factory reopens rather than silently degrading"
+    factory.close()
+
+
+def test_a_named_backend_is_honoured_or_refused_never_substituted():
+    """Asking for a specific sandbox and getting a different one is unfalsifiable afterwards.
+
+    The expectation would describe a machine nobody chose, and the provenance would name the one
+    that was asked for. So an unavailable preference is an error rather than a downgrade.
+    """
+    from frf.core import sandbox as sandbox_module
+
+    factory = Factory(Settings(backend="a-backend-that-does-not-exist"))
+    try:
+        factory.backend()
+    except sandbox_module.SandboxError as exc:
+        assert "not available" in str(exc)
+    else:
+        factory.close()
+        raise AssertionError("an unavailable backend must not be substituted")
+
+
 def test_a_new_scale_needs_no_change_to_core():
     """THE claim of this design, tested rather than asserted.
 
