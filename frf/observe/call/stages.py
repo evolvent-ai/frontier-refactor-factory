@@ -207,22 +207,33 @@ def replay(path: str, *, drive: Callable[[str], tuple[int, int]]) -> tuple[int, 
 
 
 class Seam:
-    """The six shared stages, bound for one observer.
+    """The six shared stages, bound to the SCALE rather than to one observer.
 
     Handed to `Factory.install_stages`, which is what keeps the pipeline free of any knowledge of
     which seam it is driving.
+
+    THE SCALE, NOT AN OBSERVER, and the distinction cost a real bug. An earlier version took an
+    observer object and built it. The pipeline builds through the seam and then freezes through
+    `scale.observe()`, so with an observer captured here the two were different objects: one was
+    built and the other was frozen, and the second failed inside Popen with an IndexError about an
+    empty argv, which says nothing whatever about the cause. A batch is also more than one
+    candidate, and an observer captured once would serve the first candidate's subject for the rest
+    of the run -- every task after the first describing material it was not built from.
+
+    So the seam asks the scale for its observer at the moment it needs one, and the scale is what
+    decides how long that observer lives.
     """
 
-    def __init__(self, observer, *, destination: str = "tasks",
+    def __init__(self, scale, *, destination: str = "tasks",
                  write_tests: Callable, drive: Callable) -> None:
-        self._observer = observer
+        self._scale = scale
         self._destination = destination
         self._write_tests = write_tests
         self._drive = drive
 
     def stages(self) -> dict:
         return {
-            "build": lambda spec: self._observer.build(spec),
+            "build": lambda spec: self._scale.observe().build(spec),
             "freeze": lambda spec, observer, source, runs: freeze(spec, observer, source, runs=runs),
             "adequacy": audit,
             "battery": battery,

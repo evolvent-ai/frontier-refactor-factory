@@ -146,8 +146,21 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
 
     battery = hooks.battery(spec, observer, report)
     if not battery.ok:
-        raise Stage("evidence", battery.failures()[0].check, Fault.MATERIAL,
-                    "; ".join(v.detail for v in battery.failures()))
+        # WHOSE FAULT DEPENDS ON WHICH WAY THE CHECK FAILED, and collapsing the two would make the
+        # yield figure meaningless. A check that FAILS has established something about this
+        # candidate: its reference cannot reproduce its own expectations, a trivial submission
+        # scores full marks. That is the material's fault and a low yield is the honest answer.
+        #
+        # A check that is INCONCLUSIVE has established nothing at all, and on this pipeline the
+        # commonest cause is ours: no container backend, so execution isolation is not in force and
+        # the delegation check cannot conclude. Charging that to the material would report a 0%
+        # yield for a batch where nothing was wrong with any of the candidates -- which is precisely
+        # the confusion DESIGN.md s12.5 exists to prevent.
+        failures = battery.failures()
+        undecided = all(v.outcome is evidence.Outcome.INCONCLUSIVE for v in failures)
+        raise Stage("evidence", failures[0].check,
+                    Fault.FACTORY if undecided else Fault.MATERIAL,
+                    "; ".join(v.detail for v in failures))
     log("evidence: %d check(s) held" % len(battery.verdicts))
 
     path = hooks.emit(spec, report, battery)

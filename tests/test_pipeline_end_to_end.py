@@ -135,8 +135,11 @@ def _factory(workspace: str, destination: str) -> Factory:
                 total += want
         return passed, total
 
-    seam = stages.Seam(observer, destination=destination, write_tests=write_tests, drive=drive)
-    return Factory().register(_ModuleScale(observer)).install_stages(**seam.stages())
+    # The seam is handed the SCALE, not the observer: the pipeline builds through the seam and
+    # freezes through `scale.observe()`, so those two must reach the same object.
+    scale = _ModuleScale(observer)
+    seam = stages.Seam(scale, destination=destination, write_tests=write_tests, drive=drive)
+    return Factory().register(scale).install_stages(**seam.stages())
 
 
 def test_one_candidate_becomes_a_task_on_disk():

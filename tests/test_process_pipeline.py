@@ -164,8 +164,10 @@ def _factory(workspace: str, destination: str) -> Factory:
                 total += want
         return passed, total
 
-    seam = stages.Seam(observer, destination=destination, write_tests=write_tests, drive=drive)
-    return Factory().register(_RepoScale(observer)).install_stages(**seam.stages())
+    # The seam is handed the SCALE, not the observer -- see the call seam's equivalent.
+    scale = _RepoScale(observer)
+    seam = stages.Seam(scale, destination=destination, write_tests=write_tests, drive=drive)
+    return Factory().register(scale).install_stages(**seam.stages())
 
 
 def test_a_process_subject_becomes_a_task():

@@ -207,6 +207,8 @@ class Module:
         # run in different sandboxes.
         self._backend = backend
         self._material: Material | None = None
+        # The observer, once built. See observe().
+        self._built = None
 
     # ------------------------------------------------------------------ the four answers
     def find(self, budget: int):
@@ -227,6 +229,10 @@ class Module:
     def specify(self, candidate: Candidate) -> Spec:
         """One candidate -> what to build and how to call it."""
         self._material = self._locate(candidate)
+        # A new candidate means a new subject, so the cached observer is stale. Not
+        # resetting it would serve the previous candidate for the rest of a batch --
+        # every task after the first describing material it was not built from.
+        self._built = None
         material = self._material
         return Spec(name=_task_name(material), scale=self.name, language=material.language,
                     description=material.description,
@@ -240,7 +246,13 @@ class Module:
             return self._observer
         if self._material is None:
             raise RuntimeError("observe() was asked for before specify() chose a subject")
-        return Observer(self._workspace, self._material, backend=self._backend)
+        # CACHED, not constructed per call. The pipeline builds through one reference to the
+        # observer and then freezes through another, so a fresh instance here would be an observer
+        # that was never built -- its argv empty, failing inside Popen with an IndexError that says
+        # nothing about the cause.
+        if self._built is None:
+            self._built = Observer(self._workspace, self._material, backend=self._backend)
+        return self._built
 
     def probes(self, spec: Spec) -> ProbeSource:
         if self._material is None:

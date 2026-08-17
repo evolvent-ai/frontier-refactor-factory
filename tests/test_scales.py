@@ -163,3 +163,58 @@ def test_every_scale_refuses_to_source_without_an_index():
             assert "index" in str(exc)
         else:
             raise AssertionError("%s sourced without an index" % implementation.name)
+
+def test_a_batch_serves_each_candidate_its_own_subject():
+    """The bug this catches was invisible to every other test in this file.
+
+    They all build ONE task, and the fault needs two: the seam used to capture an observer at
+    construction, so a batch built the first candidate's subject and then froze it again for the
+    second -- every task after the first describing material it was not built from. With a single
+    candidate the captured observer and the fresh one happen to be the same object.
+
+    The other half is that `scale.observe()` must return the SAME observer the seam built through.
+    When it did not, the freeze reached an observer with an empty argv and died inside Popen with
+    an IndexError that says nothing at all about the cause.
+    """
+    import tempfile
+
+    from frf.core.scale import Candidate
+    from frf.scales import Module
+
+    with tempfile.TemporaryDirectory() as work:
+        def candidate(index: int, body: str) -> Candidate:
+            path = os.path.join(work, "s%d.py" % index)
+            with open(path, "w") as handle:
+                handle.write(body)
+            return Candidate("test://s%d" % index, "module", "python", "fixture",
+                             {"source_path": path, "symbol": "f%d" % index,
+                              "schema": {"params": [{"kind": "float_array", "dtype": "float64",
+                                                     "size": "n"}]},
+                              "description": "d"})
+
+        squares = ("def entry(args):\n"
+                   "    values = args[0]\n"
+                   "    if not values:\n"
+                   "        raise ValueError('empty')\n"
+                   "    return sum(x * x for x in values)\n")
+        cubes = squares.replace("x * x", "x * x * x")
+
+        scale = Module(workspace=os.path.join(work, "ws"))
+        first, second = candidate(1, squares), candidate(2, cubes)
+
+        # Each candidate must be observed through a subject built from ITS OWN source. Asked
+        # directly, because the whole failure is that these come out the same.
+        answers = []
+        for candidate_under_test in (first, second):
+            spec = scale.specify(candidate_under_test)
+            observer = scale.observe()
+            observer.build(spec)
+            assert scale.observe() is observer, (
+                "observe() handed out a second observer, so whatever the pipeline built is not "
+                "what it would freeze")
+            with observer.subject(spec) as subject:
+                answers.append(subject.call("run", [[1, 2, 3]]).value)
+
+        assert answers == [14, 36], (
+            "the second candidate answered %r; a batch is serving one subject for every task"
+            % (answers,))

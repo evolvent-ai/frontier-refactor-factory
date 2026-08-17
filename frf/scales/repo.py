@@ -160,6 +160,8 @@ class Repo:
         # Threaded to the Observer so the delegation check reports what is really in force.
         self._backend = backend
         self._material: Material | None = None
+        # The observer, once built. See observe().
+        self._built = None
 
     def find(self, budget: int):
         if self._index is None:
@@ -172,6 +174,10 @@ class Repo:
 
     def specify(self, candidate: Candidate) -> Spec:
         self._material = self._locate(candidate)
+        # A new candidate means a new subject, so the cached observer is stale. Not
+        # resetting it would serve the previous candidate for the rest of a batch --
+        # every task after the first describing material it was not built from.
+        self._built = None
         material = self._material
         return Spec(name=_task_name(material), scale=self.name, language=material.language,
                     description=material.description, build=list(material.build),
@@ -183,7 +189,10 @@ class Repo:
             return self._observer
         if self._material is None:
             raise RuntimeError("observe() was asked for before specify() chose a repository")
-        return Observer(self._material, backend=self._backend)
+        # Cached: build() records how to invoke the program, and run() needs that same object.
+        if self._built is None:
+            self._built = Observer(self._material, backend=self._backend)
+        return self._built
 
     def probes(self, spec: Spec) -> ProbeSource:
         if self._material is None:

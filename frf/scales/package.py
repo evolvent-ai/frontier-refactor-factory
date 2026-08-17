@@ -138,6 +138,8 @@ class Package:
         # Threaded to the Observer so the delegation check reports what is really in force.
         self._backend = backend
         self._material: Material | None = None
+        # The observer, once built. See observe().
+        self._built = None
 
     def find(self, budget: int):
         """Candidates from a registry index -- PyPI, npm, crates.io, a reverse-dependency graph.
@@ -156,6 +158,10 @@ class Package:
 
     def specify(self, candidate: Candidate) -> Spec:
         self._material = self._locate(candidate)
+        # A new candidate means a new subject, so the cached observer is stale. Not
+        # resetting it would serve the previous candidate for the rest of a batch --
+        # every task after the first describing material it was not built from.
+        self._built = None
         material = self._material
         return Spec(name=_task_name(material), scale=self.name, language=material.language,
                     description=material.description, build=list(material.install),
@@ -170,7 +176,11 @@ class Package:
             return self._observer
         if self._material is None:
             raise RuntimeError("observe() was asked for before specify() chose a package")
-        return Observer(self._workspace, self._material, backend=self._backend)
+        # Cached for the same reason as the module scale: build() and freeze() must reach the
+        # same observer, or the one that is frozen is the one that was never built.
+        if self._built is None:
+            self._built = Observer(self._workspace, self._material, backend=self._backend)
+        return self._built
 
     def probes(self, spec: Spec) -> ProbeSource:
         """Run the generator where model-written code is allowed to run, and take back data."""

@@ -222,18 +222,24 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
 
 
 class Seam:
-    """The six shared stages, bound for one observer. Handed to `Factory.install_stages`."""
+    """The six shared stages, bound to the SCALE. Handed to `Factory.install_stages`.
 
-    def __init__(self, observer, *, destination: str = "tasks",
+    The scale rather than one observer, for the reason set out at length in the call seam's
+    equivalent: the pipeline builds through the seam and freezes through `scale.observe()`, so
+    capturing an observer here makes those two different objects -- and across a batch it would
+    serve the first candidate's program for every task after the first.
+    """
+
+    def __init__(self, scale, *, destination: str = "tasks",
                  write_tests: Callable, drive: Callable) -> None:
-        self._observer = observer
+        self._scale = scale
         self._destination = destination
         self._write_tests = write_tests
         self._drive = drive
 
     def stages(self) -> dict:
         return {
-            "build": lambda spec: self._observer.build(spec),
+            "build": lambda spec: self._scale.observe().build(spec),
             "freeze": lambda spec, observer, source, runs: freeze(spec, observer, source, runs=runs),
             "adequacy": audit,
             "battery": battery,
