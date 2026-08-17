@@ -1,30 +1,31 @@
 """Measuring a speedup that is not the machine's mood.
 
-Timing two programs and dividing is wrong on a shared machine, and the size of the error was
-measured rather than assumed. Timing one program against ITSELF -- true speedup exactly 1.000 --
-eight times on the host this was written on gave:
+Timing two programs and dividing is wrong on a shared machine. A ratio from one pair of stopwatch
+readings carries the machine's state as much as the code's: a neighbouring job, a frequency change,
+a cold cache on whichever ran first. So a single ratio is not evidence, and this module's job is to
+turn many readings into one number that is.
 
-    1.006  1.026  0.684  1.260  1.029  1.018  1.011  0.969        standard deviation 0.146
-
-Scored by a curve that maps the log of the ratio onto [0.15, 1.0], a submission that changed NOTHING
-collects between 0.150 and 0.433 -- up to a third of the way to a 2x target, for free, at random.
-
-So a single ratio is not evidence. Five things make it one, and each answers a specific way the
-naive measurement lies:
+Five things make it evidence, and each answers a specific way the naive measurement lies:
 
     INTERLEAVED       reference and candidate timed alternately in one run, so a machine that slows
                       down halfway through slows both rather than whichever went second.
     ORDER ALTERNATED  the one that runs first pays for a cold cache, so who goes first alternates.
     FRESH INPUT       a new probe every timed call, so a candidate cannot win by memoising.
-    NOISE FLOOR       calibrate by timing the reference against ITSELF; the answer is 1.0 and
-                      whatever spread appears is this machine's noise, which the candidate's
-                      measured gain must clear.
-    LOWER BOUND       the bootstrapped confidence interval's lower bound is the number reported,
-                      not the median. Being 95% sure of at least 1.4x is a claim; a median of 1.4x
-                      with this much spread is not.
+    NOISE FLOOR       calibrated HERE, on this machine, in this run, by timing the reference against
+                      ITSELF -- a comparison whose true answer is exactly 1.0, so whatever spread
+                      appears is this machine's noise and nothing else. Never a constant: a number
+                      measured on the authoring host describes a machine nobody is graded on.
+    LOWER BOUND       the bootstrapped confidence interval's lower bound is what gets reported, not
+                      the median. Being 95% sure of at least 1.4x is a claim; a median of 1.4x with
+                      this much spread is not.
 
 And the worst shape counts, not the average: a candidate that tuned one convenient size has not made
 the subject faster.
+
+A GAIN INSIDE THE NOISE IS REPORTED AS EXACTLY 1.0. Not as itself with a warning, and not as a
+failure -- as 1.0, the neutral value, because that is what the measurement actually established.
+Scoring is downstream of this and must not have to re-litigate what counts as noise; by the time a
+ratio leaves this module it is a finding.
 """
 from __future__ import annotations
 
@@ -48,17 +49,23 @@ CONFIDENCE = 0.95
 class SpeedResult:
     """What a timing pass concluded, with the evidence for it."""
 
-    speedup: float                      # the lower bound -- the number a score should use
+    speedup: float                      # THE number a score uses; exactly 1.0 when within noise
     median: float                       # what a naive measurement would have reported
     noise_floor: float                  # reference vs itself, upper bound; a gain must clear this
     shapes: dict = field(default_factory=dict)
-    honest: bool = True
+    within_noise: bool = False          # the gain did not clear the floor and was reported as 1.0
+    measured: float | None = None       # the raw worst-shape bound, kept only when it was rejected
+    usable: bool = True                 # False means nothing was measured at all -- not "no gain"
     note: str = ""
 
     def to_json(self) -> dict:
-        return {"speedup": round(self.speedup, 4), "median": round(self.median, 4),
-                "noise_floor": round(self.noise_floor, 4), "honest": self.honest,
-                "shapes": {k: round(v, 4) for k, v in self.shapes.items()}, "note": self.note}
+        out = {"speedup": round(self.speedup, 4), "median": round(self.median, 4),
+               "noise_floor": round(self.noise_floor, 4), "within_noise": self.within_noise,
+               "usable": self.usable,
+               "shapes": {k: round(v, 4) for k, v in self.shapes.items()}, "note": self.note}
+        if self.measured is not None:
+            out["measured"] = round(self.measured, 4)
+        return out
 
 
 def _bootstrap_lower_bound(ratios: list[float], *, draws: int = BOOTSTRAP_DRAWS,
@@ -111,14 +118,14 @@ def measure(reference: Callable[[object], float], candidate: Callable[[object], 
     quick subjects this pipeline has the most of.
     """
     if not shapes:
-        return SpeedResult(0.0, 0.0, 0.0, honest=False, note="no shape was given to time")
+        return SpeedResult(1.0, 0.0, 0.0, usable=False, note="no shape was given to time")
 
     per_shape, floors = {}, []
     for shape in shapes:
         ratios = _paired_ratios(reference, candidate,
                                 lambda i, s=shape: draw_probe(s, i), samples)
         if not ratios:
-            return SpeedResult(0.0, 0.0, 0.0, honest=False,
+            return SpeedResult(1.0, 0.0, 0.0, usable=False,
                                note="the candidate reported no positive time on shape %r" % shape)
         per_shape[shape] = _bootstrap_lower_bound(ratios)
 
@@ -134,10 +141,14 @@ def measure(reference: Callable[[object], float], candidate: Callable[[object], 
     speedup = per_shape[worst_shape]
     noise = max(floors) if floors else 1.0
     if speedup <= noise:
-        return SpeedResult(speedup, statistics.median(per_shape.values()), noise, per_shape,
-                           honest=False,
+        # REPORTED AS 1.0, not as the raw ratio. `speedup` is the field a score is computed from, so
+        # leaving 1.03x in it and setting a flag would mean every downstream caller has to remember
+        # to re-check the flag -- and the one that forgets pays for noise. The measured value is
+        # kept in `measured` for a reader who wants to see what was rejected.
+        return SpeedResult(1.0, statistics.median(per_shape.values()), noise, per_shape,
+                           within_noise=True, measured=speedup,
                            note=("the measured gain (%.3fx on the worst shape, %r) does not clear "
-                                 "this machine's own noise (%.3fx), so it is not evidence of a "
-                                 "speedup" % (speedup, worst_shape, noise)))
+                                 "this machine's own noise (%.3fx); reported as 1.0x, which is what "
+                                 "was actually established" % (speedup, worst_shape, noise)))
     return SpeedResult(speedup, statistics.median(per_shape.values()), noise, per_shape,
                        note="worst shape %r of %d" % (worst_shape, len(per_shape)))

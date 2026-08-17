@@ -14,39 +14,62 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from frf.core import scoring, timing                                  # noqa: E402
 
 
-def test_correctness_is_a_gate_and_speed_is_a_slope():
-    """A wrong submission scores zero however fast; a correct one is paid in proportion."""
-    fast_and_wrong = scoring.compute(9, 10, 1.0, 0.01)
-    assert fast_and_wrong.reward == 0.0, fast_and_wrong
+def test_correctness_unlocks_speed_rather_than_being_averaged_with_it():
+    """Short of complete, no amount of speed helps; complete, 0.5 is banked and speed adds on top."""
+    # Fast and wrong. Capped at 0.5 * correctness -- it cannot reach the speed term at all.
+    fast_and_wrong = scoring.compute(9, 10, speedup=100.0)
+    assert fast_and_wrong.reward == 0.5 * 0.9, fast_and_wrong
     assert not fast_and_wrong.correct
 
-    # Correct but no faster: the floor, not zero. It IS a correct implementation.
-    unchanged = scoring.compute(10, 10, 1.0, 1.0)
-    assert unchanged.reward == scoring.CORRECT_FLOOR, unchanged
+    # Correct and unchanged: 0.5 for the behaviour, plus 0.5 * 1.0 for a speedup of exactly 1.
+    unchanged = scoring.compute(10, 10, speedup=1.0)
+    assert unchanged.reward == 1.0, unchanged
 
-    # And every real gain is paid for, monotonically, saturating at the target.
-    rewards = [scoring.compute(10, 10, r, 1.0).reward for r in (1.0, 1.25, 1.5, 2.0, 8.0)]
+    # Monotone in speedup, and deliberately UNCAPPED -- comparability with the sibling benchmark
+    # outweighs the tidiness of a bounded curve.
+    rewards = [scoring.compute(10, 10, speedup=r).reward for r in (1.0, 1.5, 2.0, 8.0, 299.0)]
     assert rewards == sorted(rewards), rewards
-    assert rewards[-2] == 1.0 and rewards[-1] == 1.0, "the target saturates rather than overflowing"
+    assert rewards[-1] > 100, "the scale is not capped"
 
 
-def test_a_task_with_no_clock_still_pays_full_marks_for_being_correct():
-    """`scored_on_speed=False` means behaviour was the whole task, so correctness earns 1.0.
+def test_partial_correctness_is_a_gradient_not_a_cliff():
+    """Missing three cases of 1567 and missing half of them are different results.
 
-    Paying the floor here would be the opposite error: docking a submission for not improving a
-    speed it was never asked to improve. Whether a task is ALLOWED to be scored this way is decided
-    upstream -- a same-language task may not be, because its reference is the solver's own starting
-    point -- and that decision does not belong in the arithmetic.
+    A binary pass/fail collapses them, and they call for opposite next steps -- repair the existing
+    implementation, or start over. The score has to be able to tell them apart.
     """
-    assert scoring.compute(10, 10, 0.0, 0.0, scored_on_speed=False).reward == 1.0
-    assert scoring.compute(9, 10, 0.0, 0.0, scored_on_speed=False).reward == 0.0
+    nearly = scoring.compute(1564, 1567)
+    barely = scoring.compute(800, 1567)
+    assert nearly.reward > barely.reward > 0.0, (nearly.reward, barely.reward)
+    assert nearly.reward < 0.5, "incomplete work never reaches the correctness credit"
 
 
-def test_timing_refuses_a_gain_it_cannot_distinguish_from_noise():
-    """The measurement that motivates this whole module: the same program, timed against itself.
+def test_a_flagged_submission_scores_zero_whatever_else_it_did():
+    """Compliance is independent of the other two axes and short-circuits both.
 
-    The true speedup is exactly 1.000. A naive ratio on a shared machine wanders far from it, so the
-    gate must return `honest=False` rather than a number a score would happily consume.
+    A submission that delegated its work has not earned partial credit for the parts it did
+    honestly, so this is zero rather than `0.5 * correctness`.
+    """
+    cheated = scoring.compute(10, 10, speedup=50.0, compliant=False)
+    assert cheated.reward == 0.0, cheated
+    assert not cheated.correct
+
+
+def test_several_workloads_aggregate_geometrically():
+    """Twice as fast here and half as fast there is break-even, and only the geometric mean says so."""
+    assert scoring.aggregate_speedup({"render": 4.0, "parse": 0.25}) == 1.0
+    # The arithmetic mean would report 2.125x for the same pair and call a wash an improvement.
+    assert scoring.aggregate_speedup({"a": 2.0, "b": 2.0}) == 2.0
+    assert scoring.aggregate_speedup({}) == 1.0, "no timed workload is neutral, not an error"
+
+
+def test_timing_reports_a_gain_it_cannot_distinguish_from_noise_as_exactly_one():
+    """The measurement that motivates this module: the same program, timed against itself.
+
+    The true speedup is exactly 1.000, and a naive ratio on a shared machine wanders far from it.
+    What comes back must be 1.0 in the FIELD A SCORE READS -- not the raw wandering ratio with a
+    flag beside it, because then every caller has to remember to check the flag and the one that
+    forgets pays for noise.
     """
     import random
     rng = random.Random(7)
@@ -57,8 +80,10 @@ def test_timing_refuses_a_gain_it_cannot_distinguish_from_noise():
         return 0.010 * (1.0 + abs(rng.gauss(0, 0.35)))
 
     result = timing.measure(noisy, noisy, lambda shape, i: i, ["only"], samples=12)
-    assert not result.honest, result
-    assert "noise" in result.note, result.note
+    assert result.speedup == 1.0, result
+    assert result.within_noise, result
+    assert result.measured is not None, "what was rejected is still reported"
+    assert scoring.compute(10, 10, speedup=result.speedup).reward == 1.0
 
 
 def test_timing_reports_a_real_gain_and_takes_the_worst_shape():
@@ -70,7 +95,7 @@ def test_timing_reports_a_real_gain_and_takes_the_worst_shape():
         return 0.010
 
     good = timing.measure(reference, twice_as_fast, lambda s, i: i, ["small", "large"], samples=12)
-    assert good.honest, good
+    assert not good.within_noise and good.usable, good
     assert 1.8 <= good.speedup <= 2.2, good.speedup
 
     # Fast on one shape, slower on the other. The worst shape is what counts, so this is refused:

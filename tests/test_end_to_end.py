@@ -88,11 +88,11 @@ def test_freeze_then_grade_a_correct_and_a_wrong_candidate():
                     got, want, _ = grade(expectations[probe_id], subject.call("run", args))
                     passed += got
                     total += want
-            return scoring.compute(passed, total, 1.0, 1.0)
+            return scoring.compute(passed, total, speedup=1.0)
 
         correct = score(faithful)
         assert correct.correct and correct.passed == correct.total == 20, correct
-        assert correct.reward == scoring.CORRECT_FLOOR, "correct but not faster earns the floor"
+        assert correct.reward == 1.0, "correct and no faster: 0.5 banked + 0.5 * 1.0x"
 
         wrong = score(off_by_one)
         assert not wrong.correct and wrong.passed == 0 and wrong.reward == 0.0, wrong
