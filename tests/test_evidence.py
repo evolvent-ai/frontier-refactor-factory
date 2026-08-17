@@ -10,7 +10,8 @@ from __future__ import annotations
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 from frf.core import evidence                                          # noqa: E402
 from frf.core.evidence import Outcome                                  # noqa: E402
@@ -147,3 +148,64 @@ def test_inconclusive_is_not_ok_but_not_applicable_is():
     """
     assert evidence.Verdict("x", Outcome.NOT_APPLICABLE).ok
     assert not evidence.Verdict("x", Outcome.INCONCLUSIVE).ok
+
+
+def test_the_subject_check_skips_only_where_failure_is_impossible():
+    """E5 is NOT_APPLICABLE on the call seam, and that is a structural claim, not a convenience.
+
+    On the process seam a step can be pure shell that never invokes the program, so the check has to
+    run. On the call seam every observation IS a return value of a call to the subject -- an
+    observation without the subject having run cannot be constructed -- so there is nothing to check.
+    """
+    skipped = evidence.points_are_about_the_subject(lambda: (0, 0), applies=False)
+    assert skipped.outcome is evidence.Outcome.NOT_APPLICABLE
+    assert skipped.ok, "a structurally impossible failure is not a gap"
+    assert "return value" in skipped.detail
+
+    holds = evidence.points_are_about_the_subject(lambda: (6, 6), applies=True)
+    assert holds.outcome is evidence.Outcome.HOLDS
+
+    # The real defect this exists for: points that grade the surrounding shell.
+    fails = evidence.points_are_about_the_subject(lambda: (2, 6), applies=True)
+    assert fails.outcome is evidence.Outcome.FAILS
+    assert "never invoke the subject" in fails.detail
+
+
+def test_delegation_needs_both_halves_and_says_which_is_missing():
+    """A clean import list with no execution isolation is INCONCLUSIVE, not a pass.
+
+    Source inspection cannot see work handed to another process, and isolation cannot see an import.
+    Reporting the first as sufficient would be exactly the rubber stamp this module exists to avoid.
+    """
+    caught = evidence.cannot_delegate_to_the_reference(lambda: ["reference"], lambda: True)
+    assert caught.outcome is evidence.Outcome.FAILS
+    assert "reference" in caught.detail
+
+    half = evidence.cannot_delegate_to_the_reference(lambda: [], lambda: False)
+    assert half.outcome is evidence.Outcome.INCONCLUSIVE
+    assert not half.ok, "half a defence is not evidence"
+
+    both = evidence.cannot_delegate_to_the_reference(lambda: [], lambda: True)
+    assert both.outcome is evidence.Outcome.HOLDS
+
+
+def test_every_check_the_design_names_exists_and_is_numbered():
+    """The battery is E1..E8. A check that quietly disappears takes its whole class of defect with it.
+
+    Each is tied to its number through its own docstring rather than through a list kept here, so
+    the two cannot drift apart: renaming a function is fine, dropping one is not.
+    """
+    import ast
+    import re
+
+    source = open(os.path.join(ROOT, "frf", "core", "evidence.py")).read()
+    numbered = {}
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        match = re.match(r"(E[1-8]) --", ast.get_docstring(node) or "")
+        if match:
+            numbered[match.group(1)] = node.name
+
+    assert sorted(numbered) == ["E%d" % i for i in range(1, 9)], numbered
+    assert len(set(numbered.values())) == 8, "two checks share an implementation"

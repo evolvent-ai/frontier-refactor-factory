@@ -190,6 +190,65 @@ def no_runnable_reference(find_runnable: Callable[[str], list[str]],
                    "no runnable reference in %s" % ", ".join(sorted(directories)))
 
 
+def points_are_about_the_subject(steps_touching_subject: Callable[[], tuple[int, int]],
+                                 *, applies: bool) -> Verdict:
+    """E5 -- a scored point must be earned by the subject, not by the shell around it.
+
+    Only the process seam can fail this, and the exemption is structural rather than convenient: a
+    step there may be pure shell that never invokes the program, and its four channels then record
+    what `/bin/sh` did. A task built from such steps grades the host's shell and would survive every
+    other check in this module.
+
+    On the call seam every observation is by construction the value a call to the subject returned;
+    no observation can exist without the subject having run. That is a reason to skip, and it is the
+    only kind of reason accepted here.
+    """
+    if not applies:
+        return Verdict("points-are-about-the-subject", Outcome.NOT_APPLICABLE,
+                       "on this seam every observation is a return value of a call to the subject, "
+                       "so a point that is not about the subject cannot be constructed")
+    touching, total = steps_touching_subject()
+    if total <= 0:
+        return Verdict("points-are-about-the-subject", Outcome.INCONCLUSIVE, "no scored step")
+    if touching == total:
+        return Verdict("points-are-about-the-subject", Outcome.HOLDS,
+                       "all %d scored step(s) invoke the subject" % total)
+    return Verdict("points-are-about-the-subject", Outcome.FAILS,
+                   "%d of %d scored step(s) never invoke the subject, so those points grade the "
+                   "surrounding shell" % (total - touching, total))
+
+
+def cannot_delegate_to_the_reference(forbidden_found: Callable[[], list[str]],
+                                     isolation_enforced: Callable[[], bool]) -> Verdict:
+    """E6 -- a candidate must not hand its work back to the implementation it replaces.
+
+    Two independent measures, because they fail differently and neither covers the other:
+
+      SOURCE INSPECTION runs before the behaviour check. Every import and call in the submission is
+      matched against the task's list of what is permitted; a hit scores zero outright and nothing
+      else is measured. This is what catches `import reference` -- a submission that is perfectly
+      correct and has implemented nothing.
+
+      EXECUTION ISOLATION runs during timing. Reference and candidate run under separate restricted
+      accounts with a cap on processes, and whichever is not being timed is suspended. Without it a
+      candidate can subcontract the work to a process the clock never sees, or inflate the
+      reference's measured cost by competing with it for the machine.
+
+    Neither involves a judgement call: the rules are fixed by the task, so the same submission gets
+    the same verdict every time.
+    """
+    found = forbidden_found()
+    if found:
+        return Verdict("cannot-delegate-to-the-reference", Outcome.FAILS,
+                       "the submission reaches the reference: %s" % ", ".join(sorted(found)[:4]))
+    if not isolation_enforced():
+        return Verdict("cannot-delegate-to-the-reference", Outcome.INCONCLUSIVE,
+                       "source inspection found nothing, but execution isolation is not in force, "
+                       "so work delegated to another process would not be visible to the clock")
+    return Verdict("cannot-delegate-to-the-reference", Outcome.HOLDS,
+                   "no forbidden import or call, and timing runs isolated")
+
+
 def package_reproduces_itself(drive_shipped: Callable[[], tuple[int, int]]) -> Verdict:
     """E7 -- drive the EMITTED package with the reference it ships.
 
