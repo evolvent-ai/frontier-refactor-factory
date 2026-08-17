@@ -7,3 +7,8 @@ __pycache__/
 work/
 tasks/
 *.tar.gz
+
+# Build artefacts from `pip install -e .`
+*.egg-info/
+build/
+dist/

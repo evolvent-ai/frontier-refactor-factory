@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frontier-refactor-factory"
+version = "0.1.0"
+description = "Performance-oriented refactoring benchmark tasks, at four codebase scales"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+
+# The factory itself has no third-party runtime dependency, and that is worth keeping. Everything it
+# needs -- subprocesses, JSON, hashing, statistics -- is in the standard library, so a task package
+# it emits can vendor its verifier without dragging an install behind it.
+dependencies = []
+
+[project.optional-dependencies]
+# Sourcing and drafting reach the network; nothing else does. Kept optional so that reading a task,
+# replaying one, or running the test suite needs none of it.
+sourcing = ["requests>=2.31"]
+sandbox = ["e2b>=1.0"]
+dev = ["pytest>=8", "pyflakes>=3"]
+
+[tool.setuptools.packages.find]
+include = ["frf*"]
+
+[tool.setuptools.package-data]
+# The shims are data, not importable code: they are written into a task and run there, by whichever
+# language the subject is in. They have to ship with the wheel.
+"frf.observe.call.shims" = ["*.py", "*.go", "*.js", "*.rb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
