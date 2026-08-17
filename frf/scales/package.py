@@ -32,6 +32,7 @@ from ..core.scale import Candidate, Spec
 from ..observe import coverage
 from ..observe.call import shims
 from ..observe.call.runner import Subject
+from .module import PROBE_TIMEOUT
 
 # How many probes a corpus is drawn with. Larger than the module scale's because it has to cover a
 # whole surface rather than one function: every entry point needs inputs, and each needs at least
@@ -95,7 +96,7 @@ class Observer:
         _, self._argv = shim.commands(self.workspace)
 
     def subject(self, spec: Spec | None = None, *, mutated: bool = False) -> Subject:
-        return Subject(self._argv, cwd=self.workspace)
+        return Subject(self._argv, cwd=self.workspace, timeout=PROBE_TIMEOUT)
 
     def coverage(self):
         return coverage.backend_for(self.material.language)

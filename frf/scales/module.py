@@ -38,6 +38,13 @@ PROBE_COUNT = 60
 # translation unit, bounded so that a build which will never finish does not stall a batch.
 BUILD_TIMEOUT = 600.0
 
+# How long one probe may take. Real mined material makes this necessary rather than tidy: a naive
+# `fibonacci_recursion` from PyPI is exponential in its argument, and at the sizes the schema draws
+# it never returns at all. Without a bound the batch stops with no output and no error, and nothing
+# says which candidate did it. A subject too slow to answer cannot be graded, which is the
+# material's fault and an ordinary refusal.
+PROBE_TIMEOUT = 30.0
+
 
 class BuildFailed(RuntimeError):
     """The subject could not be compiled -- material's fault, not the wire's.
@@ -159,9 +166,10 @@ class Observer:
         subject behind on any failure between the two.
         """
         if not mutated:
-            return Subject(self._restricted(self._argv), cwd=self.workspace)
+            return Subject(self._restricted(self._argv), cwd=self.workspace,
+                           timeout=PROBE_TIMEOUT)
         argv, room = self._mutant()
-        return Subject(self._restricted(argv), cwd=room)
+        return Subject(self._restricted(argv), cwd=room, timeout=PROBE_TIMEOUT)
 
     def _mutant(self) -> tuple:
         """A copy of the workspace whose subject has been perturbed. -> (argv, cwd).
