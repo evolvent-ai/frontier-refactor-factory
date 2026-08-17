@@ -100,6 +100,57 @@ def freeze(probe_id: str, runs: list[Observation]) -> Expectation:
     return Expectation(probe_id, digests.pop(), len(runs))
 
 
+# How much of a corpus may be lost to instability before the subject itself is the problem. Not a
+# tuning knob: past this point what survives is the handful of probes that happened to agree, and a
+# corpus selected by luck cannot be trusted to distinguish anything.
+MAX_DISCARD_FRACTION = 0.25
+
+
+@dataclass(frozen=True)
+class FreezeReport:
+    """What a whole corpus's freeze produced, including what it lost.
+
+    The loss is the point. Discarding unstable probes silently would let a subject that is mostly
+    nondeterministic ship as a small tidy task, and the number that reveals it -- how much had to be
+    thrown away -- is exactly the one a quiet implementation never records.
+    """
+
+    expectations: list[Expectation]
+    discarded: list[Expectation] = None
+
+    def __post_init__(self) -> None:
+        if self.discarded is None:
+            object.__setattr__(self, "discarded", [])
+
+    @property
+    def attempted(self) -> int:
+        return len(self.expectations) + len(self.discarded)
+
+    @property
+    def discard_rate(self) -> float:
+        return (len(self.discarded) / self.attempted) if self.attempted else 0.0
+
+    @property
+    def usable(self) -> bool:
+        """False means REJECT THE SUBJECT, not "carry on with a smaller corpus"."""
+        return bool(self.expectations) and self.discard_rate <= MAX_DISCARD_FRACTION
+
+    def to_json(self) -> dict:
+        return {"graded": len(self.expectations), "discarded": len(self.discarded),
+                "attempted": self.attempted, "discard_rate": round(self.discard_rate, 4),
+                "usable": self.usable,
+                "reasons": sorted({e.drop_reason for e in self.discarded})[:5]}
+
+
+def freeze_corpus(runs_by_probe: dict) -> FreezeReport:
+    """{probe_id: [Observation, ...]} -> the gradeable expectations, and the loss."""
+    kept, lost = [], []
+    for probe_id, runs in runs_by_probe.items():
+        expectation = freeze(probe_id, runs)
+        (kept if expectation.graded() else lost).append(expectation)
+    return FreezeReport(kept, lost)
+
+
 def grade(expectation: Expectation, actual: Observation) -> tuple[int, int, str]:
     """-> (passed, total, reason). An ungraded expectation contributes nothing to either count."""
     if not expectation.graded():

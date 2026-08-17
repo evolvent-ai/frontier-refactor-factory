@@ -13,7 +13,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from frf.observe.call import protocol                                  # noqa: E402
+from frf.observe.call import observation, protocol                     # noqa: E402
 from frf.observe.call.observation import Observation, freeze, grade     # noqa: E402
 from frf.observe.call.runner import Subject, SubjectFailed              # noqa: E402
 
@@ -177,3 +177,35 @@ def test_timing_is_measured_on_the_far_side():
             assert few > 0 and many > few, (few, many)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_a_corpus_reports_what_instability_cost_it():
+    """Discarding unstable probes silently lets a mostly-nondeterministic subject ship as a small
+    tidy task. The rate is the number that reveals it, so the freeze returns it rather than the
+    caller having to think to ask."""
+    stable = [Observation(True, {"n": 1}) for _ in range(5)]
+    unstable = [Observation(True, {"n": i}) for i in range(5)]
+
+    report = observation.freeze_corpus({"a": stable, "b": stable, "c": stable, "d": unstable})
+    assert report.attempted == 4
+    assert len(report.expectations) == 3 and len(report.discarded) == 1
+    assert report.discard_rate == 0.25
+    assert report.usable, "a quarter lost is survivable"
+    assert report.to_json()["reasons"], "the reason travels with the number"
+
+
+def test_a_subject_that_mostly_will_not_repeat_is_rejected_not_shrunk():
+    """Past the threshold, what survives is the probes that agreed by luck.
+
+    Continuing with those would produce a task whose corpus was selected by chance -- which cannot
+    distinguish anything, while looking exactly like a small honest task.
+    """
+    stable = [Observation(True, {"n": 1}) for _ in range(5)]
+    unstable = [Observation(True, {"n": i}) for i in range(5)]
+
+    report = observation.freeze_corpus({"a": stable, "b": unstable, "c": unstable, "d": unstable})
+    assert report.discard_rate == 0.75
+    assert not report.usable, "this is a reject, not a smaller corpus"
+
+    empty = observation.freeze_corpus({"a": unstable})
+    assert not empty.usable and not empty.expectations
