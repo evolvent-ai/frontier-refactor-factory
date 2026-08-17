@@ -5,6 +5,12 @@
 >
 > 本文件是编码依据。凡与本文件冲突的实现，以本文件为准；凡本文件说不清的，
 > 先改本文件再动代码。
+>
+> **实现进度**（2026-08-17）：脊柱与两个观测接缝已落地并测过 —— 八环节与闸门、
+> 两种冻结、E1–E8 证据组、计分、计时、adequacy、sourcing、题面、出厂、call 接缝的
+> 六个共享环节。**四个 scale 尚未实现**（`frf/scales/` 为空），
+> process 接缝的共享环节、E2B backend、coverage 后端也还没写。
+> §16 的里程碑是下一步。
 
 ---
 
@@ -498,39 +504,34 @@ module 的两条索引归一化成同一个 `Candidate`，进同一个队列。
 frontier-refactor-factory/
   frf/
     core/                 完全不知道观测长什么样 —— 只经手 Observation 这个抽象
-      llm.py                模型网关
-      credentials.py        唯一读取凭据的地方
-      sandbox.py            容器：E2B 微虚机（默认）/ 本机 Docker
+      pipeline.py           八个环节的驱动 + 闸门 + 归因（素材的锅 / 我们的锅）
+      scale.py              一个尺度要回答的四个问题
+      evidence.py           E1–E8 证据组
+      scoring.py            correctness 解锁 speedup，不封顶
+      timing.py             配对交替、预热、现场标定噪声地板、最差输入集；成本可插拔
+      adequacy.py           REACH + FLOOR，两个数缺一不可
+      sourcing.py           可枚举索引 + 去重记忆 + 覆盖度account
+      statement.py          题面：规则透明、答案不透明
       harbor.py             出厂格式（唯一一份）
-      scoring.py            correctness 解锁 speedup
-      timing.py             配对交替、预热、现场标定噪声地板、最差输入集
-      evidence.py           证据框架：每道闸都必须自证会咬人
-      sourcing.py           可枚举索引检索 + 去重记忆
-      adequacy.py           覆盖率 → 暗区 → 补探测循环
-      pipeline.py           八个环节的驱动；调 Observer，不拆开看它
+      sandbox.py            容器 backend 抽象
+      credentials.py        唯一读取凭据的地方
 
     observe/              知道观测长什么样 —— 两个接缝各自完整
-      process/              接缝 A：四通道
-        observation.py        exit / stdout / stderr / tree
-        freeze.py             跑 N 遍 → 按位置遮蔽不稳定的行
-      call/                 接缝 B：JSON 行协议
+      process/              接缝 A：四通道，按位置遮蔽（先比行数）
+      call/                 接缝 B：JSON wire
         protocol.py           wire 格式
-        observation.py        返回值树（或抛出的错误）
-        freeze.py             跑 N 遍 → 整条丢弃不稳定的 Probe，报丢弃率
-        shims/                每语言约 30 行的模板（数据）
-      probes/               schema 采样 / 容器里跑的生成器
-      compare/              精确 / 结构 / 数值包络
-      coverage/             每语言一个后端；缺失时降级为空后端
+        observation.py        返回值树 + 整条丢弃 + 丢弃率
+        runner.py             把 subject 当独立进程持有
+        stages.py             六个共享环节（freeze/adequacy/battery/emit/replay）
+        shims/serve.py        每语言约 30 行的模板（数据，不是框架代码）
+      probes/schema.py      声明式输入 schema + 采样（含 dtype/shape，kernel 靠它）
+      compare/values.py     精确 / 结构 / 数值包络
 
-    scales/               每个尺度只写它独有的那点
-      repo.py               从仓库自身的测试里采集命令序列
-      package.py            registry 枚举 + 契约面反射
-      module.py             扫源码 + 挖 PR
-      kernel.py             module + 数值 profile + 成本函数挂钩
+    scales/               每个尺度只写它独有的那点  ← 尚未实现
+    factory.py            公开接口：Factory / Settings / Result
 
-  tools/                  每个工具一个入口，文档字符串给出可直接运行的命令
   tests/                  只跑真实进程；mock 出来的测试测的是错的东西
-  DESIGN.md
+  DESIGN.md  README.md  pyproject.toml
 ```
 
 **代码规范**：全新编写，**不出现任何旧工厂的名字或缩写**。
