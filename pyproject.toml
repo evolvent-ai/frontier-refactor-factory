@@ -15,6 +15,9 @@ license = { text = "Apache-2.0" }
 # it emits can vendor its verifier without dragging an install behind it.
 dependencies = []
 
+[project.scripts]
+frf = "frf.cli:main"
+
 [project.optional-dependencies]
 # Sourcing and drafting reach the network; nothing else does. Kept optional so that reading a task,
 # replaying one, or running the test suite needs none of it.
