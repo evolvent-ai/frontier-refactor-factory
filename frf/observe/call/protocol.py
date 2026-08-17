@@ -76,15 +76,3 @@ class Response:
                    value=data.get("value"),
                    error=str(data.get("error", "")),
                    seconds=float(data.get("seconds", 0.0) or 0.0))
-
-
-def encode_response(id: int, *, value: Any = None, error: str | None = None,
-                    seconds: float | None = None) -> str:
-    """Build a reply line. Used by the serving side, and by tests standing in for one."""
-    if error is not None:
-        payload: dict[str, Any] = {"id": id, "ok": False, "error": str(error)}
-    elif seconds is not None:
-        payload = {"id": id, "ok": True, "seconds": float(seconds)}
-    else:
-        payload = {"id": id, "ok": True, "value": value}
-    return json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
