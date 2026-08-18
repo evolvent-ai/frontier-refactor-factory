@@ -113,19 +113,48 @@ def run_scenario(scenario: Scenario, program: list, *, fixtures_dir: str | None 
     root = tempfile.mkdtemp(prefix="frf-scenario-")
     workspace = os.path.join(root, "workspace")
     os.makedirs(workspace, exist_ok=True)
+    # READABLE BY THE ACCOUNT THE SUBJECT RUNS AS. `mkdtemp` creates 0700, which is right for a
+    # temporary directory and wrong here: the whole point of the isolation wrapper is that the
+    # subject runs as somebody else, and that somebody then cannot read its own inputs. The failure
+    # is "permission denied" on a graded channel, which looks like the program rejecting the file.
+    # The directory is inside a per-scenario temp root that is removed afterwards, so opening it is
+    # not a wider exposure than the run itself.
+    os.chmod(root, 0o755)
+    os.chmod(workspace, 0o755)
     observations = []
     try:
         if scenario.fixture and fixtures_dir:
             shutil.unpack_archive(os.path.join(fixtures_dir, scenario.fixture), workspace)
 
         environment = dict(os.environ)
+        # WHAT A SHELL SOURCES AT STARTUP IS NOT THE SUBJECT'S BEHAVIOUR. `sh` reads $ENV and bash
+        # reads $BASH_ENV before running anything, so on a host that points them at a system profile
+        # the profile's output lands on a GRADED channel: this machine sets ENV=/etc/shinit_v2,
+        # which runs dpkg, which warns about a file it cannot read. Frozen, that warning becomes
+        # part of the expectation, and a submission is then judged on whether it reproduces our
+        # harness's noise on our machine. Removed here rather than filtered from the output,
+        # because a channel must record what the subject did.
+        environment.pop("ENV", None)
+        environment.pop("BASH_ENV", None)
         environment.update(scenario.environment)
         for step in scenario.steps:
             cwd = os.path.normpath(os.path.join(workspace, step.cwd))
             os.makedirs(cwd, exist_ok=True)
-            argv = [part.replace("{PROGRAM}", program[0]) if isinstance(part, str) else part
-                    for part in step.argv]
-            argv = program + argv[1:] if argv and argv[0] == "{PROGRAM}" else argv
+            # THE WHOLE-TOKEN CASE FIRST, and the order is the bug this comment exists for. Doing
+            # the textual replacement first rewrites a bare `{PROGRAM}` into `program[0]`, so the
+            # test below never matches and the rest of `program` is dropped -- which is invisible
+            # while the program is one word, and catastrophic once it is not. Wrapping the two sides
+            # for isolation makes it several words: `setpriv --reuid nobody -- sh -c ... -- prog`.
+            # Every scenario then ran `setpriv` with the step's arguments instead of the program,
+            # produced identical output, and the corpus scored a do-nothing submission at 100%.
+            if step.argv and step.argv[0] == "{PROGRAM}":
+                argv = list(program) + list(step.argv[1:])
+            else:
+                # An embedded `{PROGRAM}`, as in `sh -c '{PROGRAM} --help'`. Only the executable can
+                # be substituted textually, so a multi-word program is joined back into one string.
+                joined = " ".join(program)
+                argv = [part.replace("{PROGRAM}", joined) if isinstance(part, str) else part
+                        for part in step.argv]
 
             try:
                 done = subprocess.run(argv, cwd=cwd, env=environment, input=step.stdin,

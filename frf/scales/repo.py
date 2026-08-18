@@ -69,6 +69,10 @@ class Observer:
         self.material = material
         # Which sandbox the program runs in, so isolation is reported from what is in force.
         self._backend = backend
+        # Set by `_restricted` when the wrapper is genuinely applied. A flag rather than an
+        # inference from the backend's name: naming a container says the defence is POSSIBLE, and
+        # only applying it makes the defence real.
+        self._isolated = False
         self._program: list = []
 
     def build(self, spec: Spec) -> None:
@@ -81,8 +85,29 @@ class Observer:
         self._program = [part.replace("{ROOT}", self.material.root)
                          for part in (self.material.invoke or [])]
 
+    def _restricted(self, program: list) -> list:
+        """The program, wrapped so it runs unprivileged and cannot fork a fleet.
+
+        Applied only where it means something. On a backend that shares this machine the wrapper
+        would be theatre -- both sides still see the same kernel -- and on a host with neither
+        `setpriv` nor `su` it cannot be applied at all. Both cases leave `_isolated` False, which is
+        what makes E6 report INCONCLUSIVE rather than certify a defence that is not in force.
+
+        It matters more on this seam than on the other: a repository task times a whole program, and
+        a program can fork.
+        """
+        if getattr(self._backend, "name", "") not in ("docker", "remote") or not program:
+            return program
+        try:
+            wrapped = integrity.restricted_argv(program)
+        except LookupError:
+            return program
+        self._isolated = True
+        return wrapped
+
     def run(self, spec: Spec, scenario: Scenario) -> list:
-        return run_scenario(scenario, self._program, fixtures_dir=self.material.fixtures or None,
+        return run_scenario(scenario, self._restricted(self._program),
+                            fixtures_dir=self.material.fixtures or None,
                             exclude=self.material.exclude)
 
     def run_all(self, spec: Spec, scenarios: list, *, submission: str | None = None,
@@ -95,6 +120,9 @@ class Observer:
         program = self._program
         if submission is not None or mutated is not None:
             program = self._staged(submission if submission is not None else self._mutant())
+        # BOTH SIDES ARE WRAPPED OR NEITHER IS. The reference and the candidate must start the same
+        # way, or the comparison measures the wrapper rather than the programs.
+        program = self._restricted(program)
         return {s.probe_id: run_scenario(s, program, fixtures_dir=self.material.fixtures or None,
                                          exclude=self.material.exclude)
                 for s in scenarios}
@@ -131,7 +159,7 @@ class Observer:
 
     def isolation(self):
         """How the two sides are kept apart while one is timed -- reported, never assumed."""
-        return integrity.isolation_for(self._backend)
+        return integrity.isolation_for(self._backend, applied=self._isolated)
 
     def isolated(self) -> bool:
         """Whether timing runs with the two sides separated.
@@ -223,7 +251,14 @@ class Repo:
 
 
 def _task_name(material: Material) -> str:
+    """A readable name for the task. The repository, not the revision.
+
+    The commit is pinned in provenance and must not be in the NAME: `sh@d6550df7ed8d-faster` is
+    what a person has to read, type and compare, and two revisions of one repository producing
+    names that differ by twelve hex digits makes a batch report unreadable for no gain.
+    """
     stem = material.identity.rstrip("/").rsplit("/", 1)[-1].replace(".git", "").lower()
+    stem = stem.split("@", 1)[0] or stem
     if material.target_language:
         return "%s-%s-rewrite" % (stem, material.target_language.lower())
     return "%s-faster" % stem

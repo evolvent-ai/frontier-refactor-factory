@@ -213,7 +213,14 @@ class Isolation:
 
 # What a timed process may spawn. Enough for a runtime that uses a thread pool or a GC thread;
 # far below what a submission would need to farm its work out to a fleet of helpers.
-PROCESS_CAP = 64
+#
+# MEASURED, AND HIGHER THAN IT LOOKS. `ulimit -u` is a limit on the USER's processes, not on this
+# process's descendants -- so the ceiling is shared with everything else already running as that
+# user. At 64 a Go program could not start: "runtime: failed to create new OS thread (have 2
+# already; errno=11)", and every scenario in a repository task failed identically, which reads as
+# a program that does not work rather than as a cap set too low. The number has to clear the shared
+# floor and still be far below a fleet.
+PROCESS_CAP = 512
 
 
 def isolation_for(backend, *, applied: bool = False) -> Isolation:
@@ -265,9 +272,21 @@ def restricted_argv(argv: list, *, user: str = "nobody", cap: int = PROCESS_CAP)
     started: the subject must be started identically for the reference and for the candidate, or
     the comparison measures the wrapper.
     """
-    limited = ["sh", "-c", "ulimit -u %d 2>/dev/null; exec \"$@\"" % cap, "--"] + list(argv)
+    # `env -i`-style scrubbing of the two variables a POSIX shell reads at startup. This host sets
+    # ENV=/etc/shinit_v2, which runs dpkg, which writes a permission warning to STDERR -- a graded
+    # channel. The expectation then contains our harness's noise, and a submission is judged on
+    # whether it reproduces it. Unsetting them here rather than filtering the output afterwards:
+    # what a channel records must be what the subject did, and a filter is a second place to keep
+    # in step with whatever a future image happens to source.
+    limited = ["sh", "-c", "unset ENV BASH_ENV; ulimit -u %d 2>/dev/null; exec \"$@\"" % cap,
+               "--"] + list(argv)
     if shutil.which("setpriv"):
-        return ["setpriv", "--reuid", user, "--regid", "nogroup", "--init-groups", "--"] + limited
+        # `--init-groups` reads the user database and, on some images, drags dpkg's configuration
+        # in with it -- which then complains to stderr about a file it cannot read. That warning is
+        # not the subject's output, but it lands on a graded channel and becomes part of the frozen
+        # expectation, so a submission is judged on whether it reproduces our wrapper's noise.
+        # `--clear-groups` drops supplementary groups without consulting anything.
+        return ["setpriv", "--reuid", user, "--regid", "nogroup", "--clear-groups", "--"] + limited
     if shutil.which("su"):
         return ["su", "-s", "/bin/sh", user, "-c",
                 " ".join(_shell_quote(part) for part in limited)]
