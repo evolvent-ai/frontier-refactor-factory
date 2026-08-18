@@ -45,6 +45,12 @@ BUILD_TIMEOUT = 600.0
 # material's fault and an ordinary refusal.
 PROBE_TIMEOUT = 30.0
 
+# How many DIFFERENT perturbations E3 may try before concluding that a subject cannot be
+# distinguished by this crude a mutation. More than one because an edit can be real and still
+# semantically inert -- see `mutate` -- and one such edit should not decide the verdict for a
+# candidate that is otherwise perfectly gradeable.
+MUTATION_ATTEMPTS = 4
+
 
 class BuildFailed(RuntimeError):
     """The subject could not be compiled -- material's fault, not the wire's.
@@ -152,7 +158,8 @@ class Observer:
         self._isolated = True
         return wrapped
 
-    def subject(self, spec: Spec | None = None, *, mutated: bool = False) -> Subject:
+    def subject(self, spec: Spec | None = None, *, mutated: bool = False,
+                attempt: int = 0) -> Subject:
         """The subject, served. `mutated` serves a perturbed one instead.
 
         THE MUTANT IS WHAT MAKES E3 MEAN ANYTHING. That check asks whether the verifier would notice
@@ -168,17 +175,17 @@ class Observer:
         if not mutated:
             return Subject(self._restricted(self._argv), cwd=self.workspace,
                            timeout=PROBE_TIMEOUT)
-        argv, room = self._mutant()
+        argv, room = self._mutant(attempt)
         return Subject(self._restricted(argv), cwd=room, timeout=PROBE_TIMEOUT)
 
-    def _mutant(self) -> tuple:
+    def _mutant(self, attempt: int = 0) -> tuple:
         """A copy of the workspace whose subject has been perturbed. -> (argv, cwd).
 
         The perturbation is applied to the SOURCE and the result is rebuilt, because a compiled
         language has nothing else to perturb. It is deliberately crude -- see `mutate` -- since what
         E3 needs is any provable difference in behaviour, not a realistic wrong answer.
         """
-        room = os.path.join(self.workspace, ".mutant")
+        room = os.path.join(self.workspace, ".mutant-%d" % attempt)
         if os.path.isdir(room):
             shutil.rmtree(room, ignore_errors=True)
         os.makedirs(room, exist_ok=True)
@@ -186,7 +193,8 @@ class Observer:
         original = open(self.material.source_path, encoding="utf-8", errors="replace").read()
         perturbed = os.path.join(room, os.path.basename(self.material.source_path))
         with open(perturbed, "w", encoding="utf-8") as handle:
-            handle.write(mutate(original, self.material.language, self.material.symbol))
+            handle.write(mutate(original, self.material.language, self.material.symbol,
+                                attempt))
 
         build, argv = shims.materialise(room, self.material.language, perturbed,
                                         self.material.symbol)
@@ -337,6 +345,14 @@ _PERTURBATIONS = (
     ("<=", "<"),
     ("==", "!="),
     (" and ", " or "),
+    # THE BARE COMPARISONS, which is what a search or a selection is made of. Without them
+    # `find_min_max` -- whose entire logic is `element < minimum` and `element > maximum` -- offered
+    # exactly one mutable site, an initialiser that computes the same answer either way, so the
+    # subject was reported unperturbable when in fact every line of it was a comparison. Ordered
+    # after the two-character forms so that `>=` is matched as `>=` rather than as `>` followed by a
+    # stray `=`.
+    (" < ", " > "),
+    (" > ", " < "),
     # INDEXING AND SLICING, which is what real code does when it does no arithmetic at all. The
     # first four were enough for subjects written for this factory and left a great many mined
     # functions unperturbable -- a routine that filters a list and returns `xs[-1]` contains not one
@@ -353,7 +369,7 @@ _PERTURBATIONS = (
 )
 
 
-def mutate(source: str, language: str, symbol: str = "") -> str:
+def mutate(source: str, language: str, symbol: str = "", attempt: int = 0) -> str:
     """One small change to a subject's source, chosen so the result still compiles.
 
     Returns the source unchanged when nothing matched, which is not a failure: the mutant then
@@ -375,13 +391,32 @@ def mutate(source: str, language: str, symbol: str = "") -> str:
     over-approximation in the braced ones.
     """
     start, end = _window_of(source, symbol)
+    # PAST THE SIGNATURE. A perturbation that lands on the definition line renames the function --
+    # `min(` -> `max(` turns `find_min_max` into `find_min_min` -- and the shim then cannot find the
+    # symbol it was told to serve. The mutant dies on import, which is not a difference in
+    # behaviour but a broken build, and it arrives as an unclassified failure counted as OURS.
+    signature_end = source.find("\n", start)
+    if signature_end != -1:
+        start = signature_end + 1
+    # EVERY PLACE A PERTURBATION COULD LAND, in a stable order, so that `attempt` selects among
+    # them. Enumerating the sites rather than the RULES is what makes the retry work: a subject
+    # containing one `[0]` and six `+` offers seven distinct mutants, where counting rules would
+    # have offered two.
+    sites = []
     for original, replacement in _PERTURBATIONS:
-        # One occurrence, not all of them. Replacing every `+` in a file tends to produce something
-        # that does not compile, and a mutant that does not build demonstrates nothing.
-        index = source.find(original, start, end)
-        if index != -1:
-            return source[:index] + replacement + source[index + len(original):]
-    return source
+        at = source.find(original, start, end)
+        while at != -1:
+            sites.append((at, original, replacement))
+            at = source.find(original, at + 1, end)
+    # By position, so the first attempt is the earliest edit and the order does not depend on how
+    # the table happens to be written.
+    sites.sort()
+    if attempt >= len(sites):
+        return source
+    index, original, replacement = sites[attempt]
+    # One occurrence, not all of them. Replacing every `+` in a file tends to produce something that
+    # does not compile, and a mutant that does not build demonstrates nothing.
+    return source[:index] + replacement + source[index + len(original):]
 
 
 def _window_of(source: str, symbol: str) -> tuple:

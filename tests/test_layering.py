@@ -77,6 +77,33 @@ def test_a_module_exempted_from_the_word_check_really_only_runs_commands():
             % (name, sorted({"freeze", "grade"} & defined)))
 
 
+def test_a_seam_never_imports_a_scale():
+    """Direction of dependency, one layer down. A seam is what a scale is written against.
+
+    Added after a seam imported a constant from `scales/module.py` -- which worked, and which no
+    test caught, because the check below only guards `core/`. A seam that reaches into a scale has
+    inverted the dependency the layout exists to keep, and the next scale to want that constant
+    would have to import from a sibling or copy it.
+    """
+    bad = []
+    for path in _python_files("frf", "observe"):
+        tree = ast.parse(open(path).read())
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+                # A relative import records its module as None or a bare name, so the dots are
+                # what say how far up it reached. `from ...scales.x import y` is level 3.
+                if node.level and node.module:
+                    names = ["%s%s" % ("." * node.level, node.module)]
+            for name in names:
+                if "scales" in name:
+                    bad.append("%s imports %s" % (os.path.relpath(path, ROOT), name))
+    assert not bad, bad
+
+
 def test_core_never_imports_a_seam():
     """Direction of dependency: seams may use core, core may not reach back.
 

@@ -31,6 +31,17 @@ from . import observation as obs
 from .runner import SubjectFailed
 
 
+# How many DIFFERENT perturbations E3 may try before concluding that a subject cannot be
+# distinguished this way. More than one because an edit can be real and still semantically inert:
+# `find_min_max` initialises from `array[0]`, and rewriting that to `array[-1]` computes exactly the
+# same answer. One such edit should not decide the verdict for a subject that is otherwise
+# perfectly gradeable.
+#
+# Declared HERE and not imported from a scale: this is the seam, and a seam that reaches into
+# `scales/` has inverted the dependency the whole layout exists to keep.
+MUTATION_ATTEMPTS = 4
+
+
 @dataclass
 class Corpus:
     """What a freeze produced, in the shape the pipeline's gates read.
@@ -179,16 +190,37 @@ def _perturb(observer, spec: Spec, corpus: Corpus) -> tuple[bool, bool]:
     the mutation never reached anything graded. Only comparing the observations tells those apart,
     and a check that cannot is a rubber stamp.
     """
-    diverged = caught = False
-    with observer.subject(spec, mutated=True) as subject:
-        for expectation in corpus.expectations:
-            answer = subject.call("run", corpus.inputs[expectation.probe_id])
-            if answer.digest() != expectation.digest:
-                diverged = True
-            got, want, _ = obs.grade(expectation, answer)
-            if got != want:
-                caught = True
-    return diverged, caught
+    for attempt in range(MUTATION_ATTEMPTS):
+        diverged = caught = False
+        try:
+            with observer.subject(spec, mutated=True, attempt=attempt) as subject:
+                for expectation in corpus.expectations:
+                    answer = subject.call("run", corpus.inputs[expectation.probe_id])
+                    if answer.digest() != expectation.digest:
+                        diverged = True
+                    got, want, _ = obs.grade(expectation, answer)
+                    if got != want:
+                        caught = True
+        except TypeError:
+            # An observer that does not accept `attempt` only has one mutant to offer, which is the
+            # older contract and still a valid answer -- there is simply nothing further to try.
+            with observer.subject(spec, mutated=True) as subject:
+                for expectation in corpus.expectations:
+                    answer = subject.call("run", corpus.inputs[expectation.probe_id])
+                    if answer.digest() != expectation.digest:
+                        diverged = True
+                    got, want, _ = obs.grade(expectation, answer)
+                    if got != want:
+                        caught = True
+            return diverged, caught
+        if diverged:
+            # A perturbation that MOVED the observation is what the check needs; whether it was
+            # caught is the finding. Stopping here rather than trying the rest keeps the cost of a
+            # gradeable subject at one mutant.
+            return diverged, caught
+    # Nothing this crude could distinguish. Reported as no divergence, which E3 turns into
+    # INCONCLUSIVE -- the honest verdict for a subject nobody could perturb this way.
+    return False, False
 
 
 def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
