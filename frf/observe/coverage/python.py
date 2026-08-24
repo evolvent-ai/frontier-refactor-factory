@@ -76,18 +76,33 @@ json.dump(report, open(out_path, "w"))
 '''
 
 
-def _executable_lines(path: str) -> set:
-    """Which lines of a file could execute at all.
+def _executable_lines(path: str, symbol: str = "") -> set:
+    """Which lines could execute at all. With `symbol`, only that function's own lines.
 
     The denominator has to exclude blanks, comments and docstrings, or a heavily documented subject
     reports low coverage for being well commented. Derived from the compiled code object rather than
     by parsing text, because the interpreter's opinion about which lines are executable is the one
     the tracer will agree with.
+
+    THE DENOMINATOR IS THE SUBJECT, NOT THE FILE IT LIVES IN. DESIGN.md s7 says a module task
+    measures "the lines of the symbol under test", and the difference is not cosmetic: a mined
+    function usually shares a file with a dozen siblings, so counting the file charges the corpus
+    for every line it was never asked to reach. Measured on the current pond that put reach at
+    ~20% for every candidate and refused all of them at the adequacy gate -- a number describing
+    the file's size rather than the corpus's thoroughness.
+
+    Falls back to the whole file when the symbol cannot be found, which keeps a scale that does
+    not name one (repo, whose subject IS the program) working unchanged.
     """
     try:
         compiled = compile(open(path, encoding="utf-8").read(), path, "exec")
     except (OSError, SyntaxError):
         return set()
+
+    if symbol:
+        target = _code_for_symbol(compiled, symbol)
+        if target is not None:
+            compiled = target
 
     lines, pending = set(), [compiled]
     while pending:
@@ -95,6 +110,24 @@ def _executable_lines(path: str) -> set:
         lines.update(lineno for lineno in _line_numbers(code) if lineno)
         pending.extend(c for c in code.co_consts if hasattr(c, "co_code"))
     return lines
+
+
+def _code_for_symbol(module_code, symbol: str):
+    """The code object for one top-level function. -> None if this file does not define it.
+
+    Searched recursively so that a decorated or nested definition is still found; the first match
+    on `co_name` wins, which is the same function the shim serves by that name.
+    """
+    pending = [module_code]
+    while pending:
+        code = pending.pop()
+        for const in code.co_consts:
+            if not hasattr(const, "co_code"):
+                continue
+            if const.co_name == symbol:
+                return const
+            pending.append(const)
+    return None
 
 
 def _line_numbers(code) -> list:
@@ -143,11 +176,16 @@ class PythonTrace:
             reached_by_file = json.load(open(out_path))
 
         root = os.path.dirname(os.path.abspath(target))
+        symbol = self._symbol_of(spec)
+        subject_file = os.path.basename(target)
         total = reached = 0
         dark = []
-        for relative in sorted(set(reached_by_file) | {os.path.basename(target)}):
+        for relative in sorted(set(reached_by_file) | {subject_file}):
             path = os.path.join(root, relative)
-            executable = _executable_lines(path)
+            # THE SUBJECT'S OWN LINES for the file that defines it; the whole file for anything
+            # else it happens to pull in. Counting the subject file whole charges the corpus for
+            # every sibling function it was never asked to exercise -- see `_executable_lines`.
+            executable = _executable_lines(path, symbol if relative == subject_file else "")
             if not executable:
                 continue
             hit = set(reached_by_file.get(relative, ())) & executable

@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 
 from .observation import Observation, Stream
@@ -30,6 +31,7 @@ from .observation import Observation, Stream
 WORKSPACE_TOKEN = "<workspace>"
 
 DEFAULT_STEP_TIMEOUT = 300.0
+PROGRAM_TOKEN = "{PROGRAM}"
 
 
 @dataclass(frozen=True)
@@ -103,13 +105,20 @@ def _scrub(text: str, workspace: str) -> str:
 
 
 def run_scenario(scenario: Scenario, program: list, *, fixtures_dir: str | None = None,
-                 exclude: tuple = (), timeout: float = DEFAULT_STEP_TIMEOUT) -> list:
+                 exclude: tuple = (), timeout: float = DEFAULT_STEP_TIMEOUT,
+                 backend=None, remote_program: list | None = None,
+                 remote_fixtures: str | None = None) -> list:
     """Run every step in a fresh workspace. -> one Observation per step.
 
     A step that fails does NOT abort the scenario. "The program errored here and recovered there" is
     behaviour, and a reimplementation has to reproduce it -- stopping at the first non-zero exit
     would silently stop grading everything after it.
     """
+    if backend is not None and getattr(backend, "name", "") not in ("local-process", ""):
+        return _run_remote_scenario(scenario, program, backend=backend,
+                                    remote_program=remote_program or program,
+                                    remote_fixtures=remote_fixtures,
+                                    exclude=exclude, timeout=timeout)
     root = tempfile.mkdtemp(prefix="frf-scenario-")
     workspace = os.path.join(root, "workspace")
     os.makedirs(workspace, exist_ok=True)
@@ -192,3 +201,141 @@ def time_scenario(scenario: Scenario, program: list, *, repeats: int = 3, **kwar
         run_scenario(scenario, program, **kwargs)
         best = min(best, time.perf_counter() - started)
     return best
+
+
+def run_remote_many(scenarios: list[Scenario], *, backend, remote_program: list,
+                    remote_fixtures: str | None, exclude: tuple = (),
+                    timeout: float = DEFAULT_STEP_TIMEOUT) -> dict:
+    """Run a corpus in one sandbox command and pull all snapshots once.
+
+    This is the process-seam equivalent of the call wire's batch transport. Each scenario remains
+    isolated in its own workspace, but network round trips scale with freeze runs rather than probes.
+    """
+    remote_root = "/tmp/frf-corpus-%s" % uuid.uuid4().hex[:12]
+    local = tempfile.mkdtemp(prefix="frf-remote-corpus-")
+    results = remote_root + "/results"
+    try:
+        script = ["set +e", "mkdir -p %s" % _shell_quote(results)]
+        joined = " ".join(_shell_quote(x) for x in remote_program)
+        for number, scenario in enumerate(scenarios):
+            workspace = remote_root + "/workspace-%03d" % number
+            base = results + "/%03d" % number
+            script.append("mkdir -p %s %s" % (_shell_quote(workspace), _shell_quote(base)))
+            if scenario.fixture and remote_fixtures:
+                archive = remote_fixtures.rstrip("/") + "/" + scenario.fixture
+                script.append("tar -xf %s -C %s" % (_shell_quote(archive), _shell_quote(workspace)))
+            for index, step in enumerate(scenario.steps):
+                cwd = os.path.normpath(workspace + "/" + step.cwd)
+                if step.argv and step.argv[0] == PROGRAM_TOKEN:
+                    argv = joined + " " + " ".join(_shell_quote(x) for x in step.argv[1:])
+                else:
+                    argv = " ".join(_shell_quote(str(x).replace(PROGRAM_TOKEN, " ".join(remote_program)))
+                                  for x in step.argv)
+                room = base + "/%03d" % index
+                command = "mkdir -p %s %s; " % (_shell_quote(cwd), _shell_quote(room))
+                command += ("printf %s | %s" % (_shell_quote(step.stdin), argv)
+                            if step.stdin is not None else argv)
+                command += " >%s/out 2>%s/err; printf '%%s' $? >%s/code; " % (
+                    _shell_quote(room), _shell_quote(room), _shell_quote(room))
+                command += "mkdir -p %s/tree; cp -a %s/. %s/tree/" % (
+                    _shell_quote(room), _shell_quote(workspace), _shell_quote(room))
+                script.append(command)
+        environment = dict(os.environ)
+        environment.pop("ENV", None)
+        environment.pop("BASH_ENV", None)
+        done = backend.run(["sh", "-c", "\n".join(script)], env=environment,
+                           timeout=timeout * max(1, sum(len(s.steps) for s in scenarios)))
+        if not done.ok:
+            raise RuntimeError("remote corpus failed: %s" % done.tail())
+        backend.pull(results, local)
+        answer = {}
+        for number, scenario in enumerate(scenarios):
+            observations = []
+            for index in range(len(scenario.steps)):
+                room = os.path.join(local, "%03d" % number, "%03d" % index)
+                code = int(open(os.path.join(room, "code"), encoding="utf-8").read() or 127)
+                stdout = open(os.path.join(room, "out"), encoding="utf-8", errors="replace").read()
+                stderr = open(os.path.join(room, "err"), encoding="utf-8", errors="replace").read()
+                observations.append(Observation(code, Stream.of(_scrub(stdout, remote_root)),
+                                                Stream.of(_scrub(stderr, remote_root)),
+                                                Stream(tuple(_tree_lines(os.path.join(room, "tree"), exclude)))))
+            answer[scenario.probe_id] = observations
+        return answer
+    finally:
+        backend.run(["rm", "-rf", remote_root], timeout=60)
+        shutil.rmtree(local, ignore_errors=True)
+
+
+def _run_remote_scenario(scenario: Scenario, program: list, *, backend,
+                         remote_program: list, remote_fixtures: str | None,
+                         exclude: tuple, timeout: float) -> list:
+    """Process one scenario inside the selected sandbox backend.
+
+    The backend has no portable interactive-pipe API, so each step is one remote command. The
+    workspace remains remote between steps, while its snapshot is pulled after each step. This
+    preserves scenario state and keeps all subject execution off the factory host.
+    """
+    remote_root = "/tmp/frf-scenario-%s" % uuid.uuid4().hex[:12]
+    workspace = remote_root + "/workspace"
+    local_snapshot = tempfile.mkdtemp(prefix="frf-remote-snapshot-")
+    try:
+        made = backend.run(["mkdir", "-p", workspace], timeout=60)
+        if not made.ok:
+            raise RuntimeError("remote scenario workspace failed: %s" % made.tail())
+        if scenario.fixture and remote_fixtures:
+            archive = remote_fixtures.rstrip("/") + "/" + scenario.fixture
+            unpack = backend.run(["sh", "-c", "tar -xf %s -C %s" %
+                                  (_shell_quote(archive), _shell_quote(workspace))], timeout=120)
+            if not unpack.ok:
+                raise RuntimeError("remote fixture unpack failed: %s" % unpack.tail())
+        environment = dict(os.environ)
+        environment.pop("ENV", None)
+        environment.pop("BASH_ENV", None)
+        environment.update(scenario.environment)
+        results = remote_root + "/results"
+        script = ["set +e", "mkdir -p %s" % _shell_quote(results)]
+        joined = " ".join(_shell_quote(x) for x in remote_program)
+        for index, step in enumerate(scenario.steps):
+            cwd = os.path.normpath(workspace + "/" + step.cwd)
+            if step.argv and step.argv[0] == PROGRAM_TOKEN:
+                argv = joined + " " + " ".join(_shell_quote(x) for x in step.argv[1:])
+            else:
+                argv = " ".join(_shell_quote(str(x).replace(PROGRAM_TOKEN, " ".join(remote_program)))
+                                  for x in step.argv)
+            command = "mkdir -p %s; " % _shell_quote(cwd)
+            if step.stdin is not None:
+                command += "printf %s | %s" % (_shell_quote(step.stdin), argv)
+            else:
+                command += argv
+            command += " >%s/out 2>%s/err; printf '%%s' $? >%s/code; " % (
+                _shell_quote(results + "/%03d" % index),
+                _shell_quote(results + "/%03d" % index),
+                _shell_quote(results + "/%03d" % index))
+            command += "mkdir -p %s; cp -a %s/. %s/" % (
+                _shell_quote(results + "/%03d/tree" % index),
+                _shell_quote(workspace), _shell_quote(results + "/%03d/tree" % index))
+            script.append("mkdir -p %s; %s" % (_shell_quote(results + "/%03d" % index), command))
+        done = backend.run(["sh", "-c", "\n".join(script)], workdir=workspace,
+                           env=environment, timeout=timeout * max(1, len(scenario.steps)))
+        if not done.ok:
+            raise RuntimeError("remote scenario failed: %s" % done.tail())
+        pulled = tempfile.mkdtemp(prefix="frf-remote-results-")
+        backend.pull(results, pulled)
+        observations = []
+        for index in range(len(scenario.steps)):
+            room = os.path.join(pulled, "%03d" % index)
+            code = int(open(os.path.join(room, "code"), encoding="utf-8").read() or 127)
+            stdout = _scrub(open(os.path.join(room, "out"), encoding="utf-8", errors="replace").read(), workspace)
+            stderr = _scrub(open(os.path.join(room, "err"), encoding="utf-8", errors="replace").read(), workspace)
+            observations.append(Observation(code, Stream.of(stdout), Stream.of(stderr),
+                                             Stream(tuple(_tree_lines(os.path.join(room, "tree"), exclude)))))
+        shutil.rmtree(pulled, ignore_errors=True)
+        return observations
+    finally:
+        backend.run(["rm", "-rf", remote_root], timeout=60)
+        shutil.rmtree(local_snapshot, ignore_errors=True)
+
+
+def _shell_quote(value: str) -> str:
+    import shlex
+    return shlex.quote(str(value))

@@ -1,18 +1,25 @@
 .env
 .env.*
 !.env.example
+
+# Python/build caches
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Generated source checkouts and task output
 work/
 tasks/
 *.tar.gz
 
-# Build artefacts from `pip install -e .`
-*.egg-info/
-build/
-dist/
+# Run logs/checkpoints and local roll configs
+*.log
+*.jsonl
+run_*.yaml
 
-# The JVMTI coverage agent is compiled on demand from agents/jvmti_lines.c and cached beside it.
-# The source is the artefact worth keeping; the object is this machine's.
+# Coverage build artefacts
 frf/observe/coverage/agents/*.so

@@ -26,7 +26,7 @@ from ..core import integrity
 from ..core.scale import Candidate, Spec
 from ..observe import coverage
 from ..observe.call import shims
-from ..observe.call.runner import Subject
+from ..observe.call.runner import RemoteSubject, Subject
 from ..observe.probes.schema import Schema, sample
 
 # How many probes a corpus is drawn with. Above the pipeline's floor by a margin: on this seam a
@@ -172,10 +172,16 @@ class Observer:
         alternative -- rewriting the subject in place and putting it back -- leaves a corrupted
         subject behind on any failure between the two.
         """
-        if not mutated:
-            return Subject(self._restricted(self._argv), cwd=self.workspace,
-                           timeout=PROBE_TIMEOUT)
-        argv, room = self._mutant(attempt)
+        argv, room = ((self._argv, self.workspace) if not mutated
+                      else self._mutant(attempt))
+        # IN A SANDBOX, THE SUBJECT RUNS IN THE SANDBOX. Serving it here while a container was
+        # selected froze an expectation against the factory host -- a program with this machine's
+        # interpreter and this machine's installed packages, which is not what the shipped image
+        # contains. What travels is the workspace: one subject file and one shim, so the transfer
+        # is two small files rather than a checkout.
+        if getattr(self._backend, "name", "") in ("docker", "remote"):
+            return RemoteSubject(argv, workspace=room, backend=self._backend,
+                                 timeout=PROBE_TIMEOUT)
         return Subject(self._restricted(argv), cwd=room, timeout=PROBE_TIMEOUT)
 
     def _mutant(self, attempt: int = 0) -> tuple:
@@ -186,6 +192,7 @@ class Observer:
         E3 needs is any provable difference in behaviour, not a realistic wrong answer.
         """
         room = os.path.join(self.workspace, ".mutant-%d" % attempt)
+        # E3 mutations are generated in a separate workspace from the actual source.
         if os.path.isdir(room):
             shutil.rmtree(room, ignore_errors=True)
         os.makedirs(room, exist_ok=True)
@@ -324,8 +331,16 @@ class Module:
 
 
 def _task_name(material: Material) -> str:
-    """A stable, readable name. Derived from the symbol rather than from a counter, so that two runs
-    over the same material produce the same task name and a report stays comparable."""
+    """Stable and collision-free: repository slug plus symbol.
+
+    The symbol alone is not a valid task identity: hundreds of repositories contain `sort` or
+    `parse`, and emitting them into one directory would overwrite an earlier task.
+    """
+    identity = material.identity
+    if identity.startswith("github:"):
+        rest = identity[len("github:"):].split("@", 1)[0]
+        repo = rest.rsplit("/", 1)[-1]
+        return "%s-%s" % (repo.lower(), material.symbol.replace("_", "-").replace(".", "-"))
     return material.symbol.replace("_", "-").replace(".", "-").lower()
 
 

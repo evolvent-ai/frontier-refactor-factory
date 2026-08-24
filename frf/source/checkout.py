@@ -94,7 +94,14 @@ class Checkout:
                 "description": self.description, "identity": self.identity,
                 "commit": self.commit, "scenarios": self.scenarios,
                 "target_language": self.target_language,
-                "exclude": (".git", "target", "build", "node_modules")}
+                "exclude": (".git", "target", "build", "node_modules"),
+                "contract": {"kind": "repo", "provenance": {
+                    "subject_source": "%s@%s" % (self.identity, self.commit),
+                    "contract_source": "checkout-inspection",
+                    "auxiliary_generated": False,
+                    "evidence": [self.root],
+                }, "data": {"root": self.root, "build": self.build,
+                             "target_paths": [], "verify": []}}}
 
 
 class Repositories:

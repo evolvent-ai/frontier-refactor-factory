@@ -1,0 +1,31 @@
+output_dir: tasks/e2b_test
+freeze_runs: 5
+max_concurrent: 10
+sandboxed: true
+
+# Set GITHUB_TOKEN in the environment; do not commit credentials.
+
+jobs:
+  # module — Python: one hot function file from a GitHub algo repo (call seam, schema probes)
+  - scale: module
+    form: inplace
+    source_language: python
+    budget: 5
+
+  # kernel — Python: numeric-intensive function file (call seam, array schema, float envelope)
+  - scale: kernel
+    form: inplace
+    source_language: python
+    budget: 5
+
+  # package — Python: whole library public surface (call seam, generator probes)
+  - scale: package
+    form: inplace
+    source_language: python
+    budget: 5
+
+  # repo — Go: runnable CLI tool (process seam, lifted scenarios, four channels)
+  - scale: repo
+    form: inplace
+    source_language: go
+    budget: 5

@@ -77,20 +77,14 @@ def available() -> list[str]:
 def usable(language: str) -> bool:
     """Whether a measurement could be taken here -- NECESSARY conditions only, not sufficient.
 
-    A coverage backend drives the subject through the same shim the pipeline serves it with, so a
-    language that cannot be served here cannot be measured here. That is what this checks, and it
-    is worth being exact about what it does NOT: two backends need a second tool beyond the shim's.
-    Rust needs `llvm-profdata` from the `llvm-tools` component, which rustup does not install by
-    default; Java needs a C compiler to build the JVMTI agent. Both detect their own absence and
-    return UNMEASURED, so nothing breaks -- but a caller using this to decide whether a number will
-    exist can still be told yes and get none.
-
-    Probing those would mean running a compiler to answer a question about capability, which is too
-    expensive for something called in a loop. So the limit is stated instead of hidden.
+    Two backends need a second tool beyond the standard toolchain. Rust needs `llvm-profdata` from
+    the `llvm-tools` component, which rustup does not install by default; Java needs a C compiler
+    to build the JVMTI agent. Both detect their own absence and return UNMEASURED, so nothing
+    breaks -- but a caller using this to decide whether a number will exist can still be told yes
+    and get none. Probing would mean running a compiler to answer a capability question, which is
+    too expensive for something called in a loop.
     """
-    from ..call import shims
-
-    return (language or "").strip().lower() in BACKENDS and shims.usable(language)
+    return (language or "").strip().lower() in BACKENDS
 
 
 def backend_for(language: str) -> CoverageBackend:

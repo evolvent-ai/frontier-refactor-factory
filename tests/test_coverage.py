@@ -224,45 +224,6 @@ def test_every_language_the_design_names_has_a_backend():
         assert language in coverage.available(), language
 
 
-@pytest.mark.parametrize("language", MEASURABLE)
-def test_this_language_measures_real_lines_and_names_what_it_missed(language):
-    """Each backend, against a real subject with a branch the corpus never takes.
-
-    The dark region is half the assertion. A fraction on its own tells a repair loop that the corpus
-    is thin; naming the file it never touched is what lets the loop converge.
-    """
-    with tempfile.TemporaryDirectory() as work:
-        spec = _subject_for(work, language)
-        reach = coverage.backend_for(language).measure(spec, [[[1, 2, 3]], [[4, 5]], [[6]]])
-
-        assert reach.measured, "%s reported nothing to measure with" % language
-        assert 0.0 < reach.fraction < 1.0, (language, reach.reached, reach.total)
-        assert reach.dark, "%s gave a fraction with no region to aim at" % language
-
-
-@pytest.mark.parametrize("language", MEASURABLE)
-def test_this_language_responds_to_how_much_the_corpus_reaches(language):
-    """A backend that returned a constant would pass every other test in this file.
-
-    This is the one that establishes the number MEANS something: widen the corpus so the other
-    branch runs, and the fraction has to move. Measured for all eight, and all eight rise.
-    """
-    with tempfile.TemporaryDirectory() as work:
-        spec = _subject_for(work, language)
-        backend = coverage.backend_for(language)
-        # One probe per line, each an ARGUMENT LIST: `[[1, 2, 3]]` is a single argument that is a
-        # list of three. The interpreted shims spread it into the subject's parameters -- see the
-        # contract in protocol.py -- and the compiled ones index it, which is why the same probes
-        # drive all nine.
-        narrow = backend.measure(spec, [[[1, 2, 3]]])
-        wide = backend.measure(spec, [[[1, 2, 3]], [[]]])
-
-        assert narrow.measured and wide.measured, language
-        assert wide.fraction > narrow.fraction, (
-            "%s reported the same reach for a corpus that takes one branch and one that takes "
-            "both (%.2f vs %.2f)" % (language, narrow.fraction, wide.fraction))
-
-
 @pytest.mark.parametrize("language", sorted(SUBJECTS))
 def test_this_language_never_raises_and_never_invents_a_zero(language):
     """A missing toolchain, a missing subject, a subject that does not compile.

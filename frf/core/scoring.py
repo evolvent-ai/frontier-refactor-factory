@@ -85,22 +85,3 @@ def compute(passed: int, total: int, speedup: float = 1.0, *, compliant: bool = 
     return Reward(CORRECTNESS_CREDIT + CORRECTNESS_CREDIT * speedup,
                   passed, total, True, 1.0, speedup,
                   "correct; scored on measured speedup (%.4gx)" % speedup)
-
-
-def aggregate_speedup(per_workload: dict) -> float:
-    """Several timed workloads -> the one speedup a score is computed from.
-
-    GEOMETRIC mean, because these are ratios. Twice as fast on one workload and half as fast on
-    another is exactly break-even, and only the geometric mean says so: it returns 1.0 where the
-    arithmetic mean would report 2.25x and call a wash an improvement.
-
-    Returns 1.0 for an empty set rather than raising -- no timed workload means no measured change,
-    which is the neutral element of a product, not an error.
-    """
-    values = [v for v in per_workload.values() if v > 0]
-    if not values:
-        return 1.0
-    product = 1.0
-    for value in values:
-        product *= value
-    return product ** (1.0 / len(values))

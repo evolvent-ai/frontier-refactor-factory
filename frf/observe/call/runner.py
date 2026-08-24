@@ -11,6 +11,7 @@ than aspirational -- there is nothing to extend when a new one arrives.
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -187,3 +188,155 @@ class Subject:
         # Falling back to the wall we measured here is honest but poor; it is better than reporting
         # zero, which would read as an infinitely fast candidate.
         return reply.seconds if reply.seconds > 0 else (time.perf_counter() - started)
+
+
+class RemoteSubject:
+    """A subject served INSIDE the sandbox, speaking the same line protocol.
+
+    WHY THIS EXISTS AND WHY IT IS SHAPED DIFFERENTLY. `Subject` holds a live process open and
+    exchanges one line at a time, which needs a persistent pipe. A sandbox backend offers no such
+    pipe -- it runs a command and returns what it printed -- so the same conversation is held by
+    writing EVERY request into a file, running the shim once over it, and reading the replies back
+    in order.
+
+    That is not a different protocol: it is the same JSONL, batched. The shim already reads stdin
+    to exhaustion and answers line by line, which is what makes the batching possible without the
+    far side knowing about it.
+
+    WHY IT MATTERS. Without this, `backend='remote'` selected a sandbox and then froze the subject
+    on the factory host anyway -- so an expectation described a program the shipped image would
+    not contain, which is the one failure the design says freezing in the image exists to prevent.
+
+    THE COST, stated rather than hidden: replies arrive only after the last request has run, so a
+    subject that hangs on probe 3 costs the whole batch's timeout rather than one probe's. The
+    per-request timeout is therefore enforced by the caller's overall bound, not per line.
+    """
+
+    def __init__(self, argv: list, *, workspace: str, backend,
+                 remote_dir: str = "", timeout: float = DEFAULT_CALL_TIMEOUT) -> None:
+        self.argv = list(argv)
+        self.workspace = workspace
+        self._backend = backend
+        self._remote = remote_dir
+        self.timeout = timeout
+        self._pending: list = []
+        self._replies: dict = {}
+        self._next_id = 0
+
+    def __enter__(self) -> "RemoteSubject":
+        if not self._remote:
+            import uuid
+            self._remote = "/tmp/frf-subject-%s" % uuid.uuid4().hex[:12]
+        try:
+            self._backend.push(self.workspace, self._remote)
+        except Exception as exc:                       # noqa: BLE001 -- transport, not the subject
+            raise SubjectFailed("could not stage the subject: %s" % exc) from exc
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._pending, self._replies = [], {}
+
+    def _argv_in_sandbox(self) -> list:
+        """The run argv with host paths rewritten to where the tree was pushed."""
+        return [part.replace(self.workspace, self._remote) if isinstance(part, str) else part
+                for part in self.argv]
+
+    def ask(self, requests: list) -> dict:
+        """Every request in one execution. -> {id: Response}.
+
+        A request set is written as a file rather than echoed through a shell: quoting JSON through
+        two layers of shell is how a harness ends up debugging its own quoting instead of the thing
+        it is testing.
+        """
+        if not requests:
+            return {}
+        import os
+        import tempfile
+
+        staging = tempfile.mkdtemp(prefix="frf-requests-")
+        try:
+            with open(os.path.join(staging, "requests.jsonl"), "w", encoding="utf-8") as handle:
+                for request in requests:
+                    handle.write(request.encode())
+            inbox = self._remote + "/inbox"
+            self._backend.push(staging, inbox)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+        argv = self._argv_in_sandbox()
+        shell = "%s < %s/requests.jsonl" % (" ".join(argv), inbox)
+        result = self._backend.run(["sh", "-c", shell], workdir=self._remote,
+                                   timeout=self.timeout * max(1, len(requests)))
+        if not result.ok and not (result.stdout or "").strip():
+            raise SubjectFailed("the subject exited without answering. stderr: %s"
+                                % (_last_error(result.stderr or "").strip() or "(empty)"))
+
+        replies = {}
+        for line in (result.stdout or "").splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                # The far side is someone else's program; a stray print is not a protocol error.
+                continue
+            reply = Response.decode(line)
+            replies[reply.id] = reply
+        return replies
+
+    def call(self, name: str, args: list) -> Observation:
+        """One call, as its own execution.
+
+        Single-shot because `stages.freeze` asks probe by probe. Batching across probes would be
+        faster and is what `ask` is for; it is not used here because doing so would change the
+        order guarantees the freeze relies on.
+        """
+        self._next_id += 1
+        request = Request(self._next_id, name, args)
+        replies = self.ask([request])
+        reply = replies.get(self._next_id)
+        if reply is None:
+            return Observation(False, error="no reply for request %d" % self._next_id)
+        return Observation(True, value=reply.value) if reply.ok else Observation(False,
+                                                                                 error=reply.error)
+
+    def call_many(self, name: str, items: list[list]) -> dict[int, Observation]:
+        """Send bounded JSONL batches, preserving response IDs.
+
+        A single pathological input must not hold an entire 200-probe package freeze open. Chunks
+        keep the remote command bound close to the per-call timeout while still removing the dominant
+        one-E2B-command-per-probe overhead.
+        """
+        results = {}
+        chunk_size = 4
+        for start in range(0, len(items), chunk_size):
+            requests = []
+            ids = []
+            for args in items[start:start + chunk_size]:
+                self._next_id += 1
+                ids.append(self._next_id)
+                requests.append(Request(self._next_id, name, args))
+            try:
+                replies = self.ask(requests)
+            except SubjectFailed as failure:
+                # Preserve the completed chunks; the missing chunk is a material refusal for its
+                # probes and the caller's freeze gate will reject the resulting corpus honestly.
+                for rid in ids:
+                    results[rid] = Observation(False, error=str(failure)[:600])
+                continue
+            for rid in ids:
+                reply = replies.get(rid)
+                results[rid] = (Observation(True, value=reply.value)
+                                if reply and reply.ok else
+                                Observation(False, error=(reply.error if reply else
+                                                          "no reply for request %d" % rid)))
+        return results
+
+    def time(self, name: str, args: list, *, repeats: int = 1) -> float:
+        self._next_id += 1
+        request = Request(self._next_id, name, args, op="time", repeats=repeats)
+        reply = self.ask([request]).get(self._next_id)
+        if reply is None or not reply.ok:
+            raise SubjectFailed("the subject refused to time %r: %s"
+                                % (name, reply.error if reply else "no reply"))
+        return reply.seconds

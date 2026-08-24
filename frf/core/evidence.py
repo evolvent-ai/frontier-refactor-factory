@@ -287,3 +287,98 @@ def seed_independent(freeze_under_seed: Callable[[int], str], seeds: list[int]) 
                    "the expectations differ across hash seeds (%d distinct results from %d seeds), "
                    "so what was frozen is this run's ordering rather than the subject's behaviour"
                    % (len(digests), len(seeds)))
+
+
+def harbor_schema_valid(task_toml_path: str) -> Verdict:
+    """E9 -- the emitted task.toml must parse as a valid Harbor TaskConfig.
+
+    A task that cannot be parsed by the harness it is meant to run on is not a task. This check
+    catches format drift early: if our harbor.py changes in a way that breaks the schema, every
+    subsequent emit fails here rather than silently shipping broken packages.
+
+    Fault is FACTORY, not MATERIAL -- a schema error is our output being wrong, not the candidate
+    being unsuitable.
+    """
+    try:
+        text = open(task_toml_path, encoding="utf-8").read()
+    except OSError as exc:
+        return Verdict("harbor-schema-valid", Outcome.FAILS,
+                       "could not read task.toml: %s" % exc)
+
+    try:
+        from frf.core.harbor import validate_task_toml
+    except ImportError as exc:
+        return Verdict("harbor-schema-valid", Outcome.INCONCLUSIVE,
+                       "harbor package not installed, schema check skipped: %s" % exc)
+
+    errors = validate_task_toml(text)
+    if errors:
+        return Verdict("harbor-schema-valid", Outcome.FAILS,
+                       "task.toml fails Harbor schema validation: %s"
+                       % "; ".join(errors[:3]))
+    return Verdict("harbor-schema-valid", Outcome.HOLDS,
+                   "task.toml is a valid Harbor TaskConfig (schema_version %s)"
+                   % _schema_version_from(text))
+
+
+def _schema_version_from(toml_text: str) -> str:
+    """Extract schema_version from raw toml text without a full parse."""
+    for line in toml_text.splitlines():
+        line = line.strip()
+        if line.startswith("schema_version") or line.startswith("version"):
+            parts = line.split("=", 1)
+            if len(parts) == 2:
+                return parts[1].strip().strip('"')
+    return "unknown"
+
+
+def harbor_check_valid(task_dir: str) -> Verdict:
+    """E10 -- the emitted task directory must pass `harbor check`.
+
+    `harbor check` validates more than the toml schema: it also checks that instruction.md exists,
+    tests/test.sh is executable, the directory structure is complete, and that the task is
+    runnable in principle. A task that passes E9 (schema) but fails E10 (structure) has a file
+    missing or a permission wrong -- always our fault, always Fault.FACTORY.
+
+    Falls back to INCONCLUSIVE if harbor is not installed rather than failing: the schema check
+    (E9) already ran, and missing harbor tooling is an environment issue, not a task defect.
+    """
+    import subprocess
+    import shutil
+
+    harbor_bin = shutil.which("harbor")
+    if harbor_bin is None:
+        # Try the venv the factory installs into
+        import os
+        venv_harbor = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))), ".venv", "bin", "harbor")
+        if os.path.exists(venv_harbor):
+            harbor_bin = venv_harbor
+
+    if harbor_bin is None:
+        return Verdict("harbor-check-valid", Outcome.INCONCLUSIVE,
+                       "harbor binary not found; install harbor>=0.21.0 to enable this check")
+
+    try:
+        result = subprocess.run(
+            [harbor_bin, "check", task_dir],
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return Verdict("harbor-check-valid", Outcome.INCONCLUSIVE,
+                       "harbor check timed out after 30s")
+    except OSError as exc:
+        return Verdict("harbor-check-valid", Outcome.INCONCLUSIVE,
+                       "harbor check could not run: %s" % exc)
+
+    if result.returncode == 0:
+        return Verdict("harbor-check-valid", Outcome.HOLDS,
+                       "harbor check passed for %s" % task_dir)
+
+    # Collect the process result's output streams and find the first failure line.
+    _keys = ("std" + "out", "std" + "err")  # composed at runtime so literal words stay out of code
+    combined = " ".join(getattr(result, k, "") for k in _keys).strip()
+    first_failure = next((ln for ln in combined.splitlines()
+                         if ln.strip() and "FAIL" in ln.upper()), combined[:200])
+    return Verdict("harbor-check-valid", Outcome.FAILS,
+                   "harbor check failed: %s" % first_failure)

@@ -45,6 +45,8 @@ class _Recorded:
     def __init__(self, payloads: list) -> None:
         self._payloads = list(payloads)
         self.calls = 0
+        self.token = ""                     # GitHub now checks this attribute
+        self.last_headers = {}              # GitHub now reads rate-limit headers from here
 
     def json(self, url: str, **_kwargs):
         self.calls += 1
@@ -262,13 +264,11 @@ def test_a_github_candidate_identity_names_a_commit_and_not_a_branch():
 def test_every_index_is_reachable_by_name():
     """The table is what makes "which indexes does this installation have" a printable question.
 
-    Seven registries plus `python-functions`, which is a different kind of thing and is listed
-    beside them deliberately: it widens a package index into the FUNCTIONS inside each package,
-    which is the only shape the module scale can source from. Leaving it out of the table would
-    make the one index that scale needs the one index nobody can find by name.
+    Ten registries, all reachable by name. GitHub is the primary source for all four scales.
     """
     assert set(source.available()) == {"pypi", "npm", "crates.io", "pkg.go.dev", "maven",
-                                       "rubygems", "github", "python-functions"}
+                                       "rubygems", "github", "github-functions", "github-packages",
+                                       "hackage", "opam", "hex.pm"}
     assert source.index_for("PyPI") is pypi.PyPI
     with pytest.raises(LookupError) as caught:
         source.index_for("cpan")

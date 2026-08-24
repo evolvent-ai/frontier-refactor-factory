@@ -55,14 +55,6 @@ def test_a_flagged_submission_scores_zero_whatever_else_it_did():
     assert not cheated.correct
 
 
-def test_several_workloads_aggregate_geometrically():
-    """Twice as fast here and half as fast there is break-even, and only the geometric mean says so."""
-    assert scoring.aggregate_speedup({"render": 4.0, "parse": 0.25}) == 1.0
-    # The arithmetic mean would report 2.125x for the same pair and call a wash an improvement.
-    assert scoring.aggregate_speedup({"a": 2.0, "b": 2.0}) == 2.0
-    assert scoring.aggregate_speedup({}) == 1.0, "no timed workload is neutral, not an error"
-
-
 def test_timing_reports_a_gain_it_cannot_distinguish_from_noise_as_exactly_one():
     """The measurement that motivates this module: the same program, timed against itself.
 

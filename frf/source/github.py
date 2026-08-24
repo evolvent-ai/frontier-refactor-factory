@@ -25,12 +25,14 @@ failing, because a slow index still enumerates.
 """
 from __future__ import annotations
 
+import sys
+import time
 from urllib.parse import quote
 
-from ..core import credentials
 from ..core.scale import Candidate
 from . import filters
 from .http import Http, all_or_nothing, envelope
+from .tokens import TokenPool
 
 SEARCH = "https://api.github.com/search/repositories?q=%s&sort=%s&order=asc&page=%d&per_page=%d"
 COMMIT = "https://api.github.com/repos/%s/commits/%s"
@@ -63,8 +65,13 @@ class GitHub:
 
     def __init__(self, http: Http | None = None, *, language: str = "",
                  query: str = "", scale: str = "repo", sort: str = DEFAULT_SORT,
-                 segments: tuple = SEGMENTS, pin: bool = True) -> None:
-        token = credentials.get("GITHUB_TOKEN") or ""
+                 segments: tuple = SEGMENTS, pin: bool = True,
+                 token_pool: TokenPool | None = None) -> None:
+        # Token pool for round-robin rotation and rate-limit awareness. Constructed here so that
+        # each GitHub instance manages its own pool, but callers can share one by passing it in.
+        self._pool = token_pool if token_pool is not None else TokenPool(
+            warn=lambda m: print("WARNING: %s" % m, file=sys.stderr))
+        token = self._pool.get_token() or ""
         # The token raises the limit from 10 to 30 requests a minute. Its absence is a slower walk,
         # never a failed one -- so it is applied if present and never required.
         self._http = http or Http(token=token)
@@ -198,16 +205,37 @@ class GitHub:
                counts_the_whole_index: bool = False) -> list:
         """One search request. -> its rows.
 
-        `counts_the_whole_index` is what keeps `total()` honest, and it exists because the obvious
-        version of this method was wrong: caching `total_count` from whichever request happened to
-        run first meant that after a single page of the top star segment, `total()` reported the
-        29 repositories in THAT SEGMENT as the size of the index. A denominator that quietly means
-        something narrower than it says is worse than no denominator, which is the whole argument
-        of core/sourcing.py -- so only the unsegmented query is allowed to set it.
+        Before each request, rotate to the next available token so that rate limits on one
+        token do not stall the walk. After the response, report the observed rate-limit headers
+        back to the pool so exhausted tokens are skipped until their window resets.
         """
+        # Rotate to a fresh token before each network call.
+        token = self._pool.get_token() or ""
+        if token != self._http.token:
+            self._http.token = token
+
         payload = self._http.json(
             SEARCH % (quote(query), self._sort, page_number, size),
             accept="application/vnd.github+json")
+
+        # Report rate-limit state from response headers so the pool can skip exhausted tokens.
+        if token:
+            hdrs = getattr(self._http, "last_headers", {})
+            remaining_str = hdrs.get("x-ratelimit-remaining")
+            reset_str = hdrs.get("x-ratelimit-reset")
+            try:
+                remaining = int(remaining_str) if remaining_str is not None else None
+            except (TypeError, ValueError):
+                remaining = None
+            try:
+                # X-RateLimit-Reset is a Unix epoch timestamp; convert to monotonic.
+                reset_epoch = float(reset_str) if reset_str is not None else None
+                reset_mono = (time.monotonic() + (reset_epoch - time.time())
+                              if reset_epoch is not None else time.monotonic() + 60.0)
+            except (TypeError, ValueError):
+                reset_mono = time.monotonic() + 60.0
+            self._pool.report_rate_limit(token, remaining, reset_mono)
+
         if counts_the_whole_index:
             self._total = int(payload.get("total_count") or 0)
         # `items` insisted upon rather than defaulted. An empty `items` is how a segment says it is

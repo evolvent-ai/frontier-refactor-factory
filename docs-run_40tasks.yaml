@@ -1,0 +1,58 @@
+output_dir: tasks/run_40
+freeze_runs: 5
+max_concurrent: 8
+llm_max_concurrent: 6
+llm_calls_per_minute: 60
+sandboxed: true
+
+jobs:
+  # kernel — inplace Python
+  - scale: kernel
+    form: inplace
+    source_language: python
+    budget: 10
+
+  # kernel — cross: python→rust
+  - scale: kernel
+    form: inplace
+    source_language: go
+    budget: 10
+
+  # module — inplace Python
+  - scale: module
+    form: inplace
+    source_language: python
+    budget: 10
+
+  # module — cross: python→rust
+  - scale: module
+    form: cross
+    source_language: python
+    target_language: rust
+    budget: 10
+
+  # package — inplace Python
+  - scale: package
+    form: inplace
+    source_language: python
+    budget: 10
+
+  # package — cross: python→go
+  - scale: package
+    form: cross
+    source_language: python
+    target_language: go
+    budget: 10
+
+  # repo — inplace Python
+  - scale: repo
+    form: inplace
+    source_language: python
+    budget: 10
+
+  # repo — cross: python→rust
+  - scale: repo
+    form: cross
+    source_language: python
+    target_language: rust
+    budget: 10

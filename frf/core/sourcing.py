@@ -22,11 +22,17 @@ pages. Nothing in this module knows about HTTP or about any particular registry;
 WHY MEMORY IS NOT OPTIONAL. Without it a run rediscovers what the last run already refused, and the
 yield falls as a batch grows for a reason that has nothing to do with the material. The seen-set is
 therefore part of sourcing rather than an optimisation on top of it.
+
+RESILIENCE. Network errors and validation failures are retried with exponential backoff (up to 3
+retries). A candidate that fails validation is skipped rather than crashing the walk. When a source
+is exhausted or errors repeatedly, the event is logged but the walk continues -- one bad index does
+not kill a batch.
 """
 from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Iterator, Protocol
 
@@ -117,6 +123,7 @@ class Coverage:
 
 def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: int = 50,
          keep: Callable[[Candidate], bool] | None = None,
+         language_filter: str | None = None,
          log: Callable[[str], None] = lambda _m: None) -> Iterator[Candidate]:
     """Yield up to `budget` candidates never seen before, and record what it cost to find them.
 
@@ -127,24 +134,55 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
     `keep` is the mechanical filter -- has tests, has a pinned release, is small enough to build.
     Cheap, deterministic, and applied before anything is cloned. What it must NOT be is a judgement
     about quality; that is what the pipeline's gates are for, and they answer with evidence.
+
+    `language_filter` restricts the walk to candidates whose `language` attribute matches the given
+    string (case-insensitive). Applied after memory deduplication and before `keep`, so that a
+    language-filtered walk does not rediscover candidates from another language's prior run.
+
+    RESILIENCE. Network errors during `index.page()` are retried with exponential backoff (up to 3
+    retries, 1s/2s/4s delays). Candidates that fail validation (missing required fields) are skipped
+    rather than crashing the entire walk. When an index is exhausted or errors repeatedly, the event
+    is logged but sourcing continues.
     """
     memory = memory if memory is not None else Memory()
     coverage = Coverage(index.name, total=_total_of(index))
     produced = 0
     page = 0
+    consecutive_errors = 0
+    max_consecutive_errors = 3
 
     while produced < budget:
-        batch = list(index.page(page, size=page_size))
+        batch = _fetch_page_with_retry(index, page, page_size, log)
+        if batch is None:
+            # Retry limit exhausted; skip this page.
+            consecutive_errors += 1
+            if consecutive_errors >= max_consecutive_errors:
+                log("%s: too many consecutive errors (%d), stopping walk"
+                    % (index.name, consecutive_errors))
+                break
+            page += 1
+            continue
         if not batch:
             log("%s: exhausted after %d page(s)" % (index.name, page))
             break
+        consecutive_errors = 0
         page += 1
         for candidate in batch:
+            # Validate candidate has required fields; skip malformed ones.
+            if not _is_valid_candidate(candidate):
+                log("%s: skipping invalid candidate: %s" % (index.name, candidate))
+                continue
             coverage.walked += 1
             if candidate in memory:
                 coverage.repeats += 1
                 continue
             memory.remember(candidate)
+            # Apply language filter if requested.
+            if language_filter:
+                lang_lower = (candidate.language or "").lower()
+                filter_lower = language_filter.strip().lower()
+                if lang_lower != filter_lower:
+                    continue
             if keep is not None and not keep(candidate):
                 continue
             coverage.fresh += 1
@@ -167,3 +205,33 @@ def _total_of(index: Index) -> int | None:
         return index.total()
     except Exception:                                          # noqa: BLE001 -- unknown, not fatal
         return None
+
+
+def _fetch_page_with_retry(index: Index, page_number: int, size: int,
+                            log: Callable[[str], None]) -> list | None:
+    """Fetch one page with exponential backoff on retryable failures. -> None when retries exhausted."""
+    from ..source.http import SourceError, TransportError  # avoid circular import
+
+    for attempt in range(3):
+        try:
+            return list(index.page(page_number, size=size))
+        except TransportError as error:
+            delay = (2 ** attempt) * 1.0
+            log("%s: page %d failed (attempt %d/3): %s; retrying in %.1fs"
+                % (index.name, page_number, attempt + 1, error, delay))
+            time.sleep(delay)
+        except SourceError as error:
+            # Non-transport errors (e.g. parsing failures) are not retryable.
+            log("%s: page %d failed permanently: %s" % (index.name, page_number, error))
+            return None
+        except Exception as error:   # noqa: BLE001
+            log("%s: page %d unexpected error: %s" % (index.name, page_number, error))
+            return None
+    return None
+
+
+def _is_valid_candidate(candidate: Candidate) -> bool:
+    """Whether a candidate has the required fields to be usable downstream."""
+    if not candidate.identity or not candidate.scale or not candidate.source:
+        return False
+    return True

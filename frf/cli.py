@@ -4,8 +4,12 @@
     frf build module --budget 20     produce tasks at one scale
     frf build all --budget 5         every registered scale
     frf doctor                       what is installed, what is missing, what that costs
+    frf run --config config.yaml     run all jobs in a YAML config file
+    frf status checkpoint.jsonl      summarise a checkpoint file
+    frf validate tasks/              run harbor check on all task directories under a path
+    frf sample --config c.yaml       show sample candidates without building
 
-Deliberately four verbs. A factory whose command line grows a flag per decision ends up encoding the
+Deliberately few verbs. A factory whose command line grows a flag per decision ends up encoding the
 decisions twice -- once in the code where they are argued for, and once here where they are not --
 and the two drift. Everything that is a JUDGEMENT lives in the library; this only chooses which scale
 to run and how many candidates to spend.
@@ -19,6 +23,9 @@ than block.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
+import os
 import sys
 
 from . import __version__
@@ -26,7 +33,6 @@ from .core import credentials, sandbox
 from .core.scale import SCALES
 from . import source as indexes
 from .observe import coverage
-from .observe.call import shims
 
 
 def _log(message: str) -> None:
@@ -64,10 +70,8 @@ def _doctor_command(_args) -> int:
     """
     print("frontier-refactor-factory %s\n" % __version__)
 
-    servable = shims.available()
-    print("subjects can be written in:     %s" % ", ".join(servable))
-    print("  ...and served on this host:   %s"
-          % (", ".join(n for n in servable if shims.usable(n)) or "(none: no toolchain found)"))
+    print("subjects can be served in any language that compiles to a runnable process")
+    print("  (process seam: all scales observe four channels, no per-language shim required)\n")
 
     measurable = coverage.available()
     print("line coverage has a backend:    %s" % ", ".join(measurable))
@@ -95,25 +99,226 @@ def _doctor_command(_args) -> int:
 
 
 def _build_command(args) -> int:
-    """Run one scale, or all of them, and report the yield honestly.
+    """Run one automatically wired registry-backed scale."""
+    from .automation import run
+    if args.scale == "all":
+        _log("build all is intentionally explicit: choose a scale so its registry query is visible")
+        return 2
+    report = run(args.scale, budget=args.budget, index=args.index,
+                 output_dir=args.output, backend=args.backend)
+    print(json.dumps(report.to_json(), sort_keys=True))
+    return 0
 
-    This deliberately cannot construct an index. Sourcing needs credentials and network and is
-    specific to each registry, so a caller supplies it in Python; the command line is for driving a
-    factory that has one, and says as much rather than pretending to be able to.
-    """
-    _log("the command line cannot yet construct an index for a scale.")
-    _log("")
-    _log("Sourcing is per-registry and needs credentials, so it is supplied in Python:")
-    _log("")
-    _log("    from frf import Factory")
-    _log("    from frf.scales import Module")
-    _log("")
-    _log("    factory = Factory().register(Module(index=my_index))")
-    _log("    result  = factory.build(%r, budget=%d)" % (args.scale, args.budget))
-    _log("    print(result.summary())")
-    _log("")
-    _log("`frf scales` lists what each scale needs.")
-    return 2
+
+def _run_command(args) -> int:
+    """Run jobs from a YAML config or inline flags, with checkpointing and live progress."""
+    from .config import RunConfig, JobConfig
+    from .core.checkpoint import make_checkpoint_path
+
+    # Build config from YAML file or inline flags.
+    if args.config:
+        try:
+            cfg = RunConfig.from_yaml(args.config)
+        except FileNotFoundError:
+            _log("error: config file not found: %s" % args.config)
+            return 1
+        except Exception as exc:
+            _log("error: could not parse config: %s" % exc)
+            return 1
+    else:
+        # Inline flags: require at least --scale and --form.
+        if not args.scale or not args.form:
+            _log("error: --scale and --form are required when --config is not given")
+            return 2
+        cfg = RunConfig(jobs=[JobConfig(
+            scale=args.scale,
+            form=args.form,
+            source_language=getattr(args, "source", "") or "",
+            budget=args.budget,
+        )])
+
+    # Apply resume checkpoint.
+    checkpoint_file = (getattr(args, "resume", None) or cfg.checkpoint_file
+                       or make_checkpoint_path())
+
+    if getattr(args, "dry_run", False):
+        print("dry-run: config loaded, %d job(s)" % len(cfg.jobs))
+        for job in cfg.jobs:
+            print("  %s/%s lang=%s budget=%d" % (
+                job.scale, job.form, job.source_language or "*", job.budget))
+        print("checkpoint: %s" % checkpoint_file)
+        return 0
+
+    from .core.rate_limiter import configure as configure_limiter
+    configure_limiter(
+        max_concurrent=cfg.llm_max_concurrent,
+        calls_per_minute=cfg.llm_calls_per_minute,
+    )
+
+    from .automation import run as auto_run
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    backend = "remote" if cfg.sandboxed else "local-process"
+    total_emitted = 0
+
+    def _run_job(job):
+        _log("[run] starting %s/%s budget=%d" % (job.scale, job.form, job.budget))
+        try:
+            report = auto_run(job.scale, budget=job.budget, index=job.index,
+                              output_dir=cfg.output_dir,
+                              backend=backend,
+                              form=job.form,
+                              subset=job.source_language,
+                              target_language=job.target_language,
+                              # Parsed from the config and previously dropped here, so a run that
+                              # asked for a different number of freeze passes silently got five.
+                              freeze_runs=cfg.freeze_runs,
+                              candidate_workers=max(1, cfg.max_concurrent // max(1, len(cfg.jobs))))
+            return job, report, None
+        except Exception as exc:
+            return job, None, exc
+
+    workers = min(cfg.max_concurrent, len(cfg.jobs)) if cfg.max_concurrent > 1 else 1
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_run_job, job): job for job in cfg.jobs}
+        for future in as_completed(futures):
+            job, report, err = future.result()
+            if err is not None:
+                _log("[run] job %s/%s failed: %s" % (job.scale, job.form, err))
+                continue
+            summary = report.to_json()
+            total_emitted += summary.get("emitted", 0)
+            _log("[run] %s/%s: %d emitted, %.0f%% yield"
+                 % (job.scale, job.form,
+                    summary.get("emitted", 0),
+                    100.0 * summary.get("yield_rate", 0.0)))
+            print(json.dumps(summary, sort_keys=True))
+
+    _log("[run] done: %d task(s) emitted across %d job(s)" % (total_emitted, len(cfg.jobs)))
+    return 0
+
+
+def _status_command(args) -> int:
+    """Read a checkpoint file and print a summary table."""
+    from .core.checkpoint import CheckpointReader
+    path = args.checkpoint
+    if not os.path.exists(path):
+        _log("error: checkpoint file not found: %s" % path)
+        return 1
+    reader = CheckpointReader(path)
+    summary = reader.summary()
+    print("Checkpoint: %s" % path)
+    print("Total records: %d" % summary["total"])
+    print()
+    if summary["by_status"]:
+        print("By status:")
+        for status, count in sorted(summary["by_status"].items()):
+            print("  %-20s %d" % (status, count))
+    if summary["by_scale"]:
+        print()
+        print("By scale:")
+        for scale, count in sorted(summary["by_scale"].items()):
+            print("  %-20s %d" % (scale, count))
+    if summary["by_stage"]:
+        print()
+        print("Refusals/errors by stage:")
+        for stage, count in sorted(summary["by_stage"].items(), key=lambda kv: -kv[1]):
+            print("  %-30s %d" % (stage, count))
+    if summary["emitted_paths"]:
+        print()
+        print("Emitted tasks (%d):" % len(summary["emitted_paths"]))
+        for p in summary["emitted_paths"][:20]:
+            print("  %s" % p)
+        if len(summary["emitted_paths"]) > 20:
+            print("  ... and %d more" % (len(summary["emitted_paths"]) - 20))
+    return 0
+
+
+def _validate_command(args) -> int:
+    """Run harbor check on all task directories under a path."""
+    import subprocess
+    root = args.path
+    if not os.path.isdir(root):
+        _log("error: not a directory: %s" % root)
+        return 1
+
+    # Walk looking for directories that contain a harbor.toml or Dockerfile,
+    # which marks them as task packages.
+    task_dirs = []
+    for entry in sorted(os.listdir(root)):
+        candidate = os.path.join(root, entry)
+        if not os.path.isdir(candidate):
+            continue
+        if (os.path.exists(os.path.join(candidate, "harbor.toml"))
+                or os.path.exists(os.path.join(candidate, "Dockerfile"))):
+            task_dirs.append(candidate)
+
+    if not task_dirs:
+        _log("no task directories found under %s" % root)
+        return 0
+
+    passed = 0
+    failed = 0
+    for td in task_dirs:
+        result = subprocess.run(["harbor", "check", td],
+                                capture_output=True, text=True, timeout=300)
+        status = "PASS" if result.returncode == 0 else "FAIL"
+        print("%-6s %s" % (status, td))
+        if result.returncode == 0:
+            passed += 1
+        else:
+            failed += 1
+            if result.stdout.strip():
+                print("       " + result.stdout.strip()[:200])
+
+    print()
+    print("%d passed, %d failed" % (passed, failed))
+    return 0 if failed == 0 else 1
+
+
+def _sample_command(args) -> int:
+    """Show sample candidates without building."""
+    from .config import RunConfig, JobConfig
+
+    if args.config:
+        try:
+            cfg = RunConfig.from_yaml(args.config)
+        except Exception as exc:
+            _log("error: could not parse config: %s" % exc)
+            return 1
+    else:
+        if not args.scale or not args.form:
+            _log("error: --scale and --form are required when --config is not given")
+            return 2
+        cfg = RunConfig(jobs=[JobConfig(
+            scale=args.scale,
+            form=getattr(args, "form", "inplace"),
+            budget=args.count,
+        )])
+
+    count = args.count
+    from . import scales as scale_impls
+
+    for job in cfg.jobs:
+        scale_name = job.scale
+        impl = getattr(scale_impls, scale_name.capitalize(), None)
+        if impl is None:
+            _log("scale %r not available; skipping" % scale_name)
+            continue
+        try:
+            instance = impl()
+        except Exception as exc:
+            _log("could not instantiate scale %r: %s" % (scale_name, exc))
+            continue
+        print("--- %s (showing up to %d) ---" % (scale_name, count))
+        try:
+            for i, candidate in enumerate(instance.find(count)):
+                if i >= count:
+                    break
+                print("  %s  [%s]" % (candidate.identity, candidate.language))
+        except Exception as exc:
+            _log("find() failed: %s" % exc)
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -134,8 +339,56 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("scale", choices=list(SCALES) + ["all"])
     build.add_argument("--budget", type=int, default=1, help="how many candidates to try")
     build.add_argument("--output", default="tasks", help="where task packages are written")
+    build.add_argument("--index", help="registry/index name (defaults by scale)")
+    build.add_argument("--backend", default="remote", choices=("remote", "docker"),
+                       help="sandbox backend (default: remote)")
     build.add_argument("--json", action="store_true", help="print the summary as JSON")
     build.set_defaults(run=_build_command)
+
+    # --- frf run ---
+    run_cmd = commands.add_parser(
+        "run", help="run all jobs from a YAML config (or inline flags)")
+    run_cmd.add_argument("--config", default="", metavar="CONFIG_YAML",
+                         help="path to a YAML job config file")
+    run_cmd.add_argument("--scale", default="", choices=list(SCALES) + [""],
+                         help="scale (when --config is not given)")
+    run_cmd.add_argument("--form", default="", choices=("inplace", "cross", ""),
+                         help="form: inplace or cross (when --config is not given)")
+    run_cmd.add_argument("--source", default="", metavar="LANGUAGE",
+                         help="source language filter")
+    run_cmd.add_argument("--budget", type=int, default=10,
+                         help="candidates to try (when --config is not given)")
+    run_cmd.add_argument("--resume", default="", metavar="CHECKPOINT_JSONL",
+                         help="path to an existing checkpoint file to resume from")
+    run_cmd.add_argument("--dry-run", action="store_true",
+                         help="print the resolved config without building")
+    run_cmd.set_defaults(run=_run_command)
+
+    # --- frf status ---
+    status_cmd = commands.add_parser("status", help="summarise a checkpoint file")
+    status_cmd.add_argument("checkpoint", metavar="CHECKPOINT_JSONL",
+                            help="path to a .jsonl checkpoint file")
+    status_cmd.set_defaults(run=_status_command)
+
+    # --- frf validate ---
+    validate_cmd = commands.add_parser(
+        "validate", help="run harbor check on all task directories under a path")
+    validate_cmd.add_argument("path", metavar="TASKS_DIR",
+                              help="directory containing task packages")
+    validate_cmd.set_defaults(run=_validate_command)
+
+    # --- frf sample ---
+    sample_cmd = commands.add_parser(
+        "sample", help="show sample candidates without building")
+    sample_cmd.add_argument("--config", default="", metavar="CONFIG_YAML",
+                            help="path to a YAML job config file")
+    sample_cmd.add_argument("--scale", default="", choices=list(SCALES) + [""],
+                            help="scale (when --config is not given)")
+    sample_cmd.add_argument("--form", default="inplace", choices=("inplace", "cross"),
+                            help="form (when --config is not given)")
+    sample_cmd.add_argument("--count", type=int, default=3,
+                            help="how many candidates to show per scale (default: 3)")
+    sample_cmd.set_defaults(run=_sample_command)
 
     return parser
 

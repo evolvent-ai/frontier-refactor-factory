@@ -94,13 +94,9 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
         # A SUBJECT THAT WILL NOT SPEAK IS THE MATERIAL'S FAULT, and reporting it through `usable`
         # is the whole reason this is caught. The commonest cause by far is a mined function whose
         # file imports its own package -- `from .core import x` resolves inside the distribution and
-        # not beside a shim -- which is an ordinary fact about real source rather than a defect in
+        # not beside a shim, which is an ordinary fact about real source rather than a defect in
         # this factory. Left uncaught it arrives at `build_one` as an unclassified failure counted
         # as OURS, and a batch of twenty then computes a yield against a denominator of our own bugs.
-        #
-        # Reported as an unusable corpus rather than as a new exception type because that is the
-        # channel the pipeline already reads. A second mechanism would mean `core/` learning what a
-        # subject is, which is the boundary this seam exists to keep.
         return Corpus(inputs=inputs, discard_rate=1.0, usable=False,
                       unusable_reason="the subject never answered: %s" % str(failure)[:600])
 
@@ -176,8 +172,14 @@ def battery(spec: Spec, observer, corpus: Corpus) -> evidence.Battery:
 def _score_reference(observer, spec: Spec, corpus: Corpus) -> tuple[int, int]:
     passed = total = 0
     with observer.subject(spec) as subject:
-        for expectation in corpus.expectations:
-            got, want, _ = obs.grade(expectation, subject.call("run", corpus.inputs[expectation.probe_id]))
+        ids = [e.probe_id for e in corpus.expectations]
+        if hasattr(subject, "call_many"):
+            answers = subject.call_many("run", [corpus.inputs[pid] for pid in ids])
+            actual = [answers[rid] for rid in sorted(answers)]
+        else:
+            actual = [subject.call("run", corpus.inputs[pid]) for pid in ids]
+        for expectation, answer in zip(corpus.expectations, actual):
+            got, want, _ = obs.grade(expectation, answer)
             passed += got
             total += want
     return passed, total
@@ -194,8 +196,14 @@ def _perturb(observer, spec: Spec, corpus: Corpus) -> tuple[bool, bool]:
         diverged = caught = False
         try:
             with observer.subject(spec, mutated=True, attempt=attempt) as subject:
-                for expectation in corpus.expectations:
-                    answer = subject.call("run", corpus.inputs[expectation.probe_id])
+                ids = [e.probe_id for e in corpus.expectations]
+                inputs = [corpus.inputs[pid] for pid in ids]
+                if hasattr(subject, "call_many"):
+                    replies = subject.call_many("run", inputs)
+                    actual = [replies[rid] for rid in sorted(replies)]
+                else:
+                    actual = [subject.call("run", args) for args in inputs]
+                for expectation, answer in zip(corpus.expectations, actual):
                     if answer.digest() != expectation.digest:
                         diverged = True
                     got, want, _ = obs.grade(expectation, answer)

@@ -6,11 +6,11 @@
 > 本文件是编码依据。凡与本文件冲突的实现，以本文件为准；凡本文件说不清的，
 > 先改本文件再动代码。
 >
-> **实现进度**（2026-08-17）：脊柱与两个观测接缝已落地并测过 —— 八环节与闸门、
-> 两种冻结、E1–E8 证据组、计分、计时、adequacy、sourcing、题面、出厂、call 接缝的
-> 六个共享环节。**四个 scale 尚未实现**（`frf/scales/` 为空），
-> process 接缝的共享环节、E2B backend、coverage 后端也还没写。
-> §16 的里程碑是下一步。
+> **实现进度（2026-08-18）**：八环节与闸门、两种冻结、E1–E8 证据组、计分、计时、
+> adequacy、sourcing、题面、出厂、call/process 两个接缝、E2B backend 和多语言 coverage
+> 后端均已落地。`module`、`kernel` 已用真实素材出过任务，`repo` 已证明同语言和跨语言两种
+> 形态。`package` 的模型生成器和容器执行链已接通，最后的真实出厂 smoke run 仍是验收闸门。
+> §16 记录已完成的实测里程碑和当前剩余工作。
 
 ---
 
@@ -542,7 +542,7 @@ frontier-refactor-factory/
       probes/schema.py      声明式输入 schema + 采样（含 dtype/shape，kernel 靠它）
       compare/values.py     精确 / 结构 / 数值包络
 
-    scales/               每个尺度只写它独有的那点  ← 尚未实现
+    scales/               每个尺度只写它独有的那点  ← kernel/module/package/repo 已实现
     factory.py            公开接口：Factory / Settings / Result
 
   tests/                  只跑真实进程；mock 出来的测试测的是错的东西
@@ -611,9 +611,8 @@ observe/  知道观测长什么样：两个接缝各自的类型、冻结、比�
 
 ## 15. 尚未决定
 
-- **各尺度的良率与成本，没有同口径数据。** repo 尺度实测：跨语言每仓库约 7%，
-  同语言约 1.4%（走过 503 个仓库）。module / kernel / package 无数据 ——
-  **打通后第一件事就是测**。
+- **大批量各尺度的良率与成本还没有同口径数据。** 四尺度 smoke 已完成；大批量
+  sourcing、每题成本和失败分布仍需单独跑批记录。
 - **进程隔离对良率的影响**：Probe 必须 JSON 序列化，这会筛掉一部分候选。
   比例未知，必须在 §16 的里程碑中作为一个数报出来。
 - **GPU 点亮时机**：接口按 Harbor 字段预留，何时接真卡另议。
@@ -687,3 +686,41 @@ traceback 的异常在**最后一行**，所以取最后一行 + 它上面那个
 **还没测到的**：§15 第二条那个「Probe 无法序列化」的比例。这批是 0，但不能说明问题——
 schema 推断只接受它能画的类型，画不出来的函数在扫描期就没成为候选。要测这个数，
 得放宽 `functions.py` 的类型表，让更奇怪的参数进来。
+
+### 16.2 四尺度验收 smoke（2026-08-18）
+
+在同一套 remote/E2B backend 上完成了四种尺度的真实 smoke。所有已运行候选均为
+`trustworthy=True`，没有 factory refusal：
+
+| scale | 实测 | 结果 |
+|---|---:|---|
+| module | 6/6 emitted | PyPI `Algorithme` 的 6 个函数，57 probes/57 points |
+| kernel | 1/1 emitted | PyPI `BasicAlgorithmsPyLib.find_min_max`，57 probes/57 points，REACH 91% |
+| package | 1/1 emitted | `textdistance@4.6.3`，197 probes，discard 0%，FLOOR 48%，5 项 evidence |
+| repo | 2/2 emitted | `mvdan/sh`，同语言 `sh-faster` 与跨语言 Rust `sh-rust-rewrite`，各 40 probes/160 points，FLOOR 72% |
+
+这证明四种 scale 已共享同一 pipeline，并分别使用正确的 call/process seam；package 的
+generator 确实在 E2B 内执行，repo 的两种任务形态也都能从真实仓库出厂。
+
+### 16.3 Checkout-native 出厂准入（2026-08-20）
+
+旧 smoke 只证明对应接缝能运行，**不等同于 checkout-native performance task 已验收**。
+后者必须满足下列不变量，缺一个即只能标记为 layout smoke，不能进入可交付题库：
+
+| 要求 | 实现约束 |
+|---|---|
+| 完整源码 | `environment/` 是真实、固定 revision 的完整 checkout；target path 只是修改范围声明，不能抽取或重写 subject。 |
+| 隐藏基准 | evaluator 从 `tests/reference/` 运行，并以 `{workspace}` 接收 `/app`；候选不能通过修改本地 benchmark 或测试来改变判分。 |
+| 正确性 | 每次 workload 的 JSON 结果必须与隐藏 reference 相同；native build/verify command 也必须执行成功。 |
+| 性能 | 多次 wall-clock 配对运行，以 median 比值计算并报告 speedup；不预先要求或证明 headroom，不接受固定 `1.0` 作为性能证据。 |
+| 可重放 | 出厂后 ref-vs-ref self-replay 必须成功；该模式只证明语义可复现，不把 reference 误判为应达到加速门槛。 |
+| 审计 | provenance 记录 revision、scope、workload、计时配置、资源镜像和 no-network 策略。 |
+
+四个 scale 的正确落点不同，但都受上表约束：module 是 scoped symbol/module 的原生
+workload；kernel 必须是数值/计算 hotspot，并声明 dtype、shape、精度和成本；package 覆盖
+公开 surface 或官方 compliance/workload；repo 使用目标路径一致的集成场景。Kernel 不能以
+parser 冒充，package 不能退化为单一函数，repo workload 不能脱离目标范围。
+
+因此后续 batch 的正常顺序是：先为真实 revision 找到可隐藏执行且计时可读的 workload，
+再 emit；headroom 由解题提交实际证明，不能由出题链路预判。旧的四个
+`envsubst` 目录仅保留为 layout/self-replay smoke，不计入这项验收。

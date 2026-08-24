@@ -53,8 +53,8 @@ ANNOTATIONS = {
     "int": {"kind": "int", "low": -1000, "high": 1000},
     "float": {"kind": "float"},
     "bool": {"kind": "bool"},
-    "str": {"kind": "string"},
-    "bytes": {"kind": "bytes"},
+    "str": {"kind": "string", "size": "n"},
+    "bytes": {"kind": "bytes", "size": "n"},
 }
 
 # Element types for a declared container. Kept separate from ANNOTATIONS because a bare `list` with
@@ -62,9 +62,9 @@ ANNOTATIONS = {
 # would make that silently succeed.
 ELEMENTS = {
     "int": {"kind": "int", "low": -1000, "high": 1000},
-    "float": {"kind": "float"},
+    "float": {"kind": "float", "low": -1000, "high": 1000},
     "bool": {"kind": "bool"},
-    "str": {"kind": "string"},
+    "str": {"kind": "string", "size": "n"},
 }
 
 # Return annotations that make a function unserveable however well its arguments are declared.
@@ -235,13 +235,24 @@ def scan(root: str, package: str = "", version: str = "") -> list:
             if not isinstance(node, ast.FunctionDef):
                 continue
             schema = schema_for(node)
-            if schema is None:
+            if schema is None or not _work_scales_with_input(node, schema):
                 continue
             found.append(Function(package=package, version=version, module=module,
                                   symbol=node.name, path=path, schema=schema,
                                   doc=(ast.get_docstring(node) or "").strip()))
     found.sort(key=lambda f: (f.module, f.symbol))
     return found
+
+
+_SIZED_KINDS = frozenset({"int_array", "float_array", "complex_array", "string", "bytes", "list", "map"})
+
+def _work_scales_with_input(node: ast.FunctionDef, schema: dict) -> bool:
+    """Static workload signal; deliberately not a headroom measurement."""
+    if {p.get("kind") for p in schema.get("params", ())} & _SIZED_KINDS:
+        return True
+    return any(isinstance(inner, (ast.For, ast.While, ast.ListComp, ast.SetComp,
+                                  ast.DictComp, ast.GeneratorExp))
+               for inner in ast.walk(node))
 
 
 def _foreign_imports(tree: ast.Module, package: str) -> list:

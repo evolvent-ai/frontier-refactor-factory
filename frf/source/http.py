@@ -28,8 +28,7 @@ from dataclasses import dataclass, field
 
 # Descriptive on purpose. A registry operator looking at their logs should be able to tell what this
 # is and that it is not a scraper, without having to guess from a request pattern.
-USER_AGENT = ("frontier-refactor-factory/0.1 (benchmark task sourcing; "
-              "low-rate metadata reads; https://pypi.org/help/#user-agent)")
+USER_AGENT = "frontier-refactor-factory/0.1 (+https://github.com/your-org/frf)"
 
 # Between requests, seconds. Small enough that a page of fifty is not a coffee break, large enough
 # that a batch does not look like a burst to a rate limiter.
@@ -116,6 +115,11 @@ class Http:
     Injection rather than module-level functions because the offline half of the test suite has to
     exercise the PARSING -- the part that actually breaks when a registry changes a field name --
     and it cannot do that if the transport is reached through an import.
+
+    CONNECTION REUSE. urllib opens a persistent connection per host (HTTP/1.1 keep-alive) when
+    the server supports it. This happens automatically via the default OpenerDirector; no explicit
+    pool is needed with the standard library. For workloads that need an explicit session pool,
+    replace this class with one backed by `requests.Session`.
     """
 
     user_agent: str = USER_AGENT
@@ -127,10 +131,17 @@ class Http:
     token: str = ""                       # bearer credential, when an index has one
     _last_call: float = field(default=0.0, init=False, repr=False)
     calls: int = field(default=0, init=False, repr=False)
+    # Response headers from the most recent successful request, keyed lower-case.
+    # Written after every successful get(); callers that need rate-limit state (e.g. GitHub)
+    # read from here rather than requiring a separate return value.
+    last_headers: dict = field(default_factory=dict, init=False, repr=False)
 
     def get(self, url: str, *, accept: str = "", headers: dict | None = None) -> bytes:
         """The body, or an exception. There is no third outcome, and that is the point."""
-        request_headers = {"User-Agent": self.user_agent}
+        request_headers = {
+            "User-Agent": self.user_agent,
+            "Connection": "keep-alive",    # encourage connection reuse
+        }
         if accept:
             request_headers["Accept"] = accept
         if self.token:
@@ -152,7 +163,15 @@ class Http:
                 self.calls += 1
                 request = urllib.request.Request(url, headers=request_headers)
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    return _read_bounded(response, url, self.max_body)
+                    body = _read_bounded(response, url, self.max_body)
+                    # Capture response headers for callers that need rate-limit state (e.g. GitHub
+                    # token pool). Stored lower-cased so callers don't need to know the casing.
+                    try:
+                        hdrs = response.headers
+                        self.last_headers = {k.lower(): v for k, v in hdrs.items()} if hdrs else {}
+                    except Exception:   # noqa: BLE001
+                        self.last_headers = {}
+                    return body
             except urllib.error.HTTPError as error:
                 last = _translate(error, url)
                 # Only two statuses are worth trying again. A 404 or a 400 will be a 404 or a 400

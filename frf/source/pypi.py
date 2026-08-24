@@ -49,11 +49,13 @@ class PyPI:
     name = "pypi"
 
     def __init__(self, http: Http | None = None, *, subset: str = "",
-                 scale: str = "package", rank: bool = True) -> None:
+                 scale: str = "package", rank: bool = True,
+                 seed_names: tuple[str, ...] = ()) -> None:
         self._http = http or Http()
         self._subset = subset.strip().lower()
         self._scale = scale
         self._rank = rank
+        self._seed_names = seed_names   # package names to promote to the front of the queue
         self._names: list[str] | None = None
 
     def total(self) -> int | None:
@@ -82,6 +84,11 @@ class PyPI:
         Ordered as PyPI publishes it, then filtered and optionally ranked -- both deterministic, so
         page N is page N again for a later run over the same snapshot. Sorted before ranking because
         PyPI's own order is not documented as stable, and paging requires that it be.
+
+        SEED NAMES come first. A seed is a package name known to have real computational work;
+        it is promoted to the front of the queue regardless of where rank would put it, so that
+        a small budget reliably hits good material rather than burning through the alphabetic
+        front of PyPI (0x-..., 12306-..., 18-print-color-...) first.
         """
         if self._names is not None:
             return self._names
@@ -91,9 +98,14 @@ class PyPI:
         if self._subset:
             names = [n for n in names if self._subset in n.lower()]
         if self._rank:
-            # Ranking, not producing: the list is the same list, reordered so that names which look
-            # computational are hydrated first. Nothing is dropped, so total() is unaffected.
             names.sort(key=lambda n: (not filters.looks_computational(filters.Facts(name=n)), n))
+        # Promote seed names to the very front, preserving their relative order and deduplicating.
+        if self._seed_names:
+            name_set = {n.lower() for n in names}
+            seeds_present = [s for s in self._seed_names if s.lower() in name_set]
+            seed_set = {s.lower() for s in seeds_present}
+            rest = [n for n in names if n.lower() not in seed_set]
+            names = seeds_present + rest
         self._names = names
         return names
 
@@ -126,7 +138,8 @@ def to_candidate(payload: dict, *, scale: str = "package", source: str = "pypi")
             # the installed module -- so it is left empty and the specify stage fills it in. Naming
             # it here documents that the gap is expected rather than forgotten.
             "entry_points": [],
-            "root": "", "install": ["pip", "install", "%s==%s" % (name, version)],
+            "root": "", "install": ["pip", "install", "--break-system-packages",
+                                    "%s==%s" % (name, version)],
             "forbidden": [name.lower(), name.lower().replace("-", "_")],
             "repository": facts.repository,
             "requires_python": str(info.get("requires_python") or ""),

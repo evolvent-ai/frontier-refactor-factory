@@ -1,0 +1,18 @@
+output_dir: tasks/conc
+freeze_runs: 5
+max_concurrent: 4
+sandboxed: true
+
+jobs:
+  - scale: module
+    form: inplace
+    source_language: python
+    budget: 8
+  - scale: kernel
+    form: inplace
+    source_language: python
+    budget: 6
+  - scale: repo
+    form: inplace
+    source_language: python
+    budget: 4

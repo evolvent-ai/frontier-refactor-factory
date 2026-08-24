@@ -1,0 +1,24 @@
+output_dir: tasks/targeted
+freeze_runs: 5
+max_concurrent: 6
+llm_max_concurrent: 4
+
+# Explicitly target packages with known real computational workloads.
+# The default PyPI index ranked by name keeps landing on teaching-example packages
+# (factorials, leap-year checks, XOR functions) that are too fast to benchmark.
+# These packages have real loops over non-trivial data: string edit distance,
+# compression, sorting, hashing, parsing, numeric algorithms.
+jobs:
+  - scale: module
+    form: inplace
+    source_language: python
+    budget: 30
+    index: python-functions
+    # python-levenshtein, rapidfuzz: string edit distance — O(n*m) work
+    # python-lz4: block compression/decompression
+    # xxhash: non-cryptographic hashing
+    # sortedcontainers: sorted list/dict/set implementations
+    # pyroaring: RoaringBitmap operations
+    # bitarray: bit manipulation at scale
+    # heapq is stdlib but packages like heapdict add real work
+    index_subset: ""

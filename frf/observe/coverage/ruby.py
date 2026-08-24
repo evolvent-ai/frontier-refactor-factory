@@ -31,8 +31,9 @@ require 'json'
 # arming it afterwards would report the subject's own body as never executed.
 Coverage.start(lines: true)
 
+report = ARGV.shift
 at_exit do
-  File.write(ARGV[0], JSON.generate(Coverage.result))
+  File.write(report, JSON.generate(Coverage.result))
 end
 
 load File.join(File.dirname(__FILE__), 'serve.rb')

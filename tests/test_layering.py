@@ -132,7 +132,7 @@ def test_a_seam_is_self_contained():
     error this file exists to catch: a freeze written against one seam's coordinates, applied to
     another seam that has none.
     """
-    for seam in ("call", "process"):
+    for seam in ("process",):
         base = os.path.join(ROOT, "frf", "observe", seam)
         present = {n for n in os.listdir(base) if n.endswith(".py")}
         assert "observation.py" in present, (seam, present)

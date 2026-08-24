@@ -7,13 +7,15 @@ name = "frontier-refactor-factory"
 version = "0.1.0"
 description = "Performance-oriented refactoring benchmark tasks, at four codebase scales"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 
 # The factory itself has no third-party runtime dependency, and that is worth keeping. Everything it
 # needs -- subprocesses, JSON, hashing, statistics -- is in the standard library, so a task package
 # it emits can vendor its verifier without dragging an install behind it.
-dependencies = []
+dependencies = [
+    "harbor>=0.21.0",
+]
 
 [project.scripts]
 frf = "frf.cli:main"

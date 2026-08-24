@@ -26,11 +26,26 @@ its seam's half of the pipeline.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Iterable, Protocol
 
 # The four scales, smallest first. The order is the order they were built in, and it is also the
 # order of increasing cost: a kernel is one routine and a repo is a whole program.
 SCALES = ("kernel", "module", "package", "repo")
+
+
+class TaskForm(str, Enum):
+    """How the solver is expected to meet the task.
+
+    INPLACE: optimise the existing implementation without changing its language or public API.
+    CROSS_LANGUAGE: rewrite the whole surface in a different language to achieve better performance.
+    The distinction matters for the instruction (what the solver is asked to do), for the Dockerfile
+    (which toolchain is installed), and for the grading framing (behaviour must match; language is
+    the lever).
+    """
+
+    INPLACE = "inplace"
+    CROSS_LANGUAGE = "cross"
 
 
 @dataclass(frozen=True)
@@ -73,6 +88,7 @@ class Spec:
     target_language: str = ""
     environment: dict = field(default_factory=dict)
     notes: str = ""
+    task_form: TaskForm = TaskForm.INPLACE
 
 
 class ProbeSource(Protocol):

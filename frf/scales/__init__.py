@@ -1,14 +1,12 @@
 """The four scales. Each answers four questions and implements none of the eight stages.
 
-    kernel    one computational routine        -- a module with arrays, an envelope, a pluggable cost
-    module    one function or symbol           -- the smallest instance of the call seam
-    package   a package's whole public surface -- the call seam, with generated probes
+    kernel    one computational routine        -- a process-seam repo subclass
+    module    one function or symbol           -- a process-seam repo subclass
+    package   a library's whole public surface -- a process-seam repo subclass
     repo      an entire repository             -- the process seam
 
-Three of the four share one seam and the fourth uses the other, and that split is the design's only
-structural divide. Everything downstream of an observation is shared, which is why these files are
-short: `kernel.py` is eighty lines because a kernel really is a module with three additions, and
-saying that in code is better than saying it in a comment above a copy.
+All four scales use the process seam and source from GitHub. The differences are in labelling,
+expected candidate profile, and task metadata — not in how the pipeline observes them.
 """
 from __future__ import annotations
 

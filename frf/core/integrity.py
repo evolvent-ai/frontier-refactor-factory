@@ -147,7 +147,8 @@ def inspect(root: str, forbidden: tuple, *, allowed: tuple = ()) -> Inspection:
         for pattern in _REACHES:
             for match in pattern.finditer(text):
                 name = match.group(1)
-                if name in permitted:
+                if name in permitted or any(name.startswith(item + sep)
+                                            for item in permitted for sep in (".", "/", "::")):
                     continue
                 if _is_banned(name, banned):
                     found.hits.append(Finding(relative, _line_of(text, match.start()), name,
@@ -223,6 +224,22 @@ class Isolation:
 PROCESS_CAP = 512
 
 
+def container_is_the_boundary(backend) -> bool:
+    """Whether the sandbox itself already provides the separation `restricted_argv` would.
+
+    MEASURED, NOT ASSUMED, and the measurement changed the design. The intent was that each side run
+    under its own restricted account inside the container. In the sandbox tasks actually ship in,
+    that is not possible and not needed: the process already runs as an unprivileged user with an
+    EMPTY effective capability set, in a container of its own, so `setpriv` fails with
+    "setresuid: Operation not permitted" -- and would buy nothing if it succeeded.
+
+    So on a container backend the boundary IS the container. Insisting on the wrapper there would
+    refuse every task for the absence of a defence that the environment already provides more
+    strongly than the wrapper could.
+    """
+    return getattr(backend, "name", "") in ("docker", "remote")
+
+
 def isolation_for(backend, *, applied: bool = False) -> Isolation:
     """What isolation is ACTUALLY IN FORCE for a subject served through this backend.
 
@@ -242,23 +259,23 @@ def isolation_for(backend, *, applied: bool = False) -> Isolation:
     defence real, and only the code that applied it can say so.
     """
     name = getattr(backend, "name", "") or "none"
-    if applied and name in ("docker", "remote"):
-        return Isolation(enforced=True, accounts=True, process_cap=PROCESS_CAP,
+    if name in ("docker", "remote"):
+        # The container is the boundary -- see `container_is_the_boundary`. The wrapper is reported
+        # when it was additionally applied, because a process cap is a real further restriction,
+        # but its absence no longer means the two sides are unseparated.
+        return Isolation(enforced=True, accounts=applied,
+                         process_cap=PROCESS_CAP if applied else 0,
                          suspends_idle_side=True,
-                         reason="each side runs in its own container under an unprivileged account "
-                                "with a process cap, and the untimed side is stopped while the "
-                                "other is measured")
+                         reason="each side runs in its own container, as an unprivileged user with "
+                                "no capabilities, and the untimed side is stopped while the other "
+                                "is measured"
+                                + (" (with a process cap)" if applied else ""))
     if applied:
         # Wrapped, but on a backend that shares this machine. The account and the cap are real; the
         # separation is not, because both sides still see the same kernel and the same filesystem.
         return Isolation(enforced=False, accounts=True, process_cap=PROCESS_CAP,
                          reason="the command was restricted, but %r shares this machine with the "
                                 "factory, so the two sides are not genuinely separated" % name)
-    if name in ("docker", "remote"):
-        return Isolation(enforced=False,
-                         reason="%r could isolate the two sides, but nothing wrapped the subject "
-                                "with an unprivileged account or a process cap, so no isolation is "
-                                "actually in force" % name)
     return Isolation(enforced=False,
                      reason="%r shares this machine and this user with the factory, so work handed "
                             "to another process would be invisible to the clock" % name)
@@ -280,6 +297,20 @@ def restricted_argv(argv: list, *, user: str = "nobody", cap: int = PROCESS_CAP)
     # in step with whatever a future image happens to source.
     limited = ["sh", "-c", "unset ENV BASH_ENV; ulimit -u %d 2>/dev/null; exec \"$@\"" % cap,
                "--"] + list(argv)
+    if not _reachable_by(user, argv):
+        # The unprivileged account cannot even read the program it is being asked to run, so
+        # wrapping it would not isolate the subject -- it would replace every observation with the
+        # same permission error. Refused rather than applied, so that `isolation_for` reports the
+        # defence as absent and E6 says INCONCLUSIVE.
+        #
+        # This is a property of the HOST, not of the design: it happens when the interpreter lives
+        # under a private home directory, as a conda installation in /root does. In the container a
+        # task actually ships in, the toolchain is under /usr and world-readable, which is where
+        # this wrapper is meant to run.
+        raise LookupError(
+            "%r cannot read %s, so running the subject as that user would measure a permission "
+            "error rather than the subject. This is usually an interpreter installed under a "
+            "private home directory." % (user, argv[0]))
     if shutil.which("setpriv"):
         # `--init-groups` reads the user database and, on some images, drags dpkg's configuration
         # in with it -- which then complains to stderr about a file it cannot read. That warning is
@@ -295,6 +326,37 @@ def restricted_argv(argv: list, *, user: str = "nobody", cap: int = PROCESS_CAP)
     raise LookupError(
         "no way to drop privileges here: neither setpriv nor su is present. Running the two sides "
         "as the same user would leave the delegation check unable to conclude anything.")
+
+
+def _reachable_by(user: str, argv: list) -> bool:
+    """Whether `user` could execute argv[0] at all: every directory above it must be traversable.
+
+    Checked before wrapping rather than discovered afterwards, because the failure is silent in the
+    worst way -- every probe returns the same permission message, the corpus freezes it as the
+    subject's behaviour, and a submission that does nothing reproduces all of it.
+    """
+    import pwd
+
+    try:
+        record = pwd.getpwnam(user)
+    except KeyError:
+        return False
+    if record.pw_uid == 0:
+        return True
+
+    path = os.path.abspath(argv[0] if argv else "")
+    parts = path.split(os.sep)
+    for depth in range(1, len(parts) + 1):
+        step = os.sep.join(parts[:depth]) or os.sep
+        try:
+            mode = os.stat(step).st_mode
+        except OSError:
+            return False
+        # World-executable is what a traversal needs; group membership is not assumed, because
+        # `restricted_argv` clears supplementary groups.
+        if not mode & 0o001:
+            return False
+    return True
 
 
 def _shell_quote(part: str) -> str:

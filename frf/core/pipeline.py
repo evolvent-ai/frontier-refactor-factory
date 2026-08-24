@@ -24,6 +24,8 @@ be answered at all.
 """
 from __future__ import annotations
 
+import os
+import shutil
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
@@ -35,6 +37,19 @@ from .scale import Candidate, Scale, Spec
 # chosen: across a set of already-shipped packages, a third of them had at least one observation
 # that a single run would have frozen as reproducible and a second run disagreed with.
 FREEZE_RUNS = 5
+
+# The floor a timed workload must clear, per call, for a speed score over it to mean anything.
+#
+# 10 microseconds, and the number is a property of the CLOCK rather than of any subject. A
+# `time.perf_counter` pair costs tens of nanoseconds to read and the scheduler can steal a
+# microsecond at any moment, so a call that finishes in under ten of them is measured almost
+# entirely as jitter: the ratio that comes back describes the machine, not the program. Above it,
+# a real algorithmic change moves the number by more than the noise does.
+#
+# Deliberately low. This exists to reject the tasks whose speed dimension DOES NOT EXIST -- a
+# leap-year test, an integer comparison -- not to demand that every subject be a heavy one. A
+# subject at 50 microseconds is thin but honest, and it ships.
+MIN_TIMED_SECONDS = 10e-6
 
 # Below this a corpus cannot distinguish a real submission from a lucky one, whatever its evidence
 # says. Two numbers because they fail differently: a handful of probes each worth many points, and
@@ -132,6 +147,7 @@ class Hooks:
 
 
 def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
+              freeze_runs: int = FREEZE_RUNS,
               log: Callable[[str], None] = lambda _m: None) -> Refused | Emitted:
     """One candidate -> a task, or the reason there is none.
 
@@ -148,8 +164,10 @@ def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
     Calling an unknown failure "material" would be the comfortable lie -- the yield would look fine
     and the denominator would be quietly wrong.
     """
+    if freeze_runs < 2:
+        raise ValueError("freeze_runs must be at least 2")
     try:
-        return _run(scale, candidate, hooks, log)
+        return _run(scale, candidate, hooks, log, freeze_runs)
     except Stage as refusal:
         log("refused at %s: %s (%s)" % (refusal.stage, refusal.reason, refusal.fault.value))
         return Refused(refusal.stage, refusal.reason, refusal.fault, refusal.detail)
@@ -163,23 +181,81 @@ def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
         return Refused("unclassified", type(unexpected).__name__, Fault.FACTORY, detail[:2000])
 
 
-def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], None]) -> Emitted:
+def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], None],
+         freeze_runs: int) -> Emitted:
     spec = _specify(scale, candidate)
     log("specified %s (%s)" % (spec.name, spec.language))
 
-    hooks.build(spec)
+    # A REFERENCE THAT WILL NOT BUILD IS MATERIAL, NOT A FAULT OF OURS. Real repositories fail to
+    # build for reasons that are facts about them -- a pinned dependency that no longer resolves, a
+    # toolchain the image does not carry, a generated file the release forgot. Uncaught, every one
+    # of those was counted as our bug and dragged `trustworthy` down with it.
+    try:
+        hooks.build(spec)
+    except (RuntimeError, OSError) as why:
+        raise Stage("build", "reference-will-not-build", Fault.MATERIAL, str(why)[:2000])
     log("built")
 
-    source = scale.probes(spec)
+    # A SCALE THAT CANNOT DRAW PROBES IS DESCRIBING ITS MATERIAL, NOT FAILING. The repo scale
+    # raises here when a repository offers no liftable invocation -- a TUI, a daemon, a tool that
+    # only talks to the network. That is a fact about the candidate, and deserves the same verdict
+    # an unbuildable checkout gets. Left uncaught it reached the outer handler, was counted as
+    # OURS, and set `trustworthy: false` for the whole batch -- so a pond full of unsuitable
+    # repositories read as a factory with a bug in it, which is the one thing the fault split
+    # exists to tell apart.
+    try:
+        source = scale.probes(spec)
+    except ValueError as why:
+        raise Stage("probes", "no-probes-could-be-drawn", Fault.MATERIAL, str(why)[:2000])
+    except RuntimeError as why:
+        # A generator failure can be a malformed material generator or an unavailable
+        # execution backend. Both are candidate/setup failures here, never an unclassified
+        # factory crash; the detail remains visible for diagnosis.
+        raise Stage("probes", "probe-generator-failed", Fault.MATERIAL, str(why)[:2000])
     observer = scale.observe()
 
-    report = hooks.freeze(spec, observer, source, runs=FREEZE_RUNS)
+    report = hooks.freeze(spec, observer, source, runs=freeze_runs)
     _check_corpus(report)
     log("froze %d probe(s), %d point(s), discarded %.0f%%"
         % (report.probes, report.graded_points, 100 * report.discard_rate))
 
     report = hooks.adequacy(spec, observer, report)
     log("adequacy: %s" % report.adequacy_note)
+
+    # AND THE VERDICT IS ACTED ON. `adequacy` measures reach and floor and then repairs what it
+    # can; a corpus still inadequate after those attempts grades a fraction of the subject, and
+    # shipping it means a submission can get most of the program arbitrarily wrong with nothing
+    # in the corpus moving. An earlier version logged this line and ignored it, which put tasks
+    # reaching 18% of their subject into the output directory alongside honest ones.
+    #
+    # `usable` unset means the seam does not measure adequacy at all -- an absence, not a finding.
+    if getattr(report, "usable", True) is False:
+        raise Stage("adequacy", "corpus-does-not-measure-the-subject", Fault.MATERIAL,
+                    report.adequacy_note or "the corpus is inadequate after repair")
+
+    # TIMING IS REQUIRED when the corpus declares timed probes. If the corpus has no timed field at
+    # all (e.g. a toy scale in tests), the check is skipped rather than blocking every non-standard
+    # use. A corpus that explicitly declares timed=[] after a timing pass ran is the failure case.
+    timed_probes = getattr(report, "timed", None)
+    if timed_probes is not None and not timed_probes:
+        raise Stage("timing", "no-timed-workload", Fault.MATERIAL,
+                    "the corpus has no workload heavy enough to measure; this is a performance "
+                    "benchmark, so timing is required")
+
+    # AND THE WORKLOAD MUST BE HEAVY ENOUGH TO READ. Declaring timed probes is not the same as
+    # having a measurable workload: a leap-year test is three integer operations, and the
+    # stopwatch over it reads this machine's noise however many probes are held out. Such a task
+    # ships an instruction promising "your score rises with the measured speedup" over a
+    # measurement that cannot move, so every submission scores exactly 0.5 whatever it does.
+    #
+    # None means the measurement was never attempted (no `time` op on this seam, or the subject
+    # refused the question) -- an absence, not a finding, and it must not refuse the task.
+    timed_seconds = getattr(report, "timed_seconds", None)
+    if timed_seconds is not None and timed_seconds < MIN_TIMED_SECONDS:
+        raise Stage("timing", "workload-too-fast-to-measure", Fault.MATERIAL,
+                    "the heaviest timed probe runs in %.2f us, below the %.0f us floor this "
+                    "machine's clock can resolve; a speed score over it would be noise"
+                    % (timed_seconds * 1e6, MIN_TIMED_SECONDS * 1e6))
 
     battery = hooks.battery(spec, observer, report)
     if not battery.ok:
@@ -219,10 +295,55 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     battery.record(verdict)
     if not verdict.ok:
         raise Stage("emit", "package-does-not-reproduce-itself", Fault.FACTORY, verdict.detail)
+
+    # Purge bytecode left by replay. The E7 step executes the reference Python implementation
+    # directly, which causes Python to compile and cache .pyc files into tests/reference/.
+    # Those files must not ship: they reveal the Python version used and are not needed for grading.
+    _purge_task_bytecode(path)
+
     log("emitted %s" % path)
 
     return Emitted(spec.name, path, spec.scale, report.graded_points, report.probes,
                    report.discard_rate, battery.to_json())
+
+
+def _purge_task_bytecode(task_path: str) -> None:
+    """Remove __pycache__ dirs and .pyc/.pyo files from an emitted task tree.
+
+    The E7 replay step executes the reference Python implementation, causing Python to
+    compile and write .pyc files into tests/reference/. These must not ship: they reveal
+    the Python version used during freeze and serve no purpose for grading.
+
+    Called after replay() completes so it catches everything written during execution.
+    """
+    for dirpath, dirnames, filenames in os.walk(task_path, topdown=False):
+        for name in filenames:
+            if name.endswith(".pyc") or name.endswith(".pyo"):
+                try:
+                    os.remove(os.path.join(dirpath, name))
+                except OSError:
+                    pass
+    for dirpath, dirnames, filenames in os.walk(task_path, topdown=False):
+        for name in dirnames:
+            if name == "__pycache__":
+                shutil.rmtree(os.path.join(dirpath, name), ignore_errors=True)
+
+
+def _accepts(function, name: str) -> bool:
+    """Whether `function` declares a keyword called `name`.
+
+    Asked rather than assumed, because the alternative -- passing it and catching TypeError -- is
+    indistinguishable from the subject raising TypeError for its own reasons.
+    """
+    import inspect
+
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in parameters:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
 
 
 def _specify(scale: Scale, candidate: Candidate) -> Spec:
@@ -231,9 +352,22 @@ def _specify(scale: Scale, candidate: Candidate) -> Spec:
     The check is here rather than in the scale because the risk is uniform: `specify` is where a
     model's proposal enters the pipeline, and a proposal is only ever allowed to fill in fields of a
     type defined in `core`. It cannot introduce a mechanism, because there is nowhere to put one.
+
+    If the scale carries a `_task_form` attribute (set by automation.run()), it is forwarded as a
+    keyword argument so the scale can honour the configured form without the factory needing a new
+    API surface.
     """
     try:
-        spec = scale.specify(candidate)
+        kwargs = {}
+        task_form = getattr(scale, "_task_form", None)
+        # ADVISORY MEANS ADVISORY. Passed only to a scale whose `specify` actually declares it:
+        # the attribute is set on every scale by `automation.run`, and forwarding it blindly meant
+        # the three scales that do not take it raised TypeError -- caught below and reported as
+        # `could-not-specify (material)`, so a wiring mistake of ours wore the disguise of unusable
+        # material and refused every candidate in a batch.
+        if task_form is not None and _accepts(scale.specify, "task_form"):
+            kwargs["task_form"] = task_form
+        spec = scale.specify(candidate, **kwargs)
     except Exception as exc:                                   # noqa: BLE001 -- reported, not raised
         raise Stage("specify", "could-not-specify", Fault.MATERIAL,
                     "%s: %s" % (type(exc).__name__, exc))

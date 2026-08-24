@@ -23,14 +23,13 @@ def test_doctor_reports_consequences_not_just_states(capsys):
     assert cli.main(["doctor"]) == 0
     out = capsys.readouterr().out
 
-    assert "subjects can be written in:" in out
+    assert "subjects can be served in any language" in out
     assert "line coverage has a backend:" in out
     assert "candidates can be sourced from:" in out
     assert "ships tasks, with one quality number fewer" in out, "a gap that degrades says so"
 
-    # What the design can do and what THIS machine can do are reported as separate lines. Merging
-    # them would make a laptop without a Go toolchain read as a factory that cannot serve Go.
-    assert "usable on this host" in out and "served on this host" in out
+    # Doctor no longer reports per-language shim availability since all scales use process seam.
+    assert "usable on this host" in out
 
 
 def test_doctor_never_prints_a_credential(capsys, monkeypatch):
@@ -46,15 +45,14 @@ def test_doctor_never_prints_a_credential(capsys, monkeypatch):
     assert "LLM_API_KEY   set" in out.replace("  ", " ").replace("   ", " ") or "set" in out
 
 
-def test_build_says_what_it_cannot_do_rather_than_failing_obscurely(capsys):
-    """Sourcing needs credentials and is per-registry, so the CLI cannot construct an index. Saying
-    so with the Python that would work beats a stack trace from inside a scale."""
-    assert cli.main(["build", "module", "--budget", "5"]) == 2
-    err = capsys.readouterr().err
-
-    assert "cannot yet construct an index" in err
-    assert "Factory().register(Module(index=my_index))" in err
-    assert "budget=5" in err, "the message echoes what was asked for"
+def test_build_uses_the_automatic_runner(monkeypatch, capsys):
+    """The CLI delegates wiring and reports the resulting batch as JSON."""
+    from frf.automation import BatchReport
+    monkeypatch.setattr("frf.automation.run",
+                        lambda *args, **kwargs: BatchReport({"scale": "module"}, 0.25,
+                                                            "github"))
+    assert cli.main(["build", "module", "--budget", "5"]) == 0
+    assert '"index": "github"' in capsys.readouterr().out
 
 
 def test_an_unknown_scale_is_rejected_by_the_parser(capsys):

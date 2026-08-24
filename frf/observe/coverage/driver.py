@@ -1,14 +1,8 @@
 """Running a subject over the corpus so that something can watch which lines it executes.
 
-Every backend outside Python needs the same thing: the subject, served the way the pipeline serves
-it, driven over every probe, under whatever the language's instrumentation is. Only the last part
-differs, so the first two live here.
-
-DRIVEN THROUGH THE SHIM, not through a harness written for coverage. That is the point of doing it
-this way: measuring a subject through a different entry point than the one the corpus grades would
-answer a question about the measuring harness. The shim is how the pipeline calls the subject, so
-it is how the reach is measured, and a language with no shim has no coverage backend either -- which
-is consistent rather than a second gap to explain.
+Every coverage backend needs a subject driven over the corpus, with whatever the language's
+instrumentation is watching. Only the instrumentation part differs per language, so the shared
+machinery lives here.
 
 NOTHING HERE RAISES. Coverage is a report and not a gate, so a compiler that is not installed, a
 build that fails, a subject that will not start -- all of them return "not measured" and the task
@@ -23,15 +17,13 @@ import shutil
 import subprocess
 import tempfile
 
-from ..call import shims
-
 # Longest the instrumented subject may take over the whole corpus. Instrumentation makes everything
 # slower -- a tracer can be an order of magnitude -- so this is far more generous than a timing run.
 TIMEOUT = 900.0
 
 
 def probe_lines(probes) -> list:
-    """The corpus as request lines the shim will answer.
+    """The corpus as request lines the subject runner will answer.
 
     Probes arrive as `{id: args}` from the call seam and as a plain sequence elsewhere, and both
     shapes reach here. Normalising in one place beats each backend remembering which it was given.
@@ -91,12 +83,14 @@ class Run:
         detailed diagnosis would be a detailed diagnosis of something nobody is waiting on.
         """
         target = subject_path(self.spec)
-        if not target or not os.path.exists(target) or not shims.usable(self.language):
+        if not target or not os.path.exists(target):
+            return False
+        build, argv = self._build_argv(target)
+        if build is None:
             return False
         try:
             self.source = open(target, encoding="utf-8", errors="replace").read()
-            build, argv = shims.materialise(self.work, self.language, target)
-        except (LookupError, OSError):
+        except OSError:
             return False
 
         if self.build_override is not None:
@@ -117,24 +111,18 @@ class Run:
         except (OSError, subprocess.SubprocessError):
             return False
 
-        # DID THE SUBJECT ACTUALLY ANSWER? The build succeeding only says it compiles, and the
-        # process starting only says the interpreter launched. A subject that throws while being
-        # loaded -- a syntax error in a scripting language, a static initialiser that fails --
-        # starts, dies, and leaves whatever its instrumentation had written so far. For a tool that
-        # writes on exit anyway, that is a well-formed report in which nothing executed, and the
-        # backend would return a MEASURED ZERO: the verdict for a broken tracer, delivered for a
-        # subject that never ran.
-        #
-        # Answering at least once is the evidence that it ran, and it is checked HERE rather than
-        # in each backend, because the ones that currently escape this do so only because their
-        # tool happens to leave nothing behind.
         if lines and not served.stdout.strip():
             return False
         return True
 
+    def _build_argv(self, target: str) -> tuple:
+        """How to build and run the subject for coverage. -> (build_commands, argv) or (None, None).
+
+        Subclasses override this to inject instrumentation flags. The base implementation returns
+        (None, None) so that a language with no coverage backend gracefully returns unmeasured.
+        """
+        return None, None
+
     def subject_name(self) -> str:
         """What the subject's file is called in the workspace, for matching a tool's report."""
-        try:
-            return shims.load(self.language).subject
-        except LookupError:                                    # pragma: no cover -- guarded above
-            return ""
+        return os.path.basename(subject_path(self.spec))

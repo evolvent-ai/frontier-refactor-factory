@@ -23,7 +23,12 @@ the registry and a logger, and hands them to the pipeline.
 """
 from __future__ import annotations
 
+import asyncio
+import signal
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
 from typing import Callable, Iterable
 
 from .core import pipeline
@@ -144,6 +149,146 @@ class Factory:
         return known + extra
 
     # ---------------------------------------------------------------- building
+    async def build_async(
+        self,
+        scale: str,
+        *,
+        budget: int = 1,
+        candidates: Iterable[Candidate] | None = None,
+        max_concurrent: int = 32,
+        checkpoint_file: str | None = None,
+        progress_callback=None,
+    ) -> Result:
+        """Async version of build(). Runs up to max_concurrent candidates in parallel.
+
+        Graceful shutdown: a SIGINT sets a stop event so no new candidates are started,
+        but all already-running ones are allowed to finish cleanly.
+        """
+        from .core.checkpoint import CheckpointWriter, CheckpointRecord, make_checkpoint_path
+        from .core.progress import ProgressReporter
+        from datetime import datetime, timezone
+
+        implementation = self._require(scale)
+        material = list(candidates if candidates is not None else implementation.find(budget))
+        capped = material[:budget]
+        total = len(capped)
+
+        # Checkpoint: skip identities already done on a previous run.
+        writer: CheckpointWriter | None = None
+        already_done: set[str] = set()
+        if checkpoint_file is not None:
+            cp_path = checkpoint_file or make_checkpoint_path()
+            writer = CheckpointWriter(cp_path)
+            already_done = writer.load_completed()
+            if already_done:
+                self.log("[%s] checkpoint: skipping %d already-done candidate(s)"
+                         % (scale, len(already_done)))
+
+        reporter = ProgressReporter(total, scale)
+        semaphore = asyncio.Semaphore(max_concurrent)
+        stop_event = asyncio.Event()
+        result = Result(scale)
+        result_lock = asyncio.Lock()
+
+        # SIGINT handler — sets stop_event so no new candidates are started.
+        loop = asyncio.get_event_loop()
+        original_sigint = signal.getsignal(signal.SIGINT)
+
+        def _sigint_handler(signum, frame):
+            self.log("\n[%s] interrupted — finishing in-flight candidates, then stopping"
+                     % scale)
+            loop.call_soon_threadsafe(stop_event.set)
+
+        signal.signal(signal.SIGINT, _sigint_handler)
+
+        executor = ThreadPoolExecutor()
+
+        async def _build_one(index: int, candidate: Candidate) -> None:
+            if stop_event.is_set():
+                return
+            self.log("[%s] %d/%d %s" % (scale, index + 1, total, candidate.identity))
+            await semaphore.acquire()
+            try:
+                if stop_event.is_set():
+                    return
+                # CPU-bound pipeline stages run in a thread pool so the event loop stays free.
+                hooks = self._hooks(implementation)
+                outcome = await loop.run_in_executor(
+                    executor,
+                    lambda c=candidate, h=hooks: pipeline.build_one(
+                        implementation, c, h,
+                        freeze_runs=self.settings.freeze_runs, log=self.log))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                detail = "%s: %s" % (type(exc).__name__, exc)
+                outcome = pipeline.Refused("unclassified", type(exc).__name__,
+                                           pipeline.Fault.FACTORY, detail[:2000])
+            finally:
+                semaphore.release()
+
+            # Record outcome.
+            async with result_lock:
+                (result.batch.emitted if outcome.ok else result.batch.refused).append(outcome)
+
+            # Checkpoint write.
+            if writer is not None:
+                status = "emitted" if outcome.ok else "refused"
+                path = getattr(outcome, "path", "")
+                stage = getattr(outcome, "stage", "")
+                reason = getattr(outcome, "reason", "")
+                fault = getattr(getattr(outcome, "fault", None), "value", "")
+                record = CheckpointRecord(
+                    identity=candidate.identity,
+                    scale=scale,
+                    task_form="",
+                    status=status,
+                    stage=stage,
+                    reason=reason,
+                    fault=fault,
+                    timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                    path=path,
+                )
+                try:
+                    writer.write(record)
+                except Exception as exc:
+                    self.log("[checkpoint] write failed: %s" % exc)
+
+            # Progress.
+            p_status = "emitted" if outcome.ok else "refused"
+            p_stage = getattr(outcome, "stage", "")
+            reporter.record(p_status, stage=p_stage)
+            if progress_callback is not None:
+                try:
+                    progress_callback(outcome)
+                except Exception:
+                    pass
+
+        # Skip already-completed candidates.
+        pending = [c for c in capped if c.identity not in already_done]
+        skipped = len(capped) - len(pending)
+        if skipped:
+            reporter._done += skipped  # count skipped in progress display
+
+        tasks = [asyncio.create_task(_build_one(i, c)) for i, c in enumerate(pending)]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            signal.signal(signal.SIGINT, original_sigint)
+            executor.shutdown(wait=False)
+
+        summary = result.summary()
+        self.log("[%s] %d/%d shipped (%.0f%% yield)%s"
+                 % (scale, summary["emitted"], summary["attempted"],
+                    100 * summary["yield_rate"],
+                    "" if summary["trustworthy"] else
+                    "  -- NOT A YIELD: %d refusal(s) were our fault" % summary["refused_factory"]))
+        if writer is not None:
+            self.log("[checkpoint] written to %s" % writer.path)
+        import sys
+        print(reporter.final_summary(), file=sys.stderr)
+        return result
+
     def build(self, scale: str, budget: int = 1, *,
               candidates: Iterable[Candidate] | None = None) -> Result:
         """Try `budget` candidates at one scale. -> what shipped, and why the rest did not.
@@ -161,7 +306,7 @@ class Factory:
                 break
             self.log("[%s] %d/%d %s" % (scale, index + 1, budget, candidate.identity))
             outcome = pipeline.build_one(implementation, candidate, self._hooks(implementation),
-                                         log=self.log)
+                                         freeze_runs=self.settings.freeze_runs, log=self.log)
             (result.batch.emitted if outcome.ok else result.batch.refused).append(outcome)
 
         summary = result.summary()

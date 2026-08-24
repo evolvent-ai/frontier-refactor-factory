@@ -71,8 +71,13 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
     scenarios = list(source.draw(source.count))
     frozen, dropped = {}, 0
 
+    batched = getattr(observer, "run_many", None)
+    all_runs = ([batched(spec, scenarios) for _ in range(runs)] if batched is not None else None)
     for scenario in scenarios:
-        runs_observed = [observer.run(spec, scenario) for _ in range(runs)]
+        if batched is None:
+            runs_observed = [observer.run(spec, scenario) for _ in range(runs)]
+        else:
+            runs_observed = [batch.get(scenario.probe_id, []) for batch in all_runs]
         steps = [obs.freeze(index, [observed[index] for observed in runs_observed])
                  for index in range(len(scenario.steps))]
         if any(step.graded_points() for step in steps):
@@ -101,17 +106,44 @@ def _pick_timed(probe_ids: list, count: int = 3) -> list:
 
 
 def audit(spec: Spec, observer, corpus: Corpus) -> Corpus:
-    """Reach and floor, as on the other seam. The verdict lives in `core.adequacy`."""
-    reach = observer.coverage().measure(spec, corpus.scenarios)
-    floor = adequacy.measure_floor(
-        lambda name: _score_trivial(observer, spec, corpus, name), tuple(TRIVIAL))
+    """Reach and floor, as on the other seam. The verdict lives in `core.adequacy`.
 
-    report = adequacy.assess(reach, floor)
-    corpus.adequacy = report.to_json()
-    corpus.adequacy_note = report.note
-    if not report.ok:
-        corpus.usable = False
-    return corpus
+    This now calls the repair loop (DESIGN §7), which will attempt to improve coverage by proposing
+    new scenarios for dark regions.
+    """
+    def _refreeze(corpus, probe_id, scenario_dict):
+        """Observe one new scenario through the reference and freeze the results into the corpus."""
+        step = {
+            "argv": scenario_dict.get("cmd", ["{PROGRAM}"]),
+            "cwd": scenario_dict.get("cwd", "."),
+            "stdin": scenario_dict.get("stdin") or None,
+        }
+        scenario_data = {
+            "probe_id": probe_id,
+            "steps": [step],
+            "fixture": scenario_dict.get("fixture"),
+            "environment": scenario_dict.get("env") or {},
+        }
+        from .runner import Scenario
+        scenario = Scenario.from_json(scenario_data)
+        observations = observer.run(spec, scenario)
+        steps = [
+            obs.freeze(step_idx, [observations[step_idx]])
+            for step_idx in range(len(scenario.steps))
+            if step_idx < len(observations)
+        ]
+        if any(step.graded_points() for step in steps):
+            corpus.scenarios.append(scenario)
+            corpus.expectations[probe_id] = steps
+
+    return adequacy.repair(
+        spec, observer, corpus,
+        score_trivial=lambda name: _score_trivial(observer, spec, corpus, name),
+        trivial_names=list(TRIVIAL),
+        max_iterations=3,
+        log=lambda msg: None,
+        refreeze=_refreeze,
+    )
 
 
 def _score(corpus: Corpus, observed_by_probe: dict) -> tuple[int, int]:

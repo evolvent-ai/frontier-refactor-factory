@@ -25,13 +25,15 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass, field
 
 from ..core import integrity
+from ..core.contract import PackageContract, PackageOperation, Provenance
 from ..core.scale import Candidate, Spec
 from ..observe import coverage
 from ..observe.call import shims
-from ..observe.call.runner import Subject
+from ..observe.call.runner import Subject, RemoteSubject
 from .module import PROBE_TIMEOUT
 
 # How many probes a corpus is drawn with. Larger than the module scale's because it has to cover a
@@ -49,6 +51,9 @@ class Material:
     root: str                                   # the checkout the reference is built from
     entry_points: tuple                         # the public surface, as names
     description: str
+    dispatch: tuple = ()
+    package_name: str = ""
+    package_root: str = ""
     generator: str = ""                         # model-written; runs only in the container
     target_language: str = ""
     forbidden: tuple = ()
@@ -80,23 +85,44 @@ class Observer:
         # Which sandbox the subject runs in, so isolation is reported from what is in force.
         self._backend = backend
         self._argv: list = []
+        self._isolated = False
 
     def build(self, spec: Spec) -> None:
-        """Write the shim beside the installed package.
-
-        Only the shim, unlike the module scale: there the subject is one file to be copied, and here
-        it is a package already installed in the environment, which the shim reaches by name. So
-        there is nothing to copy and nothing to compile -- whatever building the package needed
-        happened when it was installed.
-        """
-        shim = shims.load(spec.language)
+        """Copy the pinned package, create a dispatch adapter, and serve it over JSON."""
+        if not self.material.package_root or not self.material.package_name:
+            raise RuntimeError("package material has no package root/name")
         os.makedirs(self.workspace, exist_ok=True)
-        with open(os.path.join(self.workspace, shim.template), "w", encoding="utf-8") as handle:
-            handle.write(shims.source(shim))
-        _, self._argv = shim.commands(self.workspace)
+        destination = os.path.join(self.workspace, self.material.package_name)
+        shutil.copytree(self.material.package_root, destination, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__", ".git"))
+        dispatch = {entry["name"]: (entry["module"], entry["symbol"])
+                    for entry in self.material.dispatch}
+        adapter = os.path.join(self.workspace, "subject.py")
+        with open(adapter, "w", encoding="utf-8") as handle:
+            handle.write(_adapter_source(dispatch))
+        _, self._argv = shims.materialise(self.workspace, spec.language, adapter, "entry")
 
-    def subject(self, spec: Spec | None = None, *, mutated: bool = False) -> Subject:
-        return Subject(self._argv, cwd=self.workspace, timeout=PROBE_TIMEOUT)
+    def subject(self, spec: Spec | None = None, *, mutated: bool = False,
+                attempt: int = 0):
+        argv, room = self._argv, self.workspace
+        if mutated:
+            room = os.path.join(self.workspace, ".mutant-%d" % attempt)
+            shutil.rmtree(room, ignore_errors=True)
+            shutil.copytree(self.workspace, room, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns(".mutant-*", "__pycache__"))
+            adapter = os.path.join(room, "subject.py")
+            original = open(adapter, encoding="utf-8").read()
+            if attempt == 0:
+                original += "\n_old_entry = entry\ndef entry(op, *args):\n    return None\n"
+            elif attempt == 1:
+                original += "\n_old_entry = entry\ndef entry(op, *args):\n    return 0\n"
+            with open(adapter, "w", encoding="utf-8") as handle:
+                handle.write(original)
+            _, argv = shims.materialise(room, spec.language, adapter, "entry")
+        if getattr(self._backend, "name", "") in ("docker", "remote"):
+            return RemoteSubject(argv, workspace=room, backend=self._backend,
+                                 timeout=PROBE_TIMEOUT)
+        return Subject(argv, cwd=room, timeout=PROBE_TIMEOUT)
 
     def coverage(self):
         return coverage.backend_for(self.material.language)
@@ -112,11 +138,14 @@ class Observer:
         the evidence check fail every task that has a rule -- which is every task at this scale.
         """
         banned = tuple(self.material.forbidden or (self.material.identity,))
-        return [str(hit) for hit in integrity.inspect(self.workspace, banned).hits]
+        allowed = tuple({self.material.package_name, *
+                         (entry.get("module", "") for entry in self.material.dispatch)})
+        return [str(hit) for hit in integrity.inspect(
+            self.workspace, banned, allowed=allowed).hits]
 
     def isolation(self):
         """How the two sides are kept apart while one is timed -- reported, never assumed."""
-        return integrity.isolation_for(self._backend)
+        return integrity.isolation_for(self._backend, applied=self._isolated)
 
     def isolated(self) -> bool:
         return self.isolation().enforced
@@ -184,7 +213,7 @@ class Package:
         return self._built
 
     def probes(self, spec: Spec) -> ProbeSource:
-        """Run the generator where model-written code is allowed to run, and take back data."""
+        """Run the generator in the sandbox, then mechanically audit its data output."""
         if self._material is None:
             raise RuntimeError("probes() was asked for before specify() chose a package")
         if not self._material.generator:
@@ -194,8 +223,13 @@ class Package:
             raise RuntimeError(
                 "no runner was given for the probe generator. Generators are model-written and must "
                 "execute inside a container; Package(run_generator=...) is how that is supplied.")
-        drawn = self._run_generator(self._material.generator, PROBE_COUNT)
-        return ProbeSource(_as_argument_lists(drawn))
+        try:
+            drawn = self._run_generator(self._material.generator, PROBE_COUNT)
+        except Exception as exc:
+            raise ValueError("package probe generator failed in the sandbox: %s" % str(exc)[:1800]) from exc
+        probes = _as_argument_lists(drawn)
+        _audit_probe_contract(probes, self._material.dispatch)
+        return ProbeSource(probes)
 
     def _locate(self, candidate: Candidate) -> Material:
         detail = candidate.detail or {}
@@ -203,13 +237,50 @@ class Package:
             raise ValueError("candidate %s does not name its public surface; a package task grades "
                              "the whole contract, so the entry points are required"
                              % candidate.identity)
-        return Material(
-            identity=candidate.identity, language=candidate.language,
-            root=detail.get("root", ""), entry_points=tuple(detail["entry_points"]),
-            description=detail.get("description", ""), generator=detail.get("generator", ""),
-            target_language=detail.get("target_language", ""),
-            forbidden=tuple(detail.get("forbidden", ())),
-            install=list(detail.get("install", ())))
+        from ..source.package_adapters import operations
+        raw_ops = detail.get("dispatch") or operations(
+            str(detail.get("root") or ""), candidate.language,
+            str(detail.get("package_name") or ""), str(detail.get("package_root") or ""))
+        dispatch = tuple(raw_ops)
+        if not dispatch:
+            raise ValueError("candidate %s has no supported public package operations" % candidate.identity)
+        generator = detail.get("generator", "")
+        if not generator:
+            from ..core import model
+            from ..core.model import validated_generator
+            surface = json.dumps(dispatch, sort_keys=True, indent=2)
+            answer = model.ask(
+                "Write deterministic probes(n) returning a list of argument lists for this "
+                "public dispatch. Include valid, invalid and boundary cases for every operation. "
+                "Return only code.\n" + surface,
+                system="Define only a top-level probes(n) generator. Do not execute the package.",
+                timeout=60)
+            try:
+                generator = validated_generator(answer)
+            except Exception:
+                answer = model.ask("Return ONLY valid Python defining probes(n).\n" + surface,
+                                   system="Define exactly probes(n).", timeout=60)
+                generator = validated_generator(answer)
+        operations = tuple(PackageOperation(str(entry.get("name") or ""),
+                                             str(entry.get("module") or ""),
+                                             str(entry.get("symbol") or ""),
+                                             str(entry.get("signature") or ""),
+                                             bool(entry.get("json_safe", True)))
+                           for entry in dispatch)
+        contract = PackageContract(candidate.identity, str(detail.get("package_name") or ""),
+                                   operations,
+                                   provenance=Provenance(candidate.identity,
+                                                         "static-package-survey",
+                                                         evidence=(str(detail.get("package_root") or ""),)))
+        contract.validate()
+        return Material(candidate.identity, candidate.language, detail.get("root", ""),
+                        tuple(entry.get("name") for entry in dispatch),
+                        detail.get("description", ""), dispatch,
+                        str(detail.get("package_name", "")),
+                        str(detail.get("package_root", "")), generator,
+                        detail.get("target_language", ""),
+                        tuple(detail.get("forbidden", ())),
+                        list(detail.get("install", ())), contract)
 
 
 def _as_argument_lists(drawn) -> list:
@@ -230,7 +301,43 @@ def _as_argument_lists(drawn) -> list:
                              % (index, type(item).__name__))
     return drawn
 
+def _audit_probe_contract(probes: list, dispatch: tuple) -> None:
+    """Reject generator output that cannot cover a package contract honestly."""
+    if len(probes) < 20:
+        raise ValueError("package generator returned only %d probes; need at least 20" % len(probes))
+    names = {str(entry.get("name")) for entry in dispatch if entry.get("name")}
+    seen = set()
+    counts = {name: 0 for name in names}
+    for index, args in enumerate(probes):
+        if not args or not isinstance(args[0], str):
+            raise ValueError("package probe %d does not start with an operation name" % index)
+        operation = args[0]
+        if operation not in names:
+            raise ValueError("package probe %d names unknown operation %r" % (index, operation))
+        seen.add(json.dumps(args, sort_keys=True, separators=(",", ":"), default=str))
+        counts[operation] += 1
+    if len(seen) * 2 < len(probes):
+        raise ValueError("package generator produced too many duplicate probes")
+    missing = [name for name, count in counts.items() if count == 0]
+    if missing:
+        raise ValueError("package generator did not cover operations: %s" % ", ".join(sorted(missing)))
+
+
 
 def _task_name(material: Material) -> str:
     stem = material.identity.rsplit("/", 1)[-1].replace("_", "-").lower()
     return "%s-rewrite" % stem if material.target_language else "%s-faster" % stem
+
+
+def _adapter_source(dispatch: dict) -> str:
+    return """import importlib
+
+_DISPATCH = %r
+
+
+def entry(op, *args):
+    if op not in _DISPATCH:
+        raise ValueError("unknown operation: %%s" %% op)
+    module_name, symbol = _DISPATCH[op]
+    return getattr(importlib.import_module(module_name), symbol)(*args)
+""" % dispatch

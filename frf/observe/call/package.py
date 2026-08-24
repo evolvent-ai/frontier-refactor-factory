@@ -49,8 +49,12 @@ def write_tests(path: str, corpus, *, spec, material) -> None:
     os.makedirs(tests, exist_ok=True)
 
     frozen = {
-        "symbol": material.symbol,
+        "symbol": getattr(material, "symbol", "entry"),
         "language": spec.language,
+        "package": bool(hasattr(material, "entry_points")),
+        "entry_points": list(getattr(material, "entry_points", ())),
+        "dispatch": list(getattr(material, "dispatch", ())),
+        "package_name": getattr(material, "package_name", ""),
         "freeze_runs": max((e.runs for e in corpus.expectations), default=0),
         # DIGESTS ONLY. See the module docstring: an expectation holding the plaintext answer is one
         # filesystem mistake away from being a key a submission can replay.
@@ -61,20 +65,47 @@ def write_tests(path: str, corpus, *, spec, material) -> None:
     with open(os.path.join(tests, EXPECTATIONS), "w", encoding="utf-8") as handle:
         json.dump(frozen, handle, indent=1, sort_keys=True)
 
-    # The reference, and the shim that serves it. Inside tests/, which `environment_mode
-    # = "separate"` keeps out of the submission's reach.
+    # Package material is a checkout with a dispatch adapter, not one source file. It gets its own
+    # layout while the verifier and digest format remain shared with module/kernel.
     reference = os.path.join(tests, REFERENCE_DIR)
     shim = shims.load(spec.language)
-    _serve_here(reference, shim, material)
+    if hasattr(material, "entry_points"):
+        _serve_package_here(reference, shim, material)
+    else:
+        _serve_here(reference, shim, material)
 
     with open(os.path.join(tests, VERIFIER), "w", encoding="utf-8") as handle:
         handle.write(VERIFIER_SOURCE)
 
-    # The solver's side: the reference source, and a run.sh that serves it. This is the starting
-    # point the instruction promises -- "the reference is in your workspace" -- and it is the same
-    # source, because a task that hands the solver something other than what it froze is grading a
-    # program nobody was given.
-    _serve_here(os.path.join(path, "environment"), shim, material)
+    if hasattr(material, "entry_points"):
+        _serve_package_here(os.path.join(path, "environment"), shim, material)
+    else:
+        _serve_here(os.path.join(path, "environment"), shim, material)
+
+
+def _serve_package_here(room: str, shim, material) -> None:
+    """Copy package sources and a generated dispatch adapter into a call-seam workspace."""
+    os.makedirs(room, exist_ok=True)
+    shutil.copytree(material.root, room, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns(".git", "__pycache__"))
+    package_root = material.package_root or material.root
+    package_name = material.package_name
+    # The package root is already copied by the first copytree when it lives inside material.root.
+    # Only copy it separately when the adapter material points outside that tree.
+
+    if package_name and os.path.isdir(package_root):
+        destination = os.path.join(room, package_name)
+        if os.path.abspath(package_root) != os.path.abspath(destination):
+            shutil.copytree(package_root, destination, dirs_exist_ok=True)
+    adapter = os.path.join(room, "subject.py")
+    dispatch = {entry["name"]: (entry["module"], entry["symbol"])
+                for entry in material.dispatch}
+    with open(adapter, "w", encoding="utf-8") as handle:
+        handle.write("import importlib\n_DISPATCH = %r\ndef entry(op, *args):\n"
+                     "    if op not in _DISPATCH: raise ValueError('unknown operation')\n"
+                     "    module, symbol = _DISPATCH[op]\n"
+                     "    return getattr(importlib.import_module(module), symbol)(*args)\n" % dispatch)
+    _serve_here(room, shim, type("AdapterMaterial", (), {"source_path": adapter, "symbol": "entry"})())
 
 
 def _serve_here(room: str, shim, material) -> None:
@@ -88,7 +119,9 @@ def _serve_here(room: str, shim, material) -> None:
     import shlex
 
     os.makedirs(room, exist_ok=True)
-    shutil.copyfile(material.source_path, os.path.join(room, shim.subject))
+    destination = os.path.join(room, shim.subject)
+    if not (os.path.exists(destination) and os.path.samefile(material.source_path, destination)):
+        shutil.copyfile(material.source_path, destination)
     with open(os.path.join(room, shim.template), "w", encoding="utf-8") as handle:
         handle.write(shims.source(shim))
 
@@ -287,6 +320,9 @@ def main():
                       note="no run.sh in the workspace, so there is nothing to grade")
 
     reference = [os.path.join(os.path.abspath(here), "reference", "run.sh")]
+    # The task writer may have left a package reference tree in tests/reference. E7 must drive
+    # exactly the emitted reference and report its real stderr; it must never silently substitute
+    # the factory workspace.
     passed = total = 0
     note = ""
     try:

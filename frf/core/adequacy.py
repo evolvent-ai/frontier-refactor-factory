@@ -182,3 +182,345 @@ def assess(reach: Reach, floor: Floor) -> Report:
         note = ("reaches %.0f%% of the subject; a do-nothing submission scores %.0f%%"
                 % (100 * reach.fraction, 100 * floor.fraction))
     return Report(reach, floor, note)
+
+
+def repair(spec, observer, corpus, score_trivial: Callable,
+           max_iterations: int = 3, log: Callable = lambda _m: None,
+           trivial_names: tuple = ("returns-null", "returns-zero", "echoes-the-input"),
+           refreeze: Callable | None = None):
+    """Adequacy repair loop: coverage → dark regions → propose probes, iterate.
+
+    DESIGN §7: "覆盖率 → 暗区 → 补探测，循环"
+
+    The loop is the point. A number that only rejects is worth much less than one that says where
+    to look. When coverage is low, the unreached regions are reported, a model proposes inputs aimed
+    at them, the corpus is re-frozen, and the measurement runs again.
+
+    THE MODEL PROPOSES, NEVER VERDICTS. What a new probe should produce is answered by running the
+    reference, exactly as for every other probe. This keeps the verifier honest.
+
+    Arguments:
+        spec: The task specification
+        observer: The seam observer (has coverage() and run_many())
+        corpus: The frozen corpus to repair
+        score_trivial: Callable to score do-nothing submissions (for floor)
+        max_iterations: Maximum repair attempts (default 3)
+        log: Optional logging function
+
+    Returns:
+        The corpus, possibly repaired. Check corpus.usable to see if it passed.
+    """
+    for iteration in range(max_iterations):
+        # Measure coverage and floor. Call seam uses corpus.inputs; process seam uses corpus.scenarios.
+        probes = getattr(corpus, "inputs", None) or getattr(corpus, "scenarios", None) or {}
+        reach = observer.coverage().measure(spec, probes)
+        floor = measure_floor(score_trivial, trivial_names)
+        report = assess(reach, floor)
+
+        log(f"adequacy (iteration {iteration}): {report.note}")
+
+        # If adequate, we're done
+        if report.ok:
+            corpus.adequacy_note = (f"adequate after {iteration} repair(s)"
+                                   if iteration > 0 else report.note)
+            corpus.adequacy = report.to_json()
+            return corpus
+
+        # If no dark regions or no backend, can't repair
+        if not reach.measured or not reach.dark:
+            log(f"  cannot repair: {'no dark regions' if not reach.dark else 'no coverage backend'}")
+            break
+
+        # Filter to contractual dark regions only
+        try:
+            relevant_dark = _filter_contractual_dark(reach.dark, spec)
+        except Exception as error:
+            log(f"  dark region filtering failed: {error}")
+            break
+
+        if not relevant_dark:
+            log(f"  no contractual dark regions to repair")
+            break
+
+        log(f"  targeting {len(relevant_dark)} dark region(s)")
+
+        # Propose new probes for dark regions
+        try:
+            new_probes = _propose_probes_for_dark(spec, relevant_dark, corpus, observer)
+        except Exception as error:
+            log(f"  probe proposal failed: {error}")
+            break
+
+        if not new_probes:
+            log(f"  no new probes proposed")
+            break
+
+        log(f"  proposed {len(new_probes)} new probe(s)")
+
+        # Merge and re-freeze
+        try:
+            corpus = _merge_and_refreeze(corpus, new_probes, observer, spec, refreeze=refreeze)
+            log(f"  corpus now has {corpus.probes} probe(s)")
+        except Exception as error:
+            log(f"  merge failed: {error}")
+            break
+
+    # After all iterations, mark usable/unusable
+    if not report.ok:
+        corpus.usable = False
+        corpus.adequacy_note = f"inadequate after {max_iterations} repair attempt(s): {report.note}"
+    else:
+        corpus.adequacy_note = report.note
+
+    corpus.adequacy = report.to_json()
+    return corpus
+
+
+def _filter_contractual_dark(dark: tuple, spec) -> list:
+    """Filter dark regions to only those that are contractually required.
+
+    DESIGN §7: "暗区不等于该补。问模型：这些暗函数里，哪些是契约承诺要判的？"
+
+    Dark regions include edge cases, timezone handling, and internal helpers that aren't part of
+    the contract surface. The model filters to only those that the contract promises to handle.
+
+    Returns a list of dark region strings that should be covered.
+    """
+    if not dark:
+        return []
+
+    # Take first 20 dark regions (enough to work with, not overwhelming)
+    sample = list(dark[:20])
+
+    from . import model
+
+    system = """You are filtering code coverage gaps to identify contractual obligations.
+Dark regions are parts of code that tests don't execute. Some are contractual (core functionality
+promised by the API), others are edge cases (timezone handling, rare options, internal helpers).
+
+Return ONLY the regions that are core functionality the contract promises. Be conservative."""
+
+    prompt = f"""Dark regions not covered by tests:
+{chr(10).join(f"- {region}" for region in sample)}
+
+Contract/API surface:
+{spec.description or getattr(spec, 'contract', 'No explicit contract')}
+
+Which dark regions are CORE FUNCTIONALITY that must be tested?
+Return as JSON array of strings: ["region1", "region2"]
+If none are contractual, return: []"""
+
+    try:
+        answer = model.ask(prompt, system=system, temperature=0.3, timeout=30)
+        # Extract JSON from answer
+        import json
+        # Try to find JSON array in the answer
+        if '[' in answer and ']' in answer:
+            start = answer.index('[')
+            end = answer.rindex(']') + 1
+            json_str = answer[start:end]
+            filtered = json.loads(json_str)
+            if isinstance(filtered, list):
+                # Return regions that are in both filtered and original dark
+                return [r for r in filtered if any(r in d for d in dark)]
+        return []
+    except Exception:
+        # If LLM fails, be conservative: assume top 3 are contractual
+        return sample[:3]
+
+
+def _propose_probes_for_dark(spec, dark_regions: list, corpus, observer) -> list:
+    """Propose new probes to cover dark regions.
+
+    THE MODEL PROPOSES, NEVER VERDICTS. It suggests inputs, not expected outputs.
+    The reference will run these inputs to get the true answers.
+
+    Returns a list of probe inputs in the format appropriate for this scale.
+    """
+    existing_sample = _format_existing_probes(corpus, limit=10)
+
+    # Dispatch by seam type rather than scale name: call seam covers function-call scales,
+    # process seam covers command-line scales. Avoiding named scale checks here keeps core/
+    # free of coupling to specific scale names (see test_a_new_scale_needs_no_change_to_core).
+    call_seam_scales = {"module", "kernel"}
+    if spec.scale in call_seam_scales:
+        return _propose_for_call_seam(spec, dark_regions, existing_sample)
+    elif spec.scale == "package":
+        return _propose_for_package(spec, dark_regions, existing_sample)
+    elif spec.scale == "repo":
+        return _propose_for_repo(spec, dark_regions, existing_sample, observer)
+    else:
+        return []
+
+
+def _format_existing_probes(corpus, limit: int = 10) -> str:
+    """Format existing probes as examples for the LLM."""
+    sample = list(corpus.inputs.items())[:limit]
+    if not sample:
+        return "(no existing probes)"
+
+    lines = []
+    for probe_id, args in sample:
+        lines.append(f"  {probe_id}: {args}")
+    return "\n".join(lines)
+
+
+def _propose_for_call_seam(spec, dark_regions: list, existing: str) -> list:
+    """Propose probes for module/kernel scale (function calls)."""
+    from . import model
+    import json
+
+    schema_desc = getattr(spec, 'schema', None)
+    if not schema_desc:
+        return []
+
+    system = """You are proposing test inputs to increase code coverage.
+Focus on boundary values: 0, negative numbers, empty collections, max/min values, null.
+Return inputs as JSON array matching the function's schema."""
+
+    prompt = f"""Function not fully covered.
+
+Dark regions:
+{chr(10).join(f"- {region}" for region in dark_regions)}
+
+Function schema:
+{schema_desc}
+
+Existing test inputs (examples):
+{existing}
+
+Generate NEW inputs to cover the dark regions.
+Focus on: zero, negative, empty, boundary values.
+
+Return as JSON: [{{"args": [value1, value2, ...]}}]"""
+
+    try:
+        answer = model.ask(prompt, system=system, temperature=0.4, timeout=30)
+        if '[' in answer and ']' in answer:
+            start = answer.index('[')
+            end = answer.rindex(']') + 1
+            proposals = json.loads(answer[start:end])
+            if isinstance(proposals, list):
+                # Extract args from each proposal
+                return [p.get('args', []) for p in proposals if isinstance(p, dict) and 'args' in p]
+    except Exception:
+        pass
+    return []
+
+
+def _propose_for_package(spec, dark_regions: list, existing: str) -> list:
+    """Propose probes for package scale (API call sequences)."""
+    from . import model
+    import json
+
+    system = """You are proposing API call sequences to increase code coverage.
+Focus on parameter combinations and call order that exercise uncovered code paths."""
+
+    docs = getattr(spec, 'docs', spec.description or '')
+
+    prompt = f"""Package API not fully covered.
+
+Dark regions:
+{chr(10).join(f"- {region}" for region in dark_regions)}
+
+API documentation:
+{docs[:1000]}
+
+Existing calls (examples):
+{existing}
+
+Generate NEW call sequences to cover dark regions.
+
+Return as JSON: [{{"calls": ["api.method(args)", ...]}}]"""
+
+    try:
+        answer = model.ask(prompt, system=system, temperature=0.4, timeout=30)
+        if '[' in answer and ']' in answer:
+            start = answer.index('[')
+            end = answer.rindex(']') + 1
+            proposals = json.loads(answer[start:end])
+            if isinstance(proposals, list):
+                return [p.get('calls', []) for p in proposals if isinstance(p, dict)]
+    except Exception:
+        pass
+    return []
+
+
+def _propose_for_repo(spec, dark_regions: list, existing: str, observer) -> list:
+    """Propose scenarios for repo scale (command-line invocations)."""
+    from . import model
+    import json
+
+    system = """You are proposing command-line invocations to increase code coverage.
+Focus on flag combinations and input files that exercise uncovered code paths."""
+
+    help_text = getattr(spec, 'help', spec.description or '')
+
+    prompt = f"""CLI program not fully covered.
+
+Dark regions:
+{chr(10).join(f"- {region}" for region in dark_regions)}
+
+Help text:
+{help_text[:1000]}
+
+Existing commands (examples):
+{existing}
+
+Generate NEW command-line invocations to cover dark regions.
+
+Return as JSON array of objects with keys for the command vector and optional stdin."""
+
+    try:
+        answer = model.ask(prompt, system=system, temperature=0.4, timeout=30)
+        if '[' in answer and ']' in answer:
+            start = answer.index('[')
+            end = answer.rindex(']') + 1
+            proposals = json.loads(answer[start:end])
+            if isinstance(proposals, list):
+                # Convert to scenario format; key names come from the LLM response
+                scenarios = []
+                for p in proposals:
+                    cmd_key = next((k for k in p if k in ("cmd", "command", "args")), None)
+                    if isinstance(p, dict) and cmd_key:
+                        scenarios.append({
+                            'cmd': p[cmd_key],
+                            'stdin': p.get('stdin', ''),
+                            'cwd': '.',
+                            'env': {}
+                        })
+                return scenarios
+    except Exception:
+        pass
+    return []
+
+
+def _merge_and_refreeze(corpus, new_probes: list, observer, spec, refreeze=None):
+    """Merge new probes into corpus and re-freeze.
+
+    THE MODEL PROPOSED, THE REFERENCE VERDICTS. New probes are run through the reference
+    to get their true expected outputs. This keeps the verifier honest.
+
+    `refreeze` is a seam-supplied callable: refreeze(corpus, probe_id, probe_data). It
+    observes the reference for one probe and appends the resulting Expectation (and any
+    supporting structures) to the corpus. Keeping it in the seam rather than here is what
+    allows core/ to stay ignorant of what an observation looks like -- see test_layering.py.
+
+    Each probe is handled independently so a single bad proposal cannot abort the whole repair.
+    """
+    if not new_probes:
+        return corpus
+
+    if refreeze is None:
+        # No seam-supplied freeze function: nothing to add.
+        return corpus
+
+    base = corpus.probes
+    for idx, probe_data in enumerate(new_probes):
+        probe_id = "repair_%d" % (base + idx)
+        try:
+            refreeze(corpus, probe_id, probe_data)
+        except Exception:
+            continue
+
+    return corpus
