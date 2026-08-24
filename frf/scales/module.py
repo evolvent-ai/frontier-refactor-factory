@@ -32,6 +32,9 @@ from ..observe.probes.schema import Schema, sample
 # How many probes a corpus is drawn with. Above the pipeline's floor by a margin: on this seam a
 # probe is worth one point, three are held out for timing, and a corpus that only just clears the
 # floor before those are removed does not clear it afterwards.
+# Keep the initial corpus bounded: each probe is frozen five times through a remote process seam.
+# Adequacy may request more probes later, but starting with 60 makes one candidate cost 300 E2B
+# calls before we know whether it is stable.
 PROBE_COUNT = 60
 
 # How long a subject may take to compile. Generous enough for an optimising compiler on a real
@@ -43,7 +46,9 @@ BUILD_TIMEOUT = 600.0
 # it never returns at all. Without a bound the batch stops with no output and no error, and nothing
 # says which candidate did it. A subject too slow to answer cannot be graded, which is the
 # material's fault and an ordinary refusal.
-PROBE_TIMEOUT = 30.0
+# A probe may involve a cold import or a deliberately boundary-heavy package operation.
+# Keep the guard configurable, but do not reject otherwise usable E2B subjects after a few seconds.
+PROBE_TIMEOUT = float(os.environ.get("FRF_PROBE_TIMEOUT", "120"))
 
 # How many DIFFERENT perturbations E3 may try before concluding that a subject cannot be
 # distinguished by this crude a mutation. More than one because an edit can be real and still
@@ -274,7 +279,10 @@ class Module:
                 "supply candidates directly to Factory.build(candidates=[...]).")
         from ..core import sourcing
 
-        return sourcing.walk(self._index, budget)
+        # Widening indexes (GitHub -> functions) do real checkout and AST work per row. Keep the
+        # source page close to the requested batch size so budget=1 does not expand fifty repos.
+        page_size = 4 if getattr(self._index, "name", "") == "github-functions" else 50
+        return sourcing.walk(self._index, budget, page_size=page_size)
 
     def specify(self, candidate: Candidate) -> Spec:
         """One candidate -> what to build and how to call it."""
@@ -406,6 +414,11 @@ def mutate(source: str, language: str, symbol: str = "", attempt: int = 0) -> st
     over-approximation in the braced ones.
     """
     start, end = _window_of(source, symbol)
+    if language.lower() in ("python", "py") and attempt == 0 and symbol:
+        newline = source.find("\n", start)
+        if newline != -1:
+            indent = "    "
+            return source[:newline + 1] + indent + "return None\n" + source[newline + 1:]
     # PAST THE SIGNATURE. A perturbation that lands on the definition line renames the function --
     # `min(` -> `max(` turns `find_min_max` into `find_min_min` -- and the shim then cannot find the
     # symbol it was told to serve. The mutant dies on import, which is not a difference in
@@ -418,11 +431,20 @@ def mutate(source: str, language: str, symbol: str = "", attempt: int = 0) -> st
     # containing one `[0]` and six `+` offers seven distinct mutants, where counting rules would
     # have offered two.
     sites = []
+    if language.lower() in ("python", "py"):
+        at = source.find("return ", start, end)
+        while at != -1:
+            sites.append((at, "return ", "return None # "))
+            at = source.find("return ", at + 1, end)
     for original, replacement in _PERTURBATIONS:
         at = source.find(original, start, end)
         while at != -1:
             sites.append((at, original, replacement))
             at = source.find(original, at + 1, end)
+    # Some valid functions (for example a pure membership predicate) contain none of the
+    # expression operators above.  For Python, replacing a return expression with ``None`` is a
+    # deliberately crude but always-compiling semantic mutation and gives the evidence check an
+    # actual changed observation to test.
     # By position, so the first attempt is the earliest edit and the order does not depend on how
     # the table happens to be written.
     sites.sort()

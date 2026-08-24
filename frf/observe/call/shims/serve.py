@@ -3,8 +3,17 @@
 The subject supplies `entry(args) -> value`, raising to refuse. Everything else is this file.
 """
 import json
+import base64
 import sys
 import time
+
+def _json_default(value):
+    """Canonical wire forms for common Python results outside JSON's native types."""
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=lambda item: repr(item))
+    if isinstance(value, (bytes, bytearray)):
+        return {"__frf_bytes__": base64.b64encode(bytes(value)).decode("ascii")}
+    raise TypeError("Object of type %s is not JSON serializable" % type(value).__name__)
 
 
 def serve(entry, stdin=sys.stdin, stdout=sys.stdout):
@@ -51,7 +60,8 @@ def serve(entry, stdin=sys.stdin, stdout=sys.stdout):
                 reply = {"id": rid, "ok": False,
                          "error": "%s: %s" % (type(exc).__name__, exc)}
 
-        stdout.write(json.dumps(reply, separators=(",", ":"), sort_keys=True) + "\n")
+        stdout.write(json.dumps(reply, default=_json_default,
+                                separators=(",", ":"), sort_keys=True) + "\n")
         stdout.flush()
 
 

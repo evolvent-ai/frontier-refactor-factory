@@ -109,6 +109,35 @@ def test_every_scale_refuses_to_source_without_an_index():
         else:
             raise AssertionError("%s sourced without an index" % implementation.name)
 
+
+def test_repo_sourcing_rejects_unpinned_and_oversized_candidates_before_checkout():
+    class Index:
+        name = "fixture-repos"
+        def total(self):
+            return 3
+        def page(self, number, *, size):
+            if number:
+                return []
+            return [
+                Candidate("repo://large", "repo", "python", "fixture",
+                          {"repository": "https://example.invalid/large", "commit": "abc",
+                           "size_kb": 100_001}),
+                Candidate("repo://moving", "repo", "python", "fixture",
+                          {"repository": "https://example.invalid/moving"}),
+                Candidate("repo://good", "repo", "python", "fixture",
+                          {"repository": "https://example.invalid/good", "commit": "abc",
+                           "size_kb": 1}),
+            ]
+
+    repo = Repo(index=Index())
+    # The remaining candidate is accepted by sourcing; checkout is deliberately not reached here.
+    found = list(repo.find(3))
+    assert [candidate.detail["repository"] for candidate in found] == [
+        "https://example.invalid/good"
+    ]
+    assert repo._index.last_coverage.walked == 3
+    assert repo._index.last_coverage.fresh == 1
+
 def _write(path: str, text: str) -> str:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:

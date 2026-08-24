@@ -22,6 +22,7 @@ is reached through the same interfaces the process seam will use.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -84,11 +85,22 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
     """
     inputs = {"probe-%04d" % i: args for i, args in enumerate(source.draw(source.count))}
     observed: dict = {probe_id: [] for probe_id in inputs}
+    try:
+        max_seconds = float(os.environ.get("FRF_FREEZE_MAX_SECONDS", "3600"))
+    except ValueError:
+        max_seconds = 3600.0
+    deadline = time.monotonic() + max_seconds
 
     try:
-        for _ in range(runs):
+        for run_index in range(runs):
             with observer.subject(spec) as subject:
-                for probe_id, args in inputs.items():
+                for probe_index, (probe_id, args) in enumerate(inputs.items(), 1):
+                    if probe_index == 1 or probe_index % 10 == 0 or probe_index == len(inputs):
+                        print("[freeze] run %d/%d probe %d/%d" %
+                              (run_index + 1, runs, probe_index, len(inputs)), flush=True)
+                    if time.monotonic() >= deadline:
+                        return Corpus(inputs=inputs, discard_rate=1.0, usable=False,
+                                      unusable_reason="freeze timeout after %.0fs" % max_seconds)
                     observed[probe_id].append(subject.call("run", args))
     except SubjectFailed as failure:
         # A SUBJECT THAT WILL NOT SPEAK IS THE MATERIAL'S FAULT, and reporting it through `usable`
@@ -173,11 +185,9 @@ def _score_reference(observer, spec: Spec, corpus: Corpus) -> tuple[int, int]:
     passed = total = 0
     with observer.subject(spec) as subject:
         ids = [e.probe_id for e in corpus.expectations]
-        if hasattr(subject, "call_many"):
-            answers = subject.call_many("run", [corpus.inputs[pid] for pid in ids])
-            actual = [answers[rid] for rid in sorted(answers)]
-        else:
-            actual = [subject.call("run", corpus.inputs[pid]) for pid in ids]
+        # Replay in the same one-request order used by freeze. Batching changes stateful subjects'
+        # call grouping and can make a reproducible reference miss its own expectations.
+        actual = [subject.call("run", corpus.inputs[pid]) for pid in ids]
         for expectation, answer in zip(corpus.expectations, actual):
             got, want, _ = obs.grade(expectation, answer)
             passed += got

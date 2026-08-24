@@ -112,13 +112,18 @@ DOCKER_INSTALL_CMDS = [
     (
         "apt-get install -y --no-install-recommends "
         "docker-ce docker-ce-cli containerd.io docker-buildx-plugin "
-        "python3 python3-pip"
+        "python3 python3-pip nodejs npm "
+        "build-essential"
     ),
+    "curl -fsSL https://go.dev/dl/go1.26.0.linux-amd64.tar.gz | tar -C /usr/local -xz",
+    "ln -sf /usr/local/go/bin/go /usr/local/bin/go && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt",
+    "curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal",
+    "ln -sf /root/.cargo/bin/cargo /usr/local/bin/cargo && ln -sf /root/.cargo/bin/rustc /usr/local/bin/rustc",
     "rm -rf /var/lib/apt/lists/*",
 ]
 
 
-def build_template() -> str:
+def build_template(api_key: str) -> str:
     """Build the DinD template and return the template ID."""
     try:
         from e2b import Template
@@ -141,8 +146,15 @@ def build_template() -> str:
         "docker info",
     )
 
-    template_id: str = builder.build()
-    return template_id
+    # e2b 2.x exposes deployment as the class method `Template.build(template)`; the
+    # builder returned by the fluent setup API is only the template definition. Request
+    # enough resources for package/repo builds and return the resulting template id.
+    build_info = Template.build(builder, name="frf-dind", cpu_count=4, memory_mb=4096,
+                                api_key=api_key)
+    template_id = getattr(build_info, "template_id", None) or getattr(build_info, "id", None)
+    if not template_id:
+        raise RuntimeError("E2B template build returned no template id: %r" % (build_info,))
+    return str(template_id)
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +181,7 @@ def main() -> int:
 
     print("E2B_API_KEY found (not shown).\n")
 
-    template_id = build_template()
+    template_id = build_template(api_key)
 
     _write_env_var(env_path, "E2B_DIND_TEMPLATE", template_id)
 

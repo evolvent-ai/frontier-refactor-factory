@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
@@ -166,10 +167,12 @@ def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
     """
     if freeze_runs < 2:
         raise ValueError("freeze_runs must be at least 2")
+    log("stage build: start")
     try:
         return _run(scale, candidate, hooks, log, freeze_runs)
     except Stage as refusal:
-        log("refused at %s: %s (%s)" % (refusal.stage, refusal.reason, refusal.fault.value))
+        log("refused at %s: %s (%s): %s" %
+            (refusal.stage, refusal.reason, refusal.fault.value, refusal.detail[:400]))
         return Refused(refusal.stage, refusal.reason, refusal.fault, refusal.detail)
     except KeyboardInterrupt:
         # An operator stopping a batch is not a candidate failing. Re-raised so that Ctrl-C is not
@@ -190,6 +193,7 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     # build for reasons that are facts about them -- a pinned dependency that no longer resolves, a
     # toolchain the image does not carry, a generated file the release forgot. Uncaught, every one
     # of those was counted as our bug and dragged `trustworthy` down with it.
+    log("stage probes: start")
     try:
         hooks.build(spec)
     except (RuntimeError, OSError) as why:
@@ -214,11 +218,13 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
         raise Stage("probes", "probe-generator-failed", Fault.MATERIAL, str(why)[:2000])
     observer = scale.observe()
 
+    log("stage freeze: start runs=%d probes=%d" % (freeze_runs, getattr(source, "count", 0)))
     report = hooks.freeze(spec, observer, source, runs=freeze_runs)
     _check_corpus(report)
     log("froze %d probe(s), %d point(s), discarded %.0f%%"
         % (report.probes, report.graded_points, 100 * report.discard_rate))
 
+    log("stage adequacy: start")
     report = hooks.adequacy(spec, observer, report)
     log("adequacy: %s" % report.adequacy_note)
 
@@ -257,6 +263,7 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
                     "machine's clock can resolve; a speed score over it would be noise"
                     % (timed_seconds * 1e6, MIN_TIMED_SECONDS * 1e6))
 
+    log("stage evidence: start")
     battery = hooks.battery(spec, observer, report)
     if not battery.ok:
         # WHOSE FAULT DEPENDS ON WHICH WAY THE CHECK FAILED, and collapsing the two would make the

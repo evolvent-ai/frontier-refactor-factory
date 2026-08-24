@@ -20,6 +20,9 @@ tasks/
 *.log
 *.jsonl
 run_*.yaml
+jobs/
+.frf-*/
+.harbor/
 
 # Coverage build artefacts
 frf/observe/coverage/agents/*.so

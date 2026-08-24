@@ -10,9 +10,10 @@ reading it.
 ## Status
 
 The shared pipeline, E2B backend, JSON call seam, process seam, four scale adapters, Harbor output,
-5-run freeze, adequacy and evidence gates are implemented. Module and Kernel have produced real E2B
-tasks. Package and Repo are still under production validation; a task counts only after its own E7
-replay passes completely.
+5-run freeze, adequacy and evidence gates are implemented. Module, Kernel and Package have produced
+real E2B tasks. Repo sourcing/build/workload harvesting and native multi-language E2B support are
+implemented; a Repo task is production-qualified only after its packaged Harbor verifier reproduces
+the frozen reference completely.
 
 ## Four scales
 
@@ -157,10 +158,10 @@ DESIGN.md                 authoritative design record
 
 ### Repo
 
-- [ ] Complete RepoSurvey → build recipe → workload harvest as one automatic path.
+- [x] Complete RepoSurvey → build recipe → workload harvest as one automatic path.
 - [ ] Support Go/Cargo workspaces, multiple binaries, CMake targets, `package.json`/`bin`, and
   repository-specific build targets.
-- [ ] Use project test scripts (`harvest_files`) and project corpus/fixtures (`harvest_corpus`).
+- [x] Use project test scripts (`harvest_files`) and project corpus/fixtures (`harvest_corpus`).
 - [ ] Connect project benchmark/regression workloads without inventing a new subject program.
 - [ ] Produce and audit 10 real Repo performance tasks with 10 E2B workers. Keep FrontierSWE-scale
   repository difficulty; do not replace it with small CLI/function tasks.

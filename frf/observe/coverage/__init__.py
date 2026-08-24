@@ -84,7 +84,19 @@ def usable(language: str) -> bool:
     and get none. Probing would mean running a compiler to answer a capability question, which is
     too expensive for something called in a loop.
     """
-    return (language or "").strip().lower() in BACKENDS
+    import shutil
+
+    lang = (language or "").strip().lower()
+    if lang not in BACKENDS:
+        return False
+    # A backend describes how to measure a language; it does not install that language's
+    # compiler. Report usable only when the host can actually invoke the required toolchain.
+    required = {
+        "go": "go", "rust": "rustc", "c": "gcc", "cpp": "g++",
+        "java": "javac", "javascript": "node", "typescript": "node",
+        "python": "python3", "ruby": "ruby",
+    }
+    return bool(shutil.which(required.get(lang, lang)))
 
 
 def backend_for(language: str) -> CoverageBackend:

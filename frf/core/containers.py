@@ -228,7 +228,10 @@ class Remote:
         # `Sandbox.create`, not `Sandbox(...)`. In the 2.x SDK the constructor takes an internal
         # options object and calling it as though it took keywords fails at the first use -- which
         # is a poor place to find out, because the first use is the most expensive stage.
-        self._template = template or credentials.get("E2B_TEMPLATE") or ""
+        # The DinD template setup script and the validation tooling use this name. Keep the
+        # older generic spelling as a compatibility fallback for manually configured deployments.
+        self._template = (template or credentials.get("E2B_DIND_TEMPLATE")
+                          or credentials.get("E2B_TEMPLATE") or "")
         try:
             if self._template:
                 self._sandbox = Sandbox.create(template=self._template, timeout=int(timeout),

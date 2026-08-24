@@ -38,11 +38,15 @@ import ast
 import io
 import os
 import tarfile
+import warnings
 import zipfile
 from dataclasses import dataclass
 
 from ..core.scale import Candidate
 from .http import Http, SourceError
+
+MAX_SCAN_FILES = 500
+MAX_SOURCE_FILE_BYTES = 2_000_000
 
 # Python's annotation vocabulary -> the schema kinds in `observe/probes/schema.py`. A table because
 # the mapping is data: a type this factory cannot draw is a function it cannot serve, and the honest
@@ -220,7 +224,9 @@ def scan(root: str, package: str = "", version: str = "") -> list:
     found = []
     for path in _python_files(root):
         try:
-            tree = ast.parse(open(path, encoding="utf-8", errors="replace").read(), path)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                tree = ast.parse(open(path, encoding="utf-8", errors="replace").read(), path)
         except (OSError, SyntaxError, ValueError):
             # A file that will not parse is a file skipped. sdists contain Python 2, templates and
             # deliberately broken fixtures, and none of that is a reason to lose the package.
@@ -384,12 +390,22 @@ def _module_name(root: str, path: str) -> str:
 
 
 def _python_files(root: str):
+    checked = 0
     for directory, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs
                    if d not in ("test", "tests", "docs", "examples", "__pycache__", ".git")]
         for name in files:
             if name.endswith(".py") and not name.startswith("test_"):
-                yield os.path.join(directory, name)
+                path = os.path.join(directory, name)
+                try:
+                    if os.path.getsize(path) > MAX_SOURCE_FILE_BYTES:
+                        continue
+                except OSError:
+                    continue
+                if checked >= MAX_SCAN_FILES:
+                    return
+                checked += 1
+                yield path
 
 
 def to_candidate(function: Function, *, scale: str = "module",

@@ -211,6 +211,15 @@ def run_remote_many(scenarios: list[Scenario], *, backend, remote_program: list,
     This is the process-seam equivalent of the call wire's batch transport. Each scenario remains
     isolated in its own workspace, but network round trips scale with freeze runs rather than probes.
     """
+    if len(scenarios) > 8:
+        merged = {}
+        for start in range(0, len(scenarios), 8):
+            merged.update(run_remote_many(scenarios[start:start + 8], backend=backend,
+                                          remote_program=remote_program,
+                                          remote_fixtures=remote_fixtures, exclude=exclude,
+                                          timeout=timeout))
+        return merged
+
     remote_root = "/tmp/frf-corpus-%s" % uuid.uuid4().hex[:12]
     local = tempfile.mkdtemp(prefix="frf-remote-corpus-")
     results = remote_root + "/results"
@@ -240,6 +249,9 @@ def run_remote_many(scenarios: list[Scenario], *, backend, remote_program: list,
                 command += "mkdir -p %s/tree; cp -a %s/. %s/tree/" % (
                     _shell_quote(room), _shell_quote(workspace), _shell_quote(room))
                 script.append(command)
+        # Individual commands record their own exit code; a missing fixture or one bad probe must
+        # not make the shell batch's final status look like a factory transport failure.
+        script.append("true")
         environment = dict(os.environ)
         environment.pop("ENV", None)
         environment.pop("BASH_ENV", None)

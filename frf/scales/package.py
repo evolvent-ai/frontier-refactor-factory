@@ -184,7 +184,8 @@ class Package:
                 "Package(index=...), or supply candidates to Factory.build(candidates=[...]).")
         from ..core import sourcing
 
-        return sourcing.walk(self._index, budget)
+        page_size = 4 if getattr(self._index, "name", "") == "github-packages" else 20
+        return sourcing.walk(self._index, budget, page_size=page_size)
 
     def specify(self, candidate: Candidate) -> Spec:
         self._material = self._locate(candidate)
@@ -224,11 +225,36 @@ class Package:
                 "no runner was given for the probe generator. Generators are model-written and must "
                 "execute inside a container; Package(run_generator=...) is how that is supplied.")
         try:
+            print("[package] running probe generator for %s" % self._material.identity, flush=True)
             drawn = self._run_generator(self._material.generator, PROBE_COUNT)
+            print("[package] probe generator completed for %s" % self._material.identity, flush=True)
         except Exception as exc:
-            raise ValueError("package probe generator failed in the sandbox: %s" % str(exc)[:1800]) from exc
+            # One repair is cheap compared with discarding a package after a model formatting or
+            # dispatch-shape mistake. The repaired code still executes only in E2B and is audited
+            # by the same contract below.
+            try:
+                from ..core import model
+                from ..core.model import validated_generator
+                repair = model.ask(
+                    "Repair this probes(n) generator. It must return a dict with probes and labels; "
+                    "each probe is [operation_name, ...], labels are valid/error/boundary, all "
+                    "values JSON-safe, and every dispatch name covered twice. Return code only.\n"
+                    "Error from sandbox: %s\nGenerator:\n%s" %
+                    (str(exc)[:1800], self._material.generator),
+                    system="Return only valid Python defining probes(n).", timeout=60)
+                repaired = validated_generator(repair)
+                print("[package] retrying repaired probe generator for %s" % self._material.identity,
+                      flush=True)
+                drawn = self._run_generator(repaired, PROBE_COUNT)
+            except Exception as repair_exc:
+                raise ValueError("package probe generator failed in the sandbox: %s; repair failed: %s"
+                                 % (str(exc)[:900], str(repair_exc)[:900])) from repair_exc
+        labels = None
+        if isinstance(drawn, dict):
+            labels = drawn.get("labels")
+            drawn = drawn.get("probes")
         probes = _as_argument_lists(drawn)
-        _audit_probe_contract(probes, self._material.dispatch)
+        _audit_probe_contract(probes, self._material.dispatch, labels=labels)
         return ProbeSource(probes)
 
     def _locate(self, candidate: Candidate) -> Material:
@@ -249,14 +275,25 @@ class Package:
             from ..core import model
             from ..core.model import validated_generator
             surface = json.dumps(dispatch, sort_keys=True, indent=2)
+            print("[package] requesting probe generator for %s" % candidate.identity, flush=True)
             answer = model.ask(
-                "Write deterministic probes(n) returning a list of argument lists for this "
-                "public dispatch. Include valid, invalid and boundary cases for every operation. "
+                "Write deterministic probes(n) returning a dict with probes (argument lists) and "
+                "labels (one of valid,error,boundary for each probe) for this public dispatch. "
+                "Each probe must be [operation_name, arg1, arg2, ...], with operation_name exactly "
+                "one of the dispatch names; the operation name is not omitted. "
+                "The dispatch below is a JSON list of objects with keys name/module/symbol/signature; "
+                "iterate those objects by entry['name'], never unpack entries as (name, cases). "
+                "Example output shape: {'probes': [['op', 'x']], 'labels': ['valid']}. "
+                "Return at least 20 distinct probes even when n is smaller. "
+                "Every argument must be JSON-serializable (null, boolean, number, string, list, "
+                "or object with string keys); never return sets, tuples, bytes, objects, or callables. "
+                "Include valid, invalid and boundary cases for every operation. "
                 "Return only code.\n" + surface,
                 system="Define only a top-level probes(n) generator. Do not execute the package.",
                 timeout=60)
             try:
                 generator = validated_generator(answer)
+                print("[package] received probe generator for %s" % candidate.identity, flush=True)
             except Exception:
                 answer = model.ask("Return ONLY valid Python defining probes(n).\n" + surface,
                                    system="Define exactly probes(n).", timeout=60)
@@ -280,7 +317,7 @@ class Package:
                         str(detail.get("package_root", "")), generator,
                         detail.get("target_language", ""),
                         tuple(detail.get("forbidden", ())),
-                        list(detail.get("install", ())), contract)
+                        list(detail.get("install", ())))
 
 
 def _as_argument_lists(drawn) -> list:
@@ -301,7 +338,7 @@ def _as_argument_lists(drawn) -> list:
                              % (index, type(item).__name__))
     return drawn
 
-def _audit_probe_contract(probes: list, dispatch: tuple) -> None:
+def _audit_probe_contract(probes: list, dispatch: tuple, *, labels=None) -> None:
     """Reject generator output that cannot cover a package contract honestly."""
     if len(probes) < 20:
         raise ValueError("package generator returned only %d probes; need at least 20" % len(probes))
@@ -318,9 +355,24 @@ def _audit_probe_contract(probes: list, dispatch: tuple) -> None:
         counts[operation] += 1
     if len(seen) * 2 < len(probes):
         raise ValueError("package generator produced too many duplicate probes")
-    missing = [name for name, count in counts.items() if count == 0]
+    # One probe only proves that an operation can be named. Two distinct probes are the
+    # minimum evidence that its behavior, rather than just its dispatch wrapper, is being
+    # graded. Larger valid/error/boundary balance remains the generator's responsibility.
+    missing = [name for name, count in counts.items() if count < 2]
     if missing:
-        raise ValueError("package generator did not cover operations: %s" % ", ".join(sorted(missing)))
+        raise ValueError("package generator did not cover operations with at least two probes: %s"
+                         % ", ".join(sorted(missing)))
+    if labels is not None:
+        if not isinstance(labels, list) or len(labels) != len(probes):
+            raise ValueError("package probe labels must align one-for-one with probes")
+        allowed = {"valid", "error", "boundary"}
+        unknown = set(labels) - allowed
+        if unknown:
+            raise ValueError("package probe labels contain unknown classes: %s" %
+                             ", ".join(sorted(unknown)))
+        classes = set(labels)
+        if classes != allowed:
+            raise ValueError("package generator must include valid, error and boundary probes")
 
 
 

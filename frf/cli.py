@@ -298,6 +298,7 @@ def _sample_command(args) -> int:
 
     count = args.count
     from . import scales as scale_impls
+    from .automation import _index
 
     for job in cfg.jobs:
         scale_name = job.scale
@@ -306,7 +307,12 @@ def _sample_command(args) -> int:
             _log("scale %r not available; skipping" % scale_name)
             continue
         try:
-            instance = impl()
+            source_name = {
+                "module": "github-functions", "kernel": "github-functions",
+                "package": "github-packages", "repo": "github",
+            }.get(scale_name, "")
+            index = _index(source_name, subset=job.source_language, scale=scale_name)
+            instance = impl(index=index)
         except Exception as exc:
             _log("could not instantiate scale %r: %s" % (scale_name, exc))
             continue

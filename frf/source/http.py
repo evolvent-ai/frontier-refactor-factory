@@ -124,10 +124,13 @@ class Http:
 
     user_agent: str = USER_AGENT
     delay: float = POLITE_DELAY
-    timeout: float = 30.0
+    # Keep a single slow registry request from consuming the whole sourcing deadline.  Callers can
+    # still raise this for a trusted/private endpoint, but public indexes should fail fast and let
+    # `sourcing.walk` move on with an auditable TransportError.
+    timeout: float = 15.0
     attempts: int = ATTEMPTS
     max_body: int = MAX_BODY
-    max_elapsed: float = MAX_ELAPSED
+    max_elapsed: float = 60.0
     token: str = ""                       # bearer credential, when an index has one
     _last_call: float = field(default=0.0, init=False, repr=False)
     calls: int = field(default=0, init=False, repr=False)

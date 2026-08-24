@@ -6,11 +6,16 @@
 > 本文件是编码依据。凡与本文件冲突的实现，以本文件为准；凡本文件说不清的，
 > 先改本文件再动代码。
 >
-> **实现进度（2026-08-18）**：八环节与闸门、两种冻结、E1–E8 证据组、计分、计时、
+> **历史实现进度（2026-08-18）**：八环节与闸门、两种冻结、E1–E8 证据组、计分、计时、
 > adequacy、sourcing、题面、出厂、call/process 两个接缝、E2B backend 和多语言 coverage
 > 后端均已落地。`module`、`kernel` 已用真实素材出过任务，`repo` 已证明同语言和跨语言两种
 > 形态。`package` 的模型生成器和容器执行链已接通，最后的真实出厂 smoke run 仍是验收闸门。
-> §16 记录已完成的实测里程碑和当前剩余工作。
+> §16 记录历史实测里程碑和当前剩余工作。
+
+**当前状态（2026-08-25）**：module、kernel、package 各有一个真实 E2B task 通过
+reference self-replay；repo 的 sourcing、native 多语言 E2B toolchain、workload harvest、
+fixture 和 checkout-native 出厂链路已经打通，但 repo task 仍需在最终 Harbor 环境完成
+reference-vs-reference 一致性审计后才算生产合格。历史 smoke 数字不可作为当前良率承诺。
 
 ---
 
@@ -687,7 +692,7 @@ traceback 的异常在**最后一行**，所以取最后一行 + 它上面那个
 schema 推断只接受它能画的类型，画不出来的函数在扫描期就没成为候选。要测这个数，
 得放宽 `functions.py` 的类型表，让更奇怪的参数进来。
 
-### 16.2 四尺度验收 smoke（2026-08-18）
+### 16.2 历史四尺度验收 smoke（2026-08-18）
 
 在同一套 remote/E2B backend 上完成了四种尺度的真实 smoke。所有已运行候选均为
 `trustworthy=True`，没有 factory refusal：
@@ -699,7 +704,8 @@ schema 推断只接受它能画的类型，画不出来的函数在扫描期就�
 | package | 1/1 emitted | `textdistance@4.6.3`，197 probes，discard 0%，FLOOR 48%，5 项 evidence |
 | repo | 2/2 emitted | `mvdan/sh`，同语言 `sh-faster` 与跨语言 Rust `sh-rust-rewrite`，各 40 probes/160 points，FLOOR 72% |
 
-这证明四种 scale 已共享同一 pipeline，并分别使用正确的 call/process seam；package 的
+这条记录证明当时四种 scale 共享同一 pipeline，并分别使用正确的 call/process seam；它是
+历史 smoke，不等价于当前 task 的生产验收。package 的
 generator 确实在 E2B 内执行，repo 的两种任务形态也都能从真实仓库出厂。
 
 ### 16.3 Checkout-native 出厂准入（2026-08-20）

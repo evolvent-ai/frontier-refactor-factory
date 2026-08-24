@@ -6,8 +6,8 @@ need a generator/entry-point proposal because a registry does not publish a call
 """
 from __future__ import annotations
 
-import os
 import tempfile
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -63,7 +63,8 @@ _FORM_MAP = {
 #
 # MEASURED, NOT SUPPOSED: `topic:cli` returned dive and lazygit (TUIs) and httpx (a network
 # scanner), and all three produced zero liftable invocations.
-TRANSFORMER_TOPICS = ("parser", "formatter", "linter", "compiler", "transpiler", "minifier", "text-processing", "data-conversion")
+TRANSFORMER_TOPICS = ("formatter", "linter", "cli", "command-line", "parser", "compiler",
+                      "transpiler", "minifier", "text-processing", "data-conversion")
 
 
 def _chain_of_topics(cls, topics: tuple, language: str):
@@ -83,7 +84,7 @@ def _chain_of_topics(cls, topics: tuple, language: str):
 def _merge_reports(reports, index_name, elapsed):
     summary = {"attempted": 0, "emitted": 0, "yield_rate": 0.0,
                "refused_material": 0, "refused_factory": 0,
-               "trustworthy": True, "by_reason": {}}
+               "trustworthy": True, "by_reason": {}, "source_rejections": {}}
     for report in reports:
         item = report.summary
         for key in ("attempted", "emitted", "refused_material", "refused_factory"):
@@ -91,8 +92,25 @@ def _merge_reports(reports, index_name, elapsed):
         summary["trustworthy"] = summary["trustworthy"] and item.get("trustworthy", False)
         for reason, count in item.get("by_reason", {}).items():
             summary["by_reason"][reason] = summary["by_reason"].get(reason, 0) + count
+        for reason, count in item.get("source_rejections", {}).items():
+            summary["source_rejections"][reason] = summary["source_rejections"].get(reason, 0) + count
     summary["yield_rate"] = round(summary["emitted"] / summary["attempted"], 4) if summary["attempted"] else 0.0
     summary["scale"] = reports[0].summary.get("scale", "") if reports else ""
+    if not summary["source_rejections"]:
+        summary.pop("source_rejections")
+    walked = fresh = repeats = 0
+    totals = []
+    for report in reports:
+        source_stats = report.summary.get("sourcing") or {}
+        walked += int(source_stats.get("walked", 0))
+        fresh += int(source_stats.get("fresh", 0))
+        repeats += int(source_stats.get("repeats", 0))
+        if source_stats.get("total") is not None:
+            totals.append(int(source_stats["total"]))
+    if walked or fresh or repeats:
+        summary["sourcing"] = {"index": index_name, "walked": walked, "fresh": fresh,
+                                "repeats": repeats, "total": sum(totals) if totals else None,
+                                "remaining": (max(0, sum(totals) - walked) if totals else None)}
     return BatchReport(summary, elapsed, index_name)
 
 
@@ -215,7 +233,17 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
     started = time.perf_counter()
     try:
         result = factory.build(name, budget, candidates=candidates)
-        return BatchReport(result.summary(), time.perf_counter() - started, index_name)
+        summary = result.summary()
+        coverage = getattr(idx, "last_coverage", None)
+        if coverage is not None:
+            summary["sourcing"] = coverage.to_json()
+        if hasattr(idx, "repositories_walked"):
+            summary.setdefault("sourcing", {})["repositories_walked"] = idx.repositories_walked
+            summary["sourcing"]["functions_walked"] = idx.functions_walked
+        rejections = getattr(idx, "rejection_counts", None)
+        if rejections:
+            summary["source_rejections"] = dict(sorted(rejections.items()))
+        return BatchReport(summary, time.perf_counter() - started, index_name)
     finally:
         factory.close()
 
@@ -227,9 +255,9 @@ def _index(name: str, *, subset: str, scale: str = ""):
     if name == "github-functions":
         # GitHubFunctions wraps a GitHub index — construct the inner one first.
         # Use topic:algorithms which is a valid single-qualifier GitHub search term.
-        query = "topic:algorithms"
+        query = "topic:algorithms language:python" if scale == "kernel" else "topic:algorithms"
         github = source.GitHub(language=language, query=query, scale="module")
-        return cls(github, scale=scale)
+        return cls(github, scale=scale, log=lambda message: print("[source] " + message, flush=True))
 
     if name == "github-packages":
         github = source.GitHub(language=language or "python", query="topic:algorithms", scale="package")
@@ -251,7 +279,11 @@ def _index(name: str, *, subset: str, scale: str = ""):
             # ONE QUERY PER TOPIC, chained. GitHub answers 422 to `topic:a OR topic:b`, so several
             # topics means several searches; `Chain` walks them end to end so that `walk()` still
             # sees a single index with a single denominator.
-            return _chain_of_topics(cls, TRANSFORMER_TOPICS, language or "go")
+            # No implicit language conversion: repo tasks are native-language by default.  A
+            # caller may constrain sourcing with `source_language` or FRF_REPO_LANGUAGE; otherwise
+            # GitHub's result language is preserved and the selected E2B image must provide it.
+            return _chain_of_topics(cls, TRANSFORMER_TOPICS,
+                                    language or os.environ.get("FRF_REPO_LANGUAGE", ""))
         elif scale in ("package",):
             # Package scale needs algorithm/library repos.
             query = "topic:algorithms"

@@ -30,6 +30,7 @@ import ast
 import json
 import urllib.error
 import urllib.request
+import time
 
 from . import credentials
 
@@ -80,10 +81,13 @@ def ask(prompt: str, *, system: str = "", temperature: float = 0.2,
     request = urllib.request.Request(
         "%s/chat/completions" % base, data=body,
         headers={"Content-Type": "application/json", "Authorization": "Bearer %s" % key})
-    try:
+    last_transport = None
+    for attempt in range(3):
+      try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read())
-    except urllib.error.HTTPError as error:
+        break
+      except urllib.error.HTTPError as error:
         detail = ""
         try:
             detail = error.read().decode("utf-8", "replace")[:300]
@@ -92,8 +96,14 @@ def ask(prompt: str, *, system: str = "", temperature: float = 0.2,
         # The STATUS and the body, never the key. A diagnostic that echoes the Authorization header
         # publishes the credential into whatever log the message is pasted into.
         raise ModelError("the gateway answered %d: %s" % (error.code, detail)) from error
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
+      except (urllib.error.URLError, TimeoutError, OSError) as error:
+        last_transport = error
+        if attempt < 2:
+            time.sleep(2 ** attempt)
+            continue
         raise ModelError("the gateway did not answer: %s" % error) from error
+    else:
+        raise ModelError("the gateway did not answer: %s" % last_transport)
 
     try:
         return payload["choices"][0]["message"]["content"] or ""

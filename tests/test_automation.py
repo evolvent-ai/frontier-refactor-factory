@@ -1,4 +1,4 @@
-from frf.automation import BatchReport, _index, _scale
+from frf.automation import BatchReport, _index, _scale, _merge_reports
 
 
 def test_default_indexes_and_scale_wiring():
@@ -20,3 +20,18 @@ def test_batch_report_is_json_ready():
     report = BatchReport({"scale": "module", "attempted": 1}, 1.23456, "github")
     assert report.to_json() == {"scale": "module", "attempted": 1,
                                 "seconds": 1.235, "index": "github"}
+
+
+def test_roll_report_keeps_source_rejection_reasons():
+    reports = [
+        BatchReport({"scale": "package", "attempted": 1, "emitted": 0,
+                     "trustworthy": True, "source_rejections": {"checkout-failed": 2}},
+                    1, "github-packages"),
+        BatchReport({"scale": "package", "attempted": 1, "emitted": 1,
+                     "trustworthy": True, "source_rejections": {"checkout-failed": 3,
+                                                                  "surface-too-small": 1}},
+                    1, "github-packages"),
+    ]
+    merged = _merge_reports(reports, "github-packages", 2)
+    assert merged.summary["source_rejections"] == {
+        "checkout-failed": 5, "surface-too-small": 1}

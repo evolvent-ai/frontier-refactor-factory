@@ -30,7 +30,7 @@ from .protocol import Request, Response
 # The cost of being wrong in the other direction is small and visible: a genuinely heavy probe is
 # refused as material this factory cannot time, which is an honest verdict and appears in the
 # refusal log rather than as a batch that stopped.
-DEFAULT_CALL_TIMEOUT = 10.0
+DEFAULT_CALL_TIMEOUT = float(__import__("os").environ.get("FRF_CALL_TIMEOUT", "10"))
 
 
 def _last_error(text: str, limit: int = 400) -> str:

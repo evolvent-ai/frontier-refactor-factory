@@ -42,7 +42,12 @@ drawn = probes(int(sys.argv[1]))
 
 # ONE JSON DOCUMENT ON STDOUT AND NOTHING ELSE. A generator that prints while it works would
 # otherwise corrupt its own output, so the payload is framed: the factory reads the last line.
-sys.stdout.write("\\n" + json.dumps({"probes": list(drawn)}) + "\\n")
+payload = drawn if isinstance(drawn, dict) else {"probes": list(drawn)}
+try:
+    encoded = json.dumps(payload)
+except (TypeError, ValueError) as error:
+    raise SystemExit("generator output is not JSON-serializable: %s" % error)
+sys.stdout.write("\\n" + encoded + "\\n")
 '''
 
 
@@ -56,7 +61,7 @@ class GeneratorFailed(RuntimeError):
 
 
 def run_in(backend, source: str, count: int, *, room: str = "/tmp/frf-generator",
-           timeout: float = TIMEOUT) -> list:
+           timeout: float = TIMEOUT) -> list | dict:
     """Execute a generator in `backend` and bring back its probes. -> list of argument lists.
 
     `backend` is a `core.sandbox.Backend`. Passing the local one is possible and is exactly the
@@ -75,7 +80,7 @@ def run_in(backend, source: str, count: int, *, room: str = "/tmp/frf-generator"
 
     done = backend.run(["python3", "draw.py", str(count)], workdir=room, timeout=timeout)
     if not done.ok:
-        raise GeneratorFailed("the generator failed inside the container: %s" % done.tail(1200))
+        raise GeneratorFailed("the generator failed inside the container: %s" % done.tail(2400))
     return _decode(done.stdout)
 
 
@@ -105,4 +110,6 @@ def _decode(stdout: str) -> list:
                 "probe %d is %s, not a list of arguments. A generator returns one ARGUMENT LIST "
                 "per probe: [[1, 2], [3, 4]] is two probes of two arguments each, not one probe of "
                 "two lists." % (index, type(args).__name__))
+    if isinstance(payload, dict) and "labels" in payload:
+        return {"probes": drawn, "labels": payload["labels"]}
     return drawn

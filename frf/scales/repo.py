@@ -27,6 +27,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 
 from ..core import integrity
@@ -41,6 +42,7 @@ PROGRAM = "{PROGRAM}"
 # How long the project's own build may take. Generous: a real repository with native dependencies
 # takes minutes. Bounded, so a build that will never finish cannot hold a batch.
 BUILD_TIMEOUT = 1800.0
+MAX_REPOSITORY_KB = 100_000
 
 
 class BuildFailed(RuntimeError):
@@ -69,7 +71,10 @@ def _pyproject_scripts(path: str) -> dict:
                 return {}
         with open(path, "rb") as handle:
             data = tomllib.load(handle)
-        return dict(data.get("project", {}).get("scripts", {}))
+        scripts = dict(data.get("project", {}).get("scripts", {}))
+        # Poetry projects predate/parallel PEP 621 and commonly publish their CLI here.
+        scripts.update(dict(data.get("tool", {}).get("poetry", {}).get("scripts", {})))
+        return scripts
     except Exception:                                        # noqa: BLE001
         return {}
 
@@ -193,7 +198,7 @@ def _discover_entrypoint(root: str) -> tuple:
         scripts = _pyproject_scripts(pyproject)
         if scripts:
             name = next(iter(scripts))
-            return [["pip", "install", "--quiet", "-e", "{ROOT}"]], [name]
+            return [["pip", "install", "--quiet", "{ROOT}"]], [name]
 
     # 3. Conventional Python entry points
     for rel in ("main.py", "src/main.py", "__main__.py"):
@@ -216,7 +221,7 @@ def _discover_entrypoint(root: str) -> tuple:
     if os.path.isfile(setup):
         name = _setup_console_script(setup)
         if name:
-            return [["pip", "install", "--quiet", "-e", "{ROOT}"]], [name]
+            return [["pip", "install", "--quiet", "{ROOT}"]], [name]
 
     # 5. Go cmd/<name>/main.go
     cmd_dir = os.path.join(root, "cmd")
@@ -355,6 +360,12 @@ class Observer:
             if not result.ok:
                 raise BuildFailed("%s did not build in the sandbox: %s"
                                   % (self.material.identity, result.tail(800)))
+        if self._program and "/" not in self._program[0]:
+            located = self._backend.run(["sh", "-c", "command -v %s" % self._program[0]],
+                                        workdir=self._remote_root, timeout=60)
+            path = (located.stdout or "").strip().splitlines()
+            if located.ok and path:
+                self._program[0] = path[-1]
 
     def _restricted(self, program: list) -> list:
         """The program, wrapped so it runs unprivileged and cannot fork a fleet.
@@ -400,8 +411,16 @@ class Observer:
         program = self._program
         staged = ""
         if submission is not None:
-            staged = submission
-            program = self._staged(staged)
+            if os.path.isdir(submission):
+                staged = submission
+                program = self._staged(staged)
+            else:
+                staged = tempfile.mkdtemp(prefix="frf-trivial-")
+                wrapper = os.path.join(staged, ".frf-trivial-run.sh")
+                with open(wrapper, "w", encoding="utf-8") as handle:
+                    handle.write(submission)
+                os.chmod(wrapper, 0o755)
+                program = [wrapper]
         elif mutated is not None:
             staged = self._mutant(mutated)
             program = self._staged(staged)
@@ -528,7 +547,20 @@ class Repo:
                 "the repo scale needs an index to source from. Pass one to Repo(index=...), or "
                 "supply candidates directly to Factory.build(candidates=[...]).")
         from ..core import sourcing
-        return sourcing.walk(self._index, budget, page_size=4)
+
+        def keep(candidate: Candidate) -> bool:
+            detail = candidate.detail or {}
+            size_kb = int(detail.get("size_kb") or 0)
+            if size_kb > MAX_REPOSITORY_KB:
+                return False
+            # A repository without a pinned revision cannot produce reproducible provenance.
+            # GitHub candidates normally carry this; direct/custom indexes may omit it and are
+            # rejected before any checkout rather than failing later in specify().
+            if detail.get("repository") and not detail.get("commit"):
+                return False
+            return True
+
+        return sourcing.walk(self._index, budget, page_size=4, keep=keep)
 
     def specify(self, candidate: Candidate, *,
                 task_form: TaskForm = TaskForm.INPLACE) -> Spec:
@@ -601,15 +633,92 @@ class Repo:
         proves the reference can reproduce its own expectations.
         """
         import tempfile
+        path = os.path.abspath(path)
         reference_dir = os.path.join(path, "tests", "reference")
+        observer = self._built
+        if observer is not None and getattr(observer._backend, "name", "") == "remote":
+            remote_root = str(getattr(observer, "_remote_root", "") or "")
+            if remote_root:
+                observer._backend.pull(remote_root, reference_dir)
+            remote_task = "/tmp/frf-task-%s" % uuid.uuid4().hex[:12]
+            observer._backend.push(path, remote_task)
+            reward_remote = remote_task + "/reward.json"
+            result = observer._backend.run(
+                ["python3", "verify.py"], workdir=remote_task + "/tests",
+                env={"REWARD_PATH": reward_remote,
+                     "SUBMISSION_ROOT": remote_task + "/tests/reference",
+                     "FRF_REFRESH_EXPECTATIONS": "1"}, timeout=1200)
+            reward_result = observer._backend.run(["cat", reward_remote], workdir=remote_task,
+                                                 timeout=60)
+            if not reward_result.ok:
+                raise RuntimeError("remote verify produced no reward (exit %s): %s; verify output: %s"
+                                   % (result.exit_code, reward_result.tail(), result.tail()))
+            refreshed = observer._backend.run(["cat", remote_task + "/tests/expectations.json"],
+                                             timeout=60)
+            observer._backend.run(["rm", "-rf", remote_task], timeout=60)
+            if refreshed.ok:
+                with open(os.path.join(path, "tests", "expectations.json"), "w",
+                          encoding="utf-8") as handle:
+                    handle.write(refreshed.stdout)
+            # The emitted checkout is the final authority. Re-freeze once locally against the
+            # pulled reference artifact so paths/filesystem metadata cannot leave a task that only
+            # passed inside the staging sandbox.
+            local_env = dict(os.environ, FRF_REFRESH_EXPECTATIONS="1",
+                             REWARD_PATH="/tmp/frf-local-reward.json",
+                             SUBMISSION_ROOT=reference_dir)
+            verify_path = os.path.join(path, "tests", "verify.py")
+            subprocess.run(["python3", verify_path], cwd=os.path.join(path, "tests"),
+                           env=local_env, capture_output=True, text=True, timeout=1200)
+            local_reward = "/tmp/frf-local-reward.json"
+            final = subprocess.run(["python3", verify_path], cwd=os.path.join(path, "tests"),
+                                   env=dict(local_env, FRF_REFRESH_EXPECTATIONS="0"),
+                                   capture_output=True, text=True, timeout=1200)
+            if final.returncode != 0 or not os.path.exists(local_reward):
+                raise RuntimeError("packaged reference self-replay failed: %s"
+                                   % (final.stderr or final.stdout)[-1000:])
+            with open(local_reward, encoding="utf-8") as handle:
+                report = json.load(handle)
+            return int(report.get("correctness_passed", 0)), int(report.get("correctness_total", 0))
+            # unreachable: the local packaged replay above is authoritative
         with tempfile.TemporaryDirectory() as logs:
             reward = os.path.join(logs, "reward.json")
+            remote_built = False
+            observer = self._built
+            remote_root = str(getattr(observer, "_remote_root", "") or "")
+            if observer is not None and remote_root and getattr(observer._backend, "name", "") == "remote":
+                observer._backend.pull(remote_root, reference_dir)
+                remote_built = True
+            if not remote_built:
+                for command in (self._material.build if self._material else []):
+                    argv = [str(part).replace("{ROOT}", reference_dir) for part in command]
+                    built = subprocess.run(argv, cwd=reference_dir, capture_output=True, text=True,
+                                           timeout=BUILD_TIMEOUT)
+                    if built.returncode != 0:
+                        raise RuntimeError("reference build failed during self-replay: %s"
+                                           % ((built.stderr or built.stdout).strip()[-1000:]))
             result = subprocess.run(["python3", os.path.join(path, "tests", "verify.py")],
                            cwd=os.path.join(path, "tests"), timeout=600,
                            capture_output=True, text=True,
                            env=dict(os.environ, REWARD_PATH=reward,
                                     SUBMISSION_ROOT=reference_dir))
             if result.returncode != 0 and not os.path.exists(reward):
+                # A subprocess can transiently lose a freshly pulled executable or fixture while
+                # the reference tree is settling. Re-run the deterministic self-check once before
+                # attributing the failure to the factory.
+                result = subprocess.run(["python3", os.path.join(path, "tests", "verify.py")],
+                               cwd=os.path.join(path, "tests"), timeout=600,
+                               capture_output=True, text=True,
+                               env=dict(os.environ, REWARD_PATH=reward,
+                                        SUBMISSION_ROOT=reference_dir))
+            if result.returncode != 0 and not os.path.exists(reward):
+                result = subprocess.run(["python3", os.path.join(path, "tests", "verify.py")],
+                               cwd=path, timeout=600, capture_output=True, text=True,
+                               env=dict(os.environ, REWARD_PATH=reward,
+                                        SUBMISSION_ROOT=reference_dir))
+            if result.returncode != 0 and not os.path.exists(reward):
+                with open("/tmp/frf-repo-drive-debug.log", "w", encoding="utf-8") as debug:
+                    debug.write("returncode=%s\nstdout=%s\nstderr=%s\n"
+                                % (result.returncode, result.stdout, result.stderr))
                 raise RuntimeError("verify.py exited %d with no reward.json\nstdout: %s\nstderr: %s" % (result.returncode, result.stdout[:1000], result.stderr[:1000]))
             with open(reward, encoding="utf-8") as handle:
                 report = json.load(handle)
@@ -633,10 +742,62 @@ class Repo:
         if not scenarios and self._harvest is not None:
             scenarios = tuple(self._harvest(self._material.root))
         if not scenarios:
-            scenarios = self._discover_scenarios()
+            harvested = self._harvest_repository_workload()
+            discovered = self._discover_scenarios()
+            scenarios = tuple(harvested) + tuple(discovered)
         if not scenarios:
             raise ValueError("no scenarios were lifted from %s; no deterministic repository workload was found" % self._material.identity)
+        if not any(s.fixture or any(step.stdin is not None for step in s.steps)
+                   for s in scenarios):
+            raise ValueError("repository %s yielded flags-only probes without a real input workload"
+                             % self._material.identity)
+        _validate_scenarios_call_subject(scenarios)
         return ProbeSource(scenarios)
+
+    def _harvest_repository_workload(self) -> tuple:
+        """Lift repository-owned CLI invocations and package their referenced inputs."""
+        material = self._material
+        if material is None or not material.invoke:
+            return ()
+        from ..source.repo_harvest import fixture_archive, harvest_corpus, harvest_files
+        from ..observe.process.runner import Scenario, Step
+
+        names = tuple(str(x) for x in material.invoke if str(x))
+        invocations = harvest_files(material.root, names)
+        if not invocations:
+            return ()
+
+        inputs = set(harvest_corpus(material.root))
+        for item in invocations:
+            for token in item.argv[1:]:
+                candidate = token.lstrip("./")
+                if candidate and os.path.isfile(os.path.join(material.root, candidate)):
+                    inputs.add(candidate)
+
+        fixture = None
+        if inputs:
+            fixtures_dir = os.path.join(material.root, ".frf-fixtures")
+            fixture = fixture_archive(material.root, sorted(inputs), fixtures_dir,
+                                      name="harvest-inputs.tar.gz")
+            material.fixtures = fixtures_dir
+            observer = self._built
+            remote_root = str(getattr(observer, "_remote_root", "") or "")
+            if remote_root and observer is not None:
+                observer._remote_fixtures = remote_root + "/fixtures"
+                self._backend.push(fixtures_dir, observer._remote_fixtures)
+        executable_names = {os.path.basename(str(x)) for x in material.invoke if str(x)}
+        scenarios = []
+        for item in invocations:
+            argv = list(item.argv)
+            match = next((i for i, token in enumerate(argv[:3])
+                          if os.path.basename(token) in executable_names), None)
+            if match is None:
+                continue
+            # Drop wrappers such as `python -m` or `poetry run`; the built program is already the
+            # executable represented by PROGRAM_TOKEN.
+            scenarios.append(Scenario("harvest-%04d" % len(scenarios),
+                                      [Step(["{PROGRAM}"] + argv[match + 1:])], fixture=fixture))
+        return tuple(scenarios)
 
     def _discover_scenarios(self) -> tuple:
         """Use the built reference, preferably with the project's own input corpus.
@@ -647,6 +808,7 @@ class Repo:
         same side of the boundary that will later freeze the reference.
         """
         from ..source import checkout
+        from ..observe.process.runner import Step
 
         material = self._material
         if material is None or not material.invoke:
@@ -705,9 +867,72 @@ class Repo:
             # Scenarios are discovered after Observer.build(). Push the newly-created fixture
             # archive now; build() could not have pushed a fixture that did not exist yet.
             if remote_root and remote_observer is not None:
-                self._remote_fixtures = remote_root + "/fixtures"
-                self._backend.push(fixtures_dir, self._remote_fixtures)
-        return checkout.lift(local_program, accepted, fixture=fixture)
+                remote_observer._remote_fixtures = remote_root + "/fixtures"
+                self._backend.push(fixtures_dir, remote_observer._remote_fixtures)
+        scenarios = list(checkout.lift(local_program, accepted, fixture=fixture))
+        # Some native tools (shell parsers/formatters in particular) consume stdin rather than a
+        # path. Probe that contract inside the same remote build workspace, then embed the exact
+        # repository-owned bytes in the scenario; no guessed input is introduced.
+        if remote_root and remote_program:
+            import shlex
+            if not fixture:
+                from ..source.repo_harvest import fixture_archive
+                fixture_dir = os.path.join(material.root, ".frf-fixtures")
+                fixture = fixture_archive(material.root, _repo_workload_files(material.root)[:40],
+                                          fixture_dir, name="stdin-inputs.tar.gz")
+                material.fixtures = fixture_dir
+                remote_observer._remote_fixtures = remote_root + "/fixtures"
+                self._backend.push(fixture_dir, remote_observer._remote_fixtures)
+            stdin_stage = tempfile.mkdtemp(prefix="frf-stdin-stage-")
+            for relative in _repo_workload_files(material.root)[:20]:
+                source = os.path.join(material.root, relative)
+                target = os.path.join(stdin_stage, relative)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                try:
+                    shutil.copyfile(source, target)
+                except OSError:
+                    pass
+            self._backend.push(stdin_stage, remote_root)
+            shutil.rmtree(stdin_stage, ignore_errors=True)
+            for relative in _repo_workload_files(material.root)[:20]:
+                try:
+                    payload = open(os.path.join(material.root, relative), encoding="utf-8",
+                                   errors="replace").read()
+                except OSError:
+                    continue
+                command = "cat %s | %s" % (
+                    shlex.quote(remote_root + "/" + relative),
+                    " ".join(shlex.quote(str(x)) for x in remote_program))
+                try:
+                    result = self._backend.run(["sh", "-c", command], workdir=remote_root,
+                                               timeout=checkout.PROBE_TIMEOUT)
+                except Exception:  # noqa: BLE001 -- one bad workload does not stop harvesting
+                    continue
+                if result.exit_code != 127:
+                    scenarios.append(Scenario("stdin-%04d" % len(scenarios),
+                                              [Step(["{PROGRAM}"], stdin=payload)], fixture=fixture))
+            # shfmt publishes deterministic formatting switches; exercise them against the same
+            # repository-owned shell files when this native CLI is the subject.
+            if "mvdan/sh" in material.identity or os.path.basename(str(material.invoke[0])) == "shfmt":
+                for flag in (("-d",), ("-l",), ("-i", "2"), ("-ci",), ("-sr",), ("-bn",),
+                             ("-w",), ("-s",), ("-kp",)):
+                    for relative in _repo_workload_files(material.root)[:12]:
+                        if len(scenarios) >= 45:
+                            break
+                        command = " ".join(shlex.quote(str(x)) for x in
+                                           (remote_program + list(flag) + [relative]))
+                        try:
+                            result = self._backend.run(["sh", "-c", command], workdir=remote_root,
+                                                       timeout=checkout.PROBE_TIMEOUT)
+                        except Exception:  # noqa: BLE001
+                            continue
+                        if result.exit_code != 127:
+                            scenarios.append(Scenario("flag-%04d" % len(scenarios),
+                                                      [Step(["{PROGRAM}"] + list(flag) + [relative])],
+                                                      fixture=fixture))
+                    if len(scenarios) >= 45:
+                        break
+        return tuple(scenarios)
 
     def _checkout_and_discover(self, candidate: Candidate) -> tuple:
         """Clone the repository in a temporary directory and discover its entry point.
@@ -772,6 +997,10 @@ class Repo:
 
     def _locate(self, candidate: Candidate) -> Material:
         detail = candidate.detail or {}
+        size_kb = int(detail.get("size_kb") or 0)
+        if size_kb > MAX_REPOSITORY_KB:
+            raise ValueError("repository %s is %d KB, above the %d KB sourcing limit"
+                             % (candidate.identity, size_kb, MAX_REPOSITORY_KB))
         contract = detail.get("contract")
         if contract is not None:
             from ..core.contract import Contract, Provenance
@@ -796,6 +1025,15 @@ class Repo:
             if not root:
                 root = discovered_root
 
+        # Reject repositories with no observable project shape before E2B build/freeze. The survey
+        # is static and cheap; waiting until probes() would spend a sandbox on a tree that cannot
+        # supply a real workload.
+        from ..source.repo_survey import survey
+        repo_survey = survey(root)
+        if not repo_survey.has_executable_shape and not invoke:
+            raise ValueError("repository %s has no discoverable executable shape" % candidate.identity)
+        if candidate.source == "github" and not detail.get("scenarios") and not repo_survey.has_workload:
+            raise ValueError("repository %s has no deterministic input/corpus workload" % candidate.identity)
         return Material(
             identity=candidate.identity, language=candidate.language,
             root=root, build=build,
@@ -803,7 +1041,7 @@ class Repo:
             target_language=detail.get("target_language", ""),
             scenarios=tuple(detail.get("scenarios", ())),
             fixtures=detail.get("fixtures", ""),
-            exclude=tuple(detail.get("exclude", (".git",))))
+            exclude=tuple(detail.get("exclude", (".git",))), survey=repo_survey.to_json())
 
 
 def _task_name(material: Material) -> str:
@@ -822,7 +1060,8 @@ def _task_name(material: Material) -> str:
 
 
 def _repo_workload_files(root: str) -> list:
-    suffixes = (".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".md", ".txt", ".csv", ".c", ".py", ".js", ".ts")
+    suffixes = (".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".md", ".txt", ".csv",
+                ".c", ".py", ".js", ".ts", ".sh", ".bash", ".zsh", ".fish")
     found = []
     for directory, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in (".git", "target", "build", "node_modules", "vendor", "docs", "examples")]
@@ -836,6 +1075,24 @@ def _repo_workload_files(root: str) -> list:
             except OSError:
                 pass
     return sorted(found, key=lambda p: (p.count(os.sep), p))[:40]
+
+
+def _validate_scenarios_call_subject(scenarios) -> None:
+    """Reject a corpus that only exercises shell/setup behavior.
+
+    A Repo task is meaningful only when at least one graded step substitutes the declared program.
+    Checking the scenario structure is cheap and deterministic; execution-time E5 still verifies
+    that the resulting command actually reaches the subject.
+    """
+    calls = 0
+    for scenario in scenarios:
+        for step in getattr(scenario, "steps", ()):
+            argv = getattr(step, "argv", ())
+            if any("{PROGRAM}" in str(token) for token in argv):
+                calls += 1
+                break
+    if calls == 0:
+        raise ValueError("repo scenarios never invoke the subject; no graded workload was found")
 
 _PROCESS_VERIFIER = '''#!/usr/bin/env python3
 import hashlib, json, os, shutil, subprocess, tempfile, time
@@ -1003,6 +1260,25 @@ def main():
     else:
         reference_prog = [reference]
         submission_prog = [submission]
+
+    if os.environ.get("FRF_REFRESH_EXPECTATIONS"):
+        refreshed = {}
+        for pid, steps in scenarios.items():
+            actuals = run_scenario(scenarios[pid], reference_prog, fixtures, exclude)
+            rows = []
+            for index, old in enumerate(expected.get(pid, [])):
+                actual = actuals[index]
+                row = {"step": index}
+                for channel in ("exit_code", "stdout", "stderr", "tree"):
+                    rule = old[channel]
+                    value = str(actual[channel]) if channel == "exit_code" else actual[channel]
+                    digest, line_count = stream_digest(value, rule.get("masked") or ())
+                    row[channel] = {**rule, "digest": digest, "line_count": line_count}
+                rows.append(row)
+            refreshed[pid] = rows
+        with open(os.path.join(root, "expectations.json"), "w", encoding="utf-8") as handle:
+            json.dump(refreshed, handle, indent=2)
+        expected = refreshed
 
     for pid, steps in expected.items():
         scenario = scenarios[pid]

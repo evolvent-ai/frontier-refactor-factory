@@ -79,3 +79,20 @@ def test_an_index_that_will_not_say_its_size_is_still_usable():
     coverage = sourcing.Coverage("x", walked=10, total=None)
     assert coverage.remaining is None
     assert sourcing.Coverage("x", walked=10, total=100).remaining == 90
+
+
+def test_walk_exposes_machine_readable_coverage_on_the_index():
+    index = _FakeIndex(3)
+    assert len(list(sourcing.walk(index, budget=2, page_size=2))) == 2
+    coverage = index.last_coverage
+    assert coverage.to_json() == {
+        "index": "test-index", "walked": 2, "fresh": 2, "repeats": 0,
+        "total": 3, "remaining": 1,
+    }
+
+
+def test_walk_can_stop_at_a_wall_clock_deadline():
+    index = _FakeIndex(100)
+    found = list(sourcing.walk(index, budget=100, max_seconds=0))
+    assert found == []
+    assert index.last_coverage.walked == 0

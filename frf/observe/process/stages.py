@@ -19,6 +19,9 @@ and identical because it is the same code in `core` reached through the same int
 from __future__ import annotations
 
 import os
+import time
+
+import os
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -69,11 +72,19 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
     that lost a line to a clock is kept, because losing that line is what masking is for.
     """
     scenarios = list(source.draw(source.count))
+    try:
+        max_seconds = float(os.environ.get("FRF_FREEZE_MAX_SECONDS", "180"))
+    except ValueError:
+        max_seconds = 180.0
+    deadline = time.monotonic() + max_seconds
     frozen, dropped = {}, 0
 
     batched = getattr(observer, "run_many", None)
     all_runs = ([batched(spec, scenarios) for _ in range(runs)] if batched is not None else None)
     for scenario in scenarios:
+        if time.monotonic() >= deadline:
+            return Corpus(scenarios=[], expectations={}, discard_rate=1.0,
+                          usable=False, timed=[], runs=runs)
         if batched is None:
             runs_observed = [observer.run(spec, scenario) for _ in range(runs)]
         else:

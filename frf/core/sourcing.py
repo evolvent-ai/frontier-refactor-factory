@@ -124,6 +124,7 @@ class Coverage:
 def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: int = 50,
          keep: Callable[[Candidate], bool] | None = None,
          language_filter: str | None = None,
+         max_seconds: float | None = None,
          log: Callable[[str], None] = lambda _m: None) -> Iterator[Candidate]:
     """Yield up to `budget` candidates never seen before, and record what it cost to find them.
 
@@ -145,13 +146,34 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
     is logged but sourcing continues.
     """
     memory = memory if memory is not None else Memory()
-    coverage = Coverage(index.name, total=_total_of(index))
+    if max_seconds is None:
+        configured = os.environ.get("FRF_SOURCING_MAX_SECONDS", "").strip()
+        try:
+            max_seconds = float(configured) if configured else None
+        except ValueError:
+            max_seconds = None
+    deadline = None if max_seconds is None else time.monotonic() + max(0.0, max_seconds)
+    # `total()` may itself be a remote request (GitHub search is the important example).  When a
+    # caller supplies a wall-clock budget, do not spend that budget before the first page can be
+    # inspected; an unknown denominator is honest and the walk can still report walked/fresh.
+    indexed_total = None if max_seconds is not None else _total_of(index)
+    coverage = Coverage(index.name, total=indexed_total)
+    # Keep the machine-readable accounting on the index as well as in the human log.  Widening
+    # adapters (functions, packages, repositories) can then report how much source they consumed
+    # without changing the generator API or pretending that `budget` equals work performed.
+    try:
+        index.last_coverage = coverage
+    except Exception:
+        pass
     produced = 0
     page = 0
     consecutive_errors = 0
     max_consecutive_errors = 3
 
     while produced < budget:
+        if deadline is not None and time.monotonic() >= deadline:
+            log("%s: sourcing deadline reached after %d candidate(s)" % (index.name, coverage.walked))
+            break
         batch = _fetch_page_with_retry(index, page, page_size, log)
         if batch is None:
             # Retry limit exhausted; skip this page.
@@ -167,6 +189,7 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
             break
         consecutive_errors = 0
         page += 1
+        log("%s: page %d returned %d row(s)" % (index.name, page - 1, len(batch)))
         for candidate in batch:
             # Validate candidate has required fields; skip malformed ones.
             if not _is_valid_candidate(candidate):
@@ -184,6 +207,8 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
                 if lang_lower != filter_lower:
                     continue
             if keep is not None and not keep(candidate):
+                log("%s: rejected candidate %s by mechanical filter" %
+                    (index.name, candidate.identity))
                 continue
             coverage.fresh += 1
             produced += 1
@@ -192,6 +217,10 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
                 break
 
     memory.save()
+    try:
+        index.last_coverage = coverage
+    except Exception:
+        pass
     log("%s: %s" % (index.name, json.dumps(coverage.to_json())))
 
 

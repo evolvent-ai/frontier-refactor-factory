@@ -11,12 +11,14 @@ import ast
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+import warnings
 
 from ..core.scale import Candidate
 
 CLONE_TIMEOUT = 300.0
 PER_REPOSITORY = 4
+MAX_REPOSITORY_KB = 100_000
+MAX_SOURCE_FILE_BYTES = 2_000_000
 _SKIP = {"tests", "test", "testing", "docs", "examples", "benchmarks", "bench", "conftest.py", "solutions", "spider", "ci", "dev_tools", "tools"}
 
 
@@ -29,6 +31,7 @@ class GitHubPackages:
         self._expanded = []
         self._source_page = 0
         self._exhausted = False
+        self.rejection_counts: dict[str, int] = {}
 
     def total(self):
         return self._index.total()
@@ -36,7 +39,8 @@ class GitHubPackages:
     def page(self, number: int, *, size: int = 20):
         needed = (number + 1) * size
         while len(self._expanded) < needed and not self._exhausted:
-            rows = list(self._index.page(self._source_page, size=4))
+            rows = list(self._index.page(
+                self._source_page, size=max(1, min(4, needed - len(self._expanded)))))
             self._source_page += 1
             if not rows:
                 self._exhausted = True
@@ -50,19 +54,30 @@ class GitHubPackages:
 
     def _inspect(self, repository: Candidate):
         detail = repository.detail or {}
+        size_kb = int(detail.get("size_kb") or 0)
+        if size_kb > MAX_REPOSITORY_KB:
+            self.rejection_counts["repository-too-large"] = self.rejection_counts.get("repository-too-large", 0) + 1
+            return None
         url = str(detail.get("repository") or "")
         commit = str(detail.get("commit") or "")
         identity = str(detail.get("identity") or "")
         if not url or not commit or repository.language.lower() not in ("python", ""):
+            self.rejection_counts["unsupported-or-unpinned"] = self.rejection_counts.get("unsupported-or-unpinned", 0) + 1
             return None
         root = self._materialise(url, commit)
         if root is None:
+            self.rejection_counts["checkout-failed"] = self.rejection_counts.get("checkout-failed", 0) + 1
             return None
         package_root, package_name = _find_package_root(root)
         if not package_root or not package_name:
+            self.rejection_counts["no-package-root"] = self.rejection_counts.get("no-package-root", 0) + 1
             return None
         dispatch = _public_dispatch(root, package_root, package_name)
+        # The call seam is JSON-only. Do not ask the model to invent an encoding for bytes, paths,
+        # handles, or other non-JSON arguments; retain only operations the adapter proved safe.
+        dispatch = [entry for entry in dispatch if bool(entry.get("json_safe", True))]
         if len(dispatch) < 4:
+            self.rejection_counts["surface-too-small"] = self.rejection_counts.get("surface-too-small", 0) + 1
             return None
         # A package task must expose a real surface, not test helpers or a single tiny utility.
         # Keep a bounded but broad contract; the generator sees all retained operations.
@@ -143,7 +158,12 @@ def _public_dispatch(root: str, package_root: str, package_name: str):
             checked += 1
             path = os.path.join(directory, filename)
             try:
-                tree = ast.parse(open(path, encoding="utf-8", errors="replace").read(), path)
+                if os.path.getsize(path) > MAX_SOURCE_FILE_BYTES:
+                    continue
+                # Legacy escapes are irrelevant to AST discovery but otherwise flood batch logs.
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", SyntaxWarning)
+                    tree = ast.parse(open(path, encoding="utf-8", errors="replace").read(), path)
             except (OSError, SyntaxError, ValueError):
                 continue
             rel = os.path.relpath(path, package_root)[:-3].replace(os.sep, ".")
@@ -152,8 +172,12 @@ def _public_dispatch(root: str, package_root: str, package_name: str):
                 if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                         and not node.name.startswith("_") and node.name not in seen):
                     seen.add(node.name)
+                    # JSON seam cannot represent a set/bytes result. Mark obvious set literals as
+                    # unsafe so the package source filter rejects them before LLM/E2B work.
+                    unsafe = any(isinstance(child, ast.Set) for child in ast.walk(node))
                     result.append({"name": node.name, "module": module_name,
-                                   "symbol": node.name, "signature": _signature(node)})
+                                   "symbol": node.name, "signature": _signature(node),
+                                   "json_safe": not unsafe})
                     if len(result) >= 40:
                         return result
     return result
