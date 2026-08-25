@@ -42,6 +42,11 @@ class RunConfig:
     e2b_max_active: int = 8
     llm_max_concurrent: int = 10
     llm_calls_per_minute: int = 60
+    # Harbor agent review is an optional release-quality gate. It is deliberately off for
+    # throughput runs; when enabled, repairable rubric findings may be retried once by the runner.
+    harbor_check: bool = False
+    harbor_repair: bool = True
+    harbor_max_repairs: int = 1
     checkpoint_file: str = ""       # "" = auto-generate from timestamp
     ledger_file: str = ""
     sandboxed: bool = True
@@ -53,6 +58,8 @@ class RunConfig:
             raise ValueError("e2b_max_active must be at least 1")
         if self.freeze_runs < 1:
             raise ValueError("freeze_runs must be at least 1")
+        if self.harbor_max_repairs < 0:
+            raise ValueError("harbor_max_repairs must be non-negative")
 
     @classmethod
     def from_yaml(cls, path: str) -> "RunConfig":
@@ -91,6 +98,9 @@ class RunConfig:
             e2b_max_active=int(data.get("e2b_max_active", 8)),
             llm_max_concurrent=int(data.get("llm_max_concurrent", 10)),
             llm_calls_per_minute=int(data.get("llm_calls_per_minute", 60)),
+            harbor_check=bool(data.get("harbor_check", False)),
+            harbor_repair=bool(data.get("harbor_repair", True)),
+            harbor_max_repairs=int(data.get("harbor_max_repairs", 1)),
             checkpoint_file=str(data.get("checkpoint_file", "")),
             ledger_file=str(data.get("ledger_file", "")),
             sandboxed=bool(data.get("sandboxed", True)),
@@ -111,6 +121,9 @@ class RunConfig:
             "e2b_max_active": self.e2b_max_active,
             "llm_max_concurrent": self.llm_max_concurrent,
             "llm_calls_per_minute": self.llm_calls_per_minute,
+            "harbor_check": self.harbor_check,
+            "harbor_repair": self.harbor_repair,
+            "harbor_max_repairs": self.harbor_max_repairs,
             "checkpoint_file": self.checkpoint_file,
             "ledger_file": self.ledger_file,
             "sandboxed": self.sandboxed,
