@@ -11,6 +11,8 @@ import os
 import time
 import hashlib
 import threading
+import subprocess
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -135,7 +137,8 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         output_dir: str = "tasks", backend: str = "remote", subset: str = "",
         form: str = "inplace", target_language: str = "",
         freeze_runs: int = pipeline.FREEZE_RUNS, candidates=None,
-        candidate_workers: int = 1, ledger_file: str = "") -> BatchReport:
+        candidate_workers: int = 1, ledger_file: str = "", harbor_check: bool = False,
+        harbor_repair: bool = True, harbor_max_repairs: int = 1) -> BatchReport:
     """Run one scale from an automatically selected enumerable index.
 
     The returned report separates the pipeline summary from elapsed wall time. The call/process
@@ -204,7 +207,9 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
                 futures = [pool.submit(run, name, budget=1, index=index_name,
                                        output_dir=output_dir, backend=backend, subset=subset,
                                        form=form, target_language=target_language,
-                                       freeze_runs=freeze_runs, candidates=[candidate])
+                                       freeze_runs=freeze_runs, candidates=[candidate],
+                                       harbor_check=harbor_check, harbor_repair=harbor_repair,
+                                       harbor_max_repairs=harbor_max_repairs)
                            for candidate in fresh]
                 reports.extend(future.result() for future in as_completed(futures))
         merged = _merge_reports(reports, index_name, time.perf_counter() - started)
@@ -275,6 +280,34 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
     try:
         result = factory.build(name, budget, candidates=candidates)
         summary = result.summary()
+        if harbor_check:
+            passed = failed = 0
+            harbor_failures = []
+            attempts = 1 + (harbor_max_repairs if harbor_repair else 0)
+            for outcome in result.batch.emitted:
+                ok = False
+                detail = ""
+                for _ in range(max(1, attempts)):
+                    command = [os.path.join(os.path.dirname(os.path.dirname(__file__)), ".venv", "bin", "python"),
+                               os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "harbor_check_e2b.py"),
+                               outcome.path, "--model", os.environ.get("LLM_MODEL", "gpt-5.6-terra")]
+                    check = subprocess.run(command, capture_output=True, text=True, timeout=1800,
+                                           env=dict(os.environ))
+                    ok = check.returncode == 0
+                    detail = (check.stdout + check.stderr)[-1000:]
+                    if ok:
+                        break
+                if ok:
+                    passed += 1
+                else:
+                    failed += 1
+                    harbor_failures.append({"path": outcome.path, "detail": detail})
+            summary["harbor_checked"] = passed + failed
+            summary["harbor_passed"] = passed
+            summary["harbor_failed"] = failed
+            if harbor_failures:
+                summary["harbor_failures"] = harbor_failures
+                summary["emitted"] = max(0, summary.get("emitted", 0) - failed)
         if ledger_file:
             ledger = BatchLedger(ledger_file)
             for outcome in result.batch.emitted + result.batch.refused:
