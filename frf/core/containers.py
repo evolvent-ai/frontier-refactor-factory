@@ -28,6 +28,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import re
 import uuid
 
 from . import credentials
@@ -287,17 +288,25 @@ class Remote:
         a Result. A failure with no exit code to report is a transport problem and keeps 1.
         """
         started = time.perf_counter()
-        try:
-            handle = self._sandbox.commands.run(
-                " ".join(_quote(part) for part in argv),
-                cwd=workdir or "/home/user", envs=dict(env or {}),
-                timeout=int(timeout))
-        except Exception as exc:                              # noqa: BLE001 -- the SDK's own errors
-            code = getattr(exc, "exit_code", None)
-            return Result(1 if code is None else int(code),
-                          _text(getattr(exc, "stdout", "")),
-                          _text(getattr(exc, "stderr", "")) or str(exc)[-2000:],
-                          time.perf_counter() - started)
+        command = " ".join(_quote(part) for part in argv)
+        for attempt in range(2):
+            try:
+                handle = self._sandbox.commands.run(
+                    command, cwd=workdir or "/home/user", envs=dict(env or {}),
+                    timeout=int(timeout))
+                break
+            except Exception as exc:                          # noqa: BLE001 -- the SDK's own errors
+                code = getattr(exc, "exit_code", None)
+                message = str(exc)
+                transport_timeout = code is None and bool(re.search(r"request.?timeout|timed out",
+                                                                      message, re.I))
+                if transport_timeout and attempt == 0:
+                    time.sleep(1.0)
+                    continue
+                return Result(1 if code is None else int(code),
+                              _text(getattr(exc, "stdout", "")),
+                              _text(getattr(exc, "stderr", "")) or message[-2000:],
+                              time.perf_counter() - started)
         return Result(getattr(handle, "exit_code", 0), _text(getattr(handle, "stdout", "")),
                       _text(getattr(handle, "stderr", "")), time.perf_counter() - started)
 
