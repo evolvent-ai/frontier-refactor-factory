@@ -78,7 +78,7 @@ _FORM_MAP = {
 #
 # MEASURED, NOT SUPPOSED: `topic:cli` returned dive and lazygit (TUIs) and httpx (a network
 # scanner), and all three produced zero liftable invocations.
-TRANSFORMER_TOPICS = ("data-conversion", "json", "csv", "xml", "etl", "data-science",
+TRANSFORMER_TOPICS = ("json", "csv", "xml", "etl", "data-science", "data-conversion",
                       "text-processing", "parser", "compiler", "transpiler", "minifier",
                       "formatter", "linter", "cli", "command-line")
 
