@@ -82,8 +82,14 @@ def _worth_probing(function) -> bool:
         tree = ast.parse(open(function.path, encoding="utf-8", errors="replace").read())
         imports = {alias.name.split(".", 1)[0] for node in ast.walk(tree)
                    if isinstance(node, ast.Import) for alias in node.names}
-        imports.update(node.module.split(".", 1)[0] for node in ast.walk(tree)
-                       if isinstance(node, ast.ImportFrom) and node.module)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                # The module seam serves the mined file standalone. Relative imports resolve only
+                # inside the original checkout and deterministically fail after emission.
+                if node.level:
+                    return False
+                if node.module:
+                    imports.add(node.module.split(".", 1)[0])
         if imports & {"random", "secrets", "time"}:
             return False
     except (OSError, SyntaxError, ValueError):
