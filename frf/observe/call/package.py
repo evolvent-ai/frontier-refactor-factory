@@ -79,7 +79,7 @@ def write_tests(path: str, corpus, *, spec, material) -> None:
     reference = os.path.join(tests, REFERENCE_DIR)
     shim = shims.load(spec.language)
     if hasattr(material, "entry_points"):
-        _serve_package_here(reference, shim, material)
+        _serve_package_here(reference, shim, material, language=spec.language)
     else:
         _serve_here(reference, shim, material)
 
@@ -87,12 +87,12 @@ def write_tests(path: str, corpus, *, spec, material) -> None:
         handle.write(VERIFIER_SOURCE)
 
     if hasattr(material, "entry_points"):
-        _serve_package_here(os.path.join(path, "environment"), shim, material)
+        _serve_package_here(os.path.join(path, "environment"), shim, material, language=spec.language)
     else:
         _serve_here(os.path.join(path, "environment"), shim, material)
 
 
-def _serve_package_here(room: str, shim, material) -> None:
+def _serve_package_here(room: str, shim, material, *, language: str = "python") -> None:
     """Copy package sources and a generated dispatch adapter into a call-seam workspace."""
     os.makedirs(room, exist_ok=True)
     shutil.copytree(material.root, room, dirs_exist_ok=True,
@@ -107,7 +107,7 @@ def _serve_package_here(room: str, shim, material) -> None:
         destination = os.path.join(room, package_name)
         if os.path.abspath(package_root) != os.path.abspath(destination):
             shutil.copytree(package_root, destination, dirs_exist_ok=True)
-    if getattr(material, "language", "python") in ("javascript", "typescript"):
+    if language in ("javascript", "typescript"):
         adapter = os.path.join(room, "subject.js")
         dispatch = {entry["name"]: (entry["module"], entry["symbol"])
                     for entry in material.dispatch}
