@@ -84,3 +84,18 @@ def test_batch_report_merge_only_promotes_explicit_evidence():
     assert merged["yield"] == 0.5
     assert merged["seconds"] == 3.5
     assert merged["replay"] == "not-run", "emitted is not proof of replay"
+
+
+def test_collect_matrix_emits_every_language_scale_pair(monkeypatch):
+    matrix = _module()
+
+    class Index:
+        rejection_counts = {}
+
+        def page(self, _number, *, size):
+            return []
+
+    monkeypatch.setattr(matrix, "_index", lambda *args, **kwargs: Index())
+    rows = matrix.collect_matrix(["zig"], 1, scales=("module", "repo"))
+    assert [(row["language"], row["scale"]) for row in rows] == [
+        ("zig", "module"), ("zig", "repo")]

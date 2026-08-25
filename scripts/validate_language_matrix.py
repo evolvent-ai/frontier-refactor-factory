@@ -103,14 +103,24 @@ def apply_batch_report(row: dict, report: dict) -> dict:
     return merged
 
 
+def collect_matrix(languages: list[str], count: int, scales=SCALES) -> list[dict]:
+    """Collect one auditable row for every requested language/scale pair."""
+    rows = []
+    for scale in scales:
+        rows.extend(collect(languages, scale, count))
+    return rows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scale", choices=SCALES, required=True)
+    parser.add_argument("--scale", choices=(*SCALES, "all"), default="all")
     parser.add_argument("--languages", default="python,javascript,typescript,go,rust,java,ruby,cpp")
     parser.add_argument("--count", type=int, default=3)
     args = parser.parse_args()
-    print(json.dumps(collect([x.strip() for x in args.languages.split(",") if x.strip()],
-                             args.scale, max(1, args.count)), indent=2, ensure_ascii=False))
+    languages = [x.strip() for x in args.languages.split(",") if x.strip()]
+    rows = (collect_matrix(languages, max(1, args.count)) if args.scale == "all"
+            else collect(languages, args.scale, max(1, args.count)))
+    print(json.dumps(rows, indent=2, ensure_ascii=False))
     return 0
 
 
