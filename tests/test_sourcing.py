@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -62,6 +63,16 @@ def test_checkpoint_resume_retries_factory_failures(tmp_path):
     writer.write(CheckpointRecord(identity="material", status="refused", fault="material", **base))
     writer.write(CheckpointRecord(identity="factory", status="refused", fault="factory", **base))
     assert writer.load_completed() == {"emitted", "material"}
+
+
+def test_batch_ledger_is_append_only_and_jsonl(tmp_path):
+    from frf.core.ledger import BatchLedger, LedgerRecord
+    path = str(tmp_path / "ledger.jsonl")
+    ledger = BatchLedger(path)
+    ledger.append(LedgerRecord("x", "module", "refused", fault="material"))
+    ledger.append(LedgerRecord("y", "module", "emitted", path="tasks/y"))
+    rows = [json.loads(line) for line in open(path)]
+    assert [row["identity"] for row in rows] == ["x", "y"]
 
 
 def test_the_mechanical_filter_runs_before_anything_is_cloned():
