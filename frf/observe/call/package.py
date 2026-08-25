@@ -64,6 +64,15 @@ def write_tests(path: str, corpus, *, spec, material) -> None:
     }
     with open(os.path.join(tests, EXPECTATIONS), "w", encoding="utf-8") as handle:
         json.dump(frozen, handle, indent=1, sort_keys=True)
+    # Machine-readable API coverage is part of the task artifact, so audits can distinguish a
+    # broad package task from one that merely repeats a single operation.
+    operation_counts: dict[str, int] = {}
+    for probe in corpus.inputs.values():
+        if probe:
+            operation_counts[str(probe[0])] = operation_counts.get(str(probe[0]), 0) + 1
+    with open(os.path.join(tests, "coverage_manifest.json"), "w", encoding="utf-8") as handle:
+        json.dump({"operations": operation_counts, "probe_count": len(corpus.inputs),
+                   "timed_count": len(corpus.timed)}, handle, indent=2, sort_keys=True)
 
     # Package material is a checkout with a dispatch adapter, not one source file. It gets its own
     # layout while the verifier and digest format remain shared with module/kernel.
