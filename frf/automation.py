@@ -78,8 +78,9 @@ _FORM_MAP = {
 #
 # MEASURED, NOT SUPPOSED: `topic:cli` returned dive and lazygit (TUIs) and httpx (a network
 # scanner), and all three produced zero liftable invocations.
-TRANSFORMER_TOPICS = ("data-conversion", "text-processing", "parser", "compiler", "transpiler",
-                      "minifier", "formatter", "linter", "cli", "command-line")
+TRANSFORMER_TOPICS = ("data-conversion", "json", "csv", "xml", "etl", "data-science",
+                      "text-processing", "parser", "compiler", "transpiler", "minifier",
+                      "formatter", "linter", "cli", "command-line")
 
 
 def _chain_of_topics(cls, topics: tuple, language: str):
