@@ -23,6 +23,7 @@ from .observe.process import stages as process_stages
 from .observe import checkout_task
 from .core.contract import CheckoutContract
 from .core.ledger import BatchLedger, LedgerRecord
+from .core.diversity import DiversityPolicy
 from .core.harbor import Package as HarborPackage
 from .core import pipeline
 from .core.scale import TaskForm
@@ -187,6 +188,8 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         # One widening walk, not a fresh source scale per page. Reconstructing the index would
         # rediscover the same pinned repositories forever and make a high-target roll non-terminating.
         collected = list(source_scale.find(page_budget))
+        diversity = DiversityPolicy(max_per_repository=4)
+        collected = [candidate for candidate in collected if diversity.accept(candidate.identity)]
         if not collected:
             return BatchReport({"attempted": 0, "emitted": 0, "yield_rate": 0.0,
                                 "refused_material": 0, "refused_factory": 0,

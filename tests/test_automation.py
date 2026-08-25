@@ -1,4 +1,11 @@
 from frf.automation import BatchReport, _index, _scale, _merge_reports
+from frf.core.diversity import DiversityPolicy, repository_key
+
+
+def test_diversity_policy_limits_one_repository_without_losing_identity():
+    assert repository_key("github:org/repo@abc#pkg.fn") == "github:org/repo"
+    policy = DiversityPolicy(max_per_repository=2)
+    assert [policy.accept("github:org/repo@abc#fn%d" % i) for i in range(3)] == [True, True, False]
 
 
 def test_default_indexes_and_scale_wiring():

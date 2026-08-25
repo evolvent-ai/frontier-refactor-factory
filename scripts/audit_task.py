@@ -11,7 +11,7 @@ from pathlib import Path
 from frf.core.harbor import validate_task_toml
 
 
-def audit(task: Path) -> dict:
+def audit(task: Path, harbor_check: bool = False, harbor_timeout: int = 120) -> dict:
     task = task.resolve()
     errors = validate_task_toml((task / "task.toml").read_text())
     required = ("task.toml", "instruction.md", "environment", "tests/verify.py",
@@ -26,19 +26,32 @@ def audit(task: Path) -> dict:
     report = json.loads(reward.read_text()) if reward.exists() else {}
     try: reward.unlink()
     except OSError: pass
+    harbor = None
+    if harbor_check:
+        try:
+            check = subprocess.run(["harbor", "check", str(task)], capture_output=True,
+                                   text=True, timeout=harbor_timeout)
+            harbor = {"returncode": check.returncode, "output":
+                      (check.stdout + check.stderr)[-1000:]}
+        except subprocess.TimeoutExpired:
+            harbor = {"timeout": harbor_timeout}
+        except OSError as exc:
+            harbor = {"error": str(exc)}
     return {"task": str(task), "schema_errors": errors, "missing": missing,
             "verify_returncode": run.returncode,
             "correct": report.get("correct", False),
             "passed": report.get("correctness_passed", 0),
             "total": report.get("correctness_total", 0),
-            "stderr": run.stderr[-500:]}
+            "stderr": run.stderr[-500:], "harbor": harbor}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("tasks", nargs="+", type=Path)
+    parser.add_argument("--harbor-check", action="store_true")
+    parser.add_argument("--harbor-timeout", type=int, default=120)
     args = parser.parse_args()
-    results = [audit(path) for path in args.tasks]
+    results = [audit(path, args.harbor_check, args.harbor_timeout) for path in args.tasks]
     print(json.dumps(results, indent=2, ensure_ascii=False))
     return 0 if all(not x["schema_errors"] and not x["missing"] and x["correct"]
                     and x["passed"] == x["total"] for x in results) else 1
