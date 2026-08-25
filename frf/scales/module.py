@@ -100,8 +100,34 @@ class ProbeSource:
         self.shapes = shapes
 
     def draw(self, count: int) -> list:
-        return [sample(self.schema, seed=i, shape=self.shapes[i % len(self.shapes)])
-                for i in range(count)]
+        probes = []
+        # Reserve a deterministic semantic prefix. Pure random draws routinely miss the
+        # distinguishing branch (for example, two random strings are almost never anagrams),
+        # allowing a constant answer to pass a superficially large corpus.
+        for i in range(count):
+            shape = self.shapes[i % len(self.shapes)]
+            args = sample(self.schema, seed=i, shape=shape)
+            if i < 8:
+                args = self._semantic(args, i, shape)
+            probes.append(args)
+        return probes
+
+    def _semantic(self, args: list, index: int, shape: dict) -> list:
+        strings = [n for n, p in enumerate(self.schema.params) if p.kind == "string"]
+        if len(strings) >= 2:
+            left, right = strings[:2]
+            cases = (("", ""), ("a", "a"), ("ab", "ba"), ("ab", "aa"),
+                     ("a", ""), ("", "a"), ("listen", "silent"), ("listen", "enlist"))
+            args[left], args[right] = cases[index]
+        for n, param in enumerate(self.schema.params):
+            if param.kind == "bool" and index < 2:
+                args[n] = bool(index)
+            elif param.kind in ("int", "float") and index < 4:
+                args[n] = (param.low, 0, param.high, 1)[index]
+            elif param.kind in ("int_array", "float_array") and index < 4:
+                size = int(shape.get(param.size, 0)) if isinstance(param.size, str) else int(param.size or 0)
+                args[n] = [0] * min(size, (0, 1, 4, 16)[index])
+        return args
 
 
 class Observer:
