@@ -295,7 +295,7 @@ class Package:
                 "The dispatch below is a JSON list of objects with keys name/module/symbol/signature; "
                 "iterate those objects by entry['name'], never unpack entries as (name, cases). "
                 "Example output shape: {'probes': [['op', 'x']], 'labels': ['valid']}. "
-                "Return at least 20 distinct probes even when n is smaller. "
+                "Return at least 60 distinct probes even when n is smaller. "
                 "Every argument must be JSON-serializable (null, boolean, number, string, list, "
                 "or object with string keys); never return sets, tuples, bytes, objects, or callables. "
                 "Include valid, invalid and boundary cases for every operation. "
@@ -351,8 +351,8 @@ def _as_argument_lists(drawn) -> list:
 
 def _audit_probe_contract(probes: list, dispatch: tuple, *, labels=None) -> None:
     """Reject generator output that cannot cover a package contract honestly."""
-    if len(probes) < 20:
-        raise ValueError("package generator returned only %d probes; need at least 20" % len(probes))
+    if len(probes) < 60:
+        raise ValueError("package generator returned only %d probes; need at least 60" % len(probes))
     names = {str(entry.get("name")) for entry in dispatch if entry.get("name")}
     seen = set()
     counts = {name: 0 for name in names}
