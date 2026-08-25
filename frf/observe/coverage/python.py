@@ -168,9 +168,14 @@ class PythonTrace:
             with open(probes_path, "w") as handle:
                 json.dump(list(self._as_args(probes)), handle)
 
-            done = subprocess.run([sys.executable, harness, target, probes_path, out_path,
-                                   self._symbol_of(spec)],
-                                  capture_output=True, text=True, timeout=600)
+            try:
+                done = subprocess.run([sys.executable, harness, target, probes_path, out_path,
+                                       self._symbol_of(spec)],
+                                      capture_output=True, text=True, timeout=600)
+            except (OSError, subprocess.SubprocessError):
+                # Coverage is advisory. Resource contention may make instrumentation exceed its
+                # bound; report unmeasured rather than turning a valid subject into a factory fault.
+                return Reach(backend=self.name)
             if done.returncode != 0 or not os.path.exists(out_path):
                 return Reach(backend=self.name)
             reached_by_file = json.load(open(out_path))
