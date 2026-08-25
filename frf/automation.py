@@ -9,6 +9,7 @@ from __future__ import annotations
 import tempfile
 import os
 import time
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -142,6 +143,16 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
     """
     task_form = _FORM_MAP.get(form.strip().lower(), TaskForm.INPLACE)
     name = scale.strip().lower()
+    # Concurrent candidate workers may discover the same human-readable task name across pinned
+    # revisions. Keep the Harbor task name stable, but isolate each candidate's output tree so one
+    # worker cannot overwrite another worker's reference/expectations during replay.
+    if candidates is not None:
+        candidate_list = list(candidates)
+        candidates = candidate_list
+        if len(candidate_list) == 1:
+            identity = str(getattr(candidate_list[0], "identity", "candidate"))
+            suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+            output_dir = os.path.join(output_dir, ".candidates", suffix)
     # Empty `index` means automatic selection, including when it came from JobConfig.index="".
     # An explicit non-empty value is honored exactly.
     if index:
