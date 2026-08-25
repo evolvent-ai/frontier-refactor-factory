@@ -179,6 +179,14 @@ def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
         # An operator stopping a batch is not a candidate failing. Re-raised so that Ctrl-C is not
         # silently recorded as twenty unsuitable packages.
         raise
+    except Exception as unexpected:
+        # Call/process subjects that fail to answer are material or adapter failures. Keep the
+        # full diagnostic and do not poison a multilingual batch's factory trust signal.
+        if type(unexpected).__name__ == "SubjectFailed":
+            detail = "%s: %s" % (type(unexpected).__name__, unexpected)
+            log("refused at subject: %s (material)" % detail.splitlines()[0][:160])
+            return Refused("subject", "subject-failed", Fault.MATERIAL, detail[:2000], candidate.identity)
+        raise
     except BaseException as unexpected:                        # noqa: BLE001 -- see the docstring
         detail = "%s: %s" % (type(unexpected).__name__, unexpected)
         log("refused at unclassified: %s (factory)" % detail.splitlines()[0][:160])
