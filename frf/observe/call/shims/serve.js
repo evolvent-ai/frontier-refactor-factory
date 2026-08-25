@@ -30,6 +30,9 @@ function describe(failure) {
   const type = (failure.constructor && failure.constructor.name) || typeof failure;
   const message = (failure instanceof Error ? failure.message : String(failure))
     .replaceAll(process.cwd(), '<workspace>');
+  if (message.includes('Cannot find module') || message.includes('ERR_MODULE_NOT_FOUND')) {
+    return type + ': module resolution failed';
+  }
   return type + ': ' + message;
 }
 
