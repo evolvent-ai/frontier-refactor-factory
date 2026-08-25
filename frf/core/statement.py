@@ -124,7 +124,7 @@ def render(facts: Facts) -> str:
     every other sentence is either fixed or read from the expectation.
     """
     protocol = ""
-    if facts.scale in ("module", "kernel", "package"):
+    if facts.channels == ("the value the call returned",):
         protocol = ("## Interface\n\nThe program is a JSON-lines service. Read one JSON object per line from standard input and "
                     "produce one JSON object per line on standard output. Each request contains an "
                     "`id` and an `args` array; preserve the id in the matching response. A successful "
