@@ -26,6 +26,7 @@ from .observe import checkout_task
 from .core.contract import CheckoutContract
 from .core.ledger import BatchLedger, LedgerRecord
 from .core.diversity import DiversityPolicy
+from .core.capabilities import capability
 from .core.harbor import Package as HarborPackage
 from .core import pipeline
 from .core.scale import TaskForm
@@ -281,6 +282,8 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
     try:
         result = factory.build(name, budget, candidates=candidates)
         summary = result.summary()
+        summary["capability"] = capability(subset or os.environ.get("FRF_REPO_LANGUAGE", "unknown"),
+                                            scale=name).__dict__
         elapsed_so_far = time.perf_counter() - started
         summary["metrics"] = {"scale": name, "batch_seconds": round(elapsed_so_far, 3),
                                "seconds_per_attempt": round(elapsed_so_far / max(1, summary.get("attempted", 0)), 3)}
