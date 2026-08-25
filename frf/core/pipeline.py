@@ -313,7 +313,12 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     # of fault lives -- an artefact built in a scratch directory and never copied, an expectation
     # frozen against a path that is not in the package. Measured on an earlier factory, 14 of 78
     # packages failed exactly this after passing everything else.
-    verdict = evidence.package_reproduces_itself(lambda: hooks.replay(path))
+    try:
+        verdict = evidence.package_reproduces_itself(lambda: hooks.replay(path))
+    except RuntimeError as why:
+        # A shipped reference that disagrees with its frozen corpus is a material nondeterminism
+        # or dependency problem. Keep factory trust intact and let sourcing move on.
+        raise Stage("emit", "package-reference-replay-failed", Fault.MATERIAL, str(why)[:2000])
     battery.record(verdict)
     if not verdict.ok:
         raise Stage("emit", "package-does-not-reproduce-itself", Fault.FACTORY, verdict.detail)
