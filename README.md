@@ -150,8 +150,8 @@ DESIGN.md                 authoritative design record
 
 ### Package
 
-- [ ] Finish real E2B smoke evidence for every first-wave package adapter: Python, JavaScript,
-  TypeScript, Go, Rust, Ruby, Java, C and C++.
+- [ ] Finish real E2B smoke evidence for every required package language, phased as:
+  Python → JavaScript/TypeScript → Go/Rust → Ruby/Java/C/C++.
 - [ ] Complete offline dependency-closure materialization for each ecosystem; reject packages that
   can only install from the network.
 - [x] Make generator validation enforce operation coverage, valid/error/boundary balance and
@@ -162,8 +162,9 @@ DESIGN.md                 authoritative design record
 ### Repo
 
 - [x] Complete RepoSurvey → build recipe → workload harvest as one automatic path.
-- [ ] Support Go/Cargo workspaces, multiple binaries, CMake targets, `package.json`/`bin`, and
-  repository-specific build targets.
+- [ ] Support native multi-language repo layouts: Go/Cargo workspaces, multiple binaries, CMake
+  targets, `package.json`/`bin`, and repository-specific build targets. This is required for the
+  production corpus; it is phased by observed source supply, not optional scope.
 - [x] Use project test scripts (`harvest_files`) and project corpus/fixtures (`harvest_corpus`).
 - [ ] Connect project benchmark/regression workloads without inventing a new subject program.
 - [ ] Produce and audit 10 real Repo performance tasks with 10 E2B workers. Keep FrontierSWE-scale
@@ -179,6 +180,14 @@ DESIGN.md                 authoritative design record
 - [x] Add bounded scalability validation for 32-worker scheduling, active-sandbox limits and resume.
 - [ ] Run a bounded multi-hour production soak; do not require 1000 real tasks merely to prove
   scheduler scalability.
+
+### Required language rollout
+
+Multi-language support is a production requirement, not a Python-only fallback. Each language
+enters the production pool only after its native E2B toolchain, offline dependency policy, source
+adapter, task shape, Harbor verifier, and independent reference replay have all passed. A language
+may be scheduled in a later phase, but it may not be silently converted to Python or counted as
+supported before its phase gate passes.
 
 `DESIGN.md` is authoritative. If implementation and design disagree, fix the implementation or update
 the design before continuing.
