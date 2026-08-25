@@ -155,7 +155,8 @@ def _run_command(args) -> int:
         calls_per_minute=cfg.llm_calls_per_minute,
     )
 
-    from .automation import run as auto_run
+    from .automation import run as auto_run, configure_e2b_slots
+    configure_e2b_slots(cfg.e2b_max_active)
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     backend = "remote" if cfg.sandboxed else "local-process"

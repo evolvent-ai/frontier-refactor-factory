@@ -39,10 +39,19 @@ class RunConfig:
     output_dir: str = "tasks"
     freeze_runs: int = 5
     max_concurrent: int = 32
+    e2b_max_active: int = 8
     llm_max_concurrent: int = 10
     llm_calls_per_minute: int = 60
     checkpoint_file: str = ""       # "" = auto-generate from timestamp
     sandboxed: bool = True
+
+    def __post_init__(self) -> None:
+        if self.max_concurrent < 1:
+            raise ValueError("max_concurrent must be at least 1")
+        if self.e2b_max_active < 1:
+            raise ValueError("e2b_max_active must be at least 1")
+        if self.freeze_runs < 1:
+            raise ValueError("freeze_runs must be at least 1")
 
     @classmethod
     def from_yaml(cls, path: str) -> "RunConfig":
@@ -78,6 +87,7 @@ class RunConfig:
             output_dir=str(data.get("output_dir", "tasks")).rstrip("/"),
             freeze_runs=int(data.get("freeze_runs", 5)),
             max_concurrent=int(data.get("max_concurrent", 32)),
+            e2b_max_active=int(data.get("e2b_max_active", 8)),
             llm_max_concurrent=int(data.get("llm_max_concurrent", 10)),
             llm_calls_per_minute=int(data.get("llm_calls_per_minute", 60)),
             checkpoint_file=str(data.get("checkpoint_file", "")),
@@ -96,6 +106,7 @@ class RunConfig:
             "output_dir": self.output_dir,
             "freeze_runs": self.freeze_runs,
             "max_concurrent": self.max_concurrent,
+            "e2b_max_active": self.e2b_max_active,
             "llm_max_concurrent": self.llm_max_concurrent,
             "llm_calls_per_minute": self.llm_calls_per_minute,
             "checkpoint_file": self.checkpoint_file,
@@ -123,6 +134,7 @@ class RunConfig:
             "output_dir": self.output_dir,
             "freeze_runs": self.freeze_runs,
             "max_concurrent": self.max_concurrent,
+            "e2b_max_active": self.e2b_max_active,
             "llm_max_concurrent": self.llm_max_concurrent,
             "llm_calls_per_minute": self.llm_calls_per_minute,
             "checkpoint_file": self.checkpoint_file,

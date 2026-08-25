@@ -107,6 +107,7 @@ Meaning of the important fields:
 - `max_concurrent`: E2B/candidate worker limit; each candidate receives an isolated workspace.
 - `FRF_E2B_MAX_ACTIVE`: maximum live remote E2B sandboxes (default `8`); workers above this
   account/resource limit wait rather than causing concurrent OOM kills.
+- `e2b_max_active`: the same limit in YAML `RunConfig`; use this for reproducible production runs.
 - `llm_max_concurrent` and `llm_calls_per_minute`: independent LLM rate limits.
 - `sandboxed: true`: mandatory for production; local-process is development-only.
 - `source_language`: source filter; it does not change the scale semantics.

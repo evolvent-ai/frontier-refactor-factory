@@ -30,6 +30,14 @@ _E2B_ACTIVE_LIMIT = max(1, int(os.environ.get("FRF_E2B_MAX_ACTIVE", "8")))
 _E2B_SLOTS = threading.BoundedSemaphore(_E2B_ACTIVE_LIMIT)
 
 
+def configure_e2b_slots(limit: int) -> None:
+    """Set the live-sandbox limit before a configured run starts."""
+    global _E2B_ACTIVE_LIMIT, _E2B_SLOTS
+    limit = max(1, int(limit))
+    _E2B_ACTIVE_LIMIT = limit
+    _E2B_SLOTS = threading.BoundedSemaphore(limit)
+
+
 @dataclass(frozen=True)
 class BatchReport:
     """A serialisable summary for one automated scale run."""
