@@ -94,7 +94,15 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
     try:
         for run_index in range(runs):
             with observer.subject(spec) as subject:
-                for probe_index, (probe_id, args) in enumerate(inputs.items(), 1):
+                items = list(inputs.items())
+                if hasattr(subject, "call_many"):
+                    # Remote call seams can batch bounded JSONL requests, avoiding one E2B
+                    # process round-trip per package operation while preserving response order.
+                    answers = subject.call_many("entry", [args for _, args in items])
+                    for (probe_id, _), answer in zip(items, answers.values()):
+                        observed[probe_id].append(answer)
+                    continue
+                for probe_index, (probe_id, args) in enumerate(items, 1):
                     if probe_index == 1 or probe_index % 10 == 0 or probe_index == len(inputs):
                         print("[freeze] run %d/%d probe %d/%d" %
                               (run_index + 1, runs, probe_index, len(inputs)), flush=True)
