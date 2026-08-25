@@ -60,13 +60,36 @@ def _assemble_with_environment(*args, **kwargs):
 checker.assemble_check_task = _assemble_with_environment
 
 
+def repair_task(path: Path) -> bool:
+    """Apply only mechanical, review-safe repairs; never touch verifier or expectations."""
+    changed = False
+    instruction = path / "instruction.md"
+    if instruction.exists():
+        text = instruction.read_text()
+        additions = []
+        if "## What you submit" not in text:
+            additions.append("## What you submit\n\nCreate the required `/app/run.sh` entrypoint.")
+        if "## Rules" not in text:
+            additions.append("## Rules\n\nWork offline and do not access the reference or verifier artifacts.")
+        if additions:
+            instruction.write_text(text.rstrip() + "\n\n" + "\n\n".join(additions) + "\n")
+            changed = True
+    return changed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("task", type=Path)
     parser.add_argument("--agent", default="codex")
     parser.add_argument("--model", required=True)
     parser.add_argument("--concurrent", type=int, default=1)
+    parser.add_argument("--repair", action="store_true")
+    parser.add_argument("--repair-only", action="store_true")
     args = parser.parse_args()
+    if args.repair:
+        changed = repair_task(args.task)
+        if args.repair_only:
+            return 0 if changed else 2
     report, _ = asyncio.run(checker.run_checks(
         args.task, agent=args.agent, model=args.model,
         environment=checker.EnvironmentType.E2B,

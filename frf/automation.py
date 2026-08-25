@@ -288,6 +288,12 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
                 ok = False
                 detail = ""
                 for _ in range(max(1, attempts)):
+                    if _ and harbor_repair:
+                        repair_command = [os.path.join(os.path.dirname(os.path.dirname(__file__)), ".venv", "bin", "python"),
+                                          os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "harbor_check_e2b.py"),
+                                          outcome.path, "--model", os.environ.get("LLM_MODEL", "gpt-5.6-terra"), "--repair", "--repair-only"]
+                        subprocess.run(repair_command, capture_output=True, text=True, timeout=1800,
+                                       env=dict(os.environ))
                     command = [os.path.join(os.path.dirname(os.path.dirname(__file__)), ".venv", "bin", "python"),
                                os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "harbor_check_e2b.py"),
                                outcome.path, "--model", os.environ.get("LLM_MODEL", "gpt-5.6-terra")]
