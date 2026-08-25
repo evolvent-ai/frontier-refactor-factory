@@ -791,6 +791,15 @@ for name, target in scripts.items():
             raise ValueError("repository %s yielded flags-only probes without a real input workload"
                              % self._material.identity)
         _validate_scenarios_call_subject(scenarios)
+        # Cheap E2B smoke before full freeze: exercise a few repository-owned scenarios so malformed
+        # commands, missing entrypoints and broken fixtures are rejected before the full corpus cost.
+        smoke = scenarios[:min(3, len(scenarios))]
+        try:
+            observer = self.observe()
+            for scenario in smoke:
+                observer.run(spec, scenario)
+        except Exception as exc:
+            raise ValueError("repository smoke failed before freeze: %s" % str(exc)[:1200]) from exc
         # The scenario corpus is the concrete contract for a process task. Feed a compact summary
         # back into the statement so a solver can see what is actually exercised instead of only
         # receiving the repository's broad README description.
