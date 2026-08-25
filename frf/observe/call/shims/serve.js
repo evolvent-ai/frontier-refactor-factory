@@ -28,7 +28,8 @@ function describe(failure) {
   // The constructor's name rather than `.name`, because a subclass of Error that does not assign
   // `name` still answers "Error" there, and the type is part of the behaviour being compared.
   const type = (failure.constructor && failure.constructor.name) || typeof failure;
-  const message = failure instanceof Error ? failure.message : String(failure);
+  const message = (failure instanceof Error ? failure.message : String(failure))
+    .replaceAll(process.cwd(), '<workspace>');
   return type + ': ' + message;
 }
 
