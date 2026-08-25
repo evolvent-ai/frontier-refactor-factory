@@ -82,8 +82,9 @@ def _worth_probing(function) -> bool:
     explosive = ("combination", "permutation", "subset", "backtrack", "fibonacci", "power_set")
     if any(word in symbol.lower() for word in explosive):
         return False
-    if "search" in symbol.lower() and any(getattr(p, "kind", "") in {"int_array", "float_array"}
-                                          for p in params):
+    if "search" in symbol.lower() and any(
+            (p.get("kind", "") if isinstance(p, dict) else getattr(p, "kind", ""))
+            in {"int_array", "float_array"} for p in params):
         # Search routines conventionally require an ordered domain. If the AST schema did not
         # capture that precondition, random probes are mostly out-of-contract and produce a weak
         # task (as opposed to a useful benchmark), so defer this candidate.
