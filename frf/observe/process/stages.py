@@ -19,6 +19,7 @@ and identical because it is the same code in `core` reached through the same int
 from __future__ import annotations
 
 import os
+from ...core.capabilities import capability
 import time
 
 import os
@@ -262,7 +263,8 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
                     # instruction that correctly said 57 and 5 -- the one claim a reader checks.
                     "probes": corpus.probes, "freeze_runs": facts.freeze_runs,
                     "adequacy": corpus.adequacy, "evidence": checks.to_json(),
-                    "discard_rate": round(corpus.discard_rate, 4)})
+                    "discard_rate": round(corpus.discard_rate, 4),
+                    "capability": capability(spec.language, scale=spec.scale).__dict__})
 
     path = os.path.join(destination, spec.name)
     harbor.write(path, package)
