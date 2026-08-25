@@ -255,6 +255,8 @@ class Package:
         if isinstance(drawn, dict):
             labels = drawn.get("labels")
             drawn = drawn.get("probes")
+        if isinstance(labels, list):
+            labels = ["error" if label == "invalid" else label for label in labels]
         probes = _as_argument_lists(drawn)
         if len(probes) < 60 and self._material.language in ("javascript", "typescript"):
             # Native JS packages often expose functions without machine-readable signatures. Add a
