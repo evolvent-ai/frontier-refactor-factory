@@ -359,8 +359,14 @@ def _index(name: str, *, subset: str, scale: str = ""):
         return cls(github, scale=scale, log=lambda message: print("[source] " + message, flush=True))
 
     if name == "github-packages":
-        github = source.GitHub(language=language or "python", query="topic:algorithms", scale="package")
-        return cls(github)
+        if language:
+            return cls(source.GitHub(language=language, query="topic:algorithms", scale="package"))
+        # Open-world default: enumerate multiple language sources instead of silently restricting
+        # package discovery to Python. Unsupported adapters remain explicit source rejections.
+        package_languages = ("python", "javascript", "typescript", "rust", "go", "ruby", "java")
+        return cls(Chain([source.GitHub(language=item, query="topic:algorithms", scale="package")
+                          for item in package_languages],
+                         name="github-packages(" + "|".join(package_languages) + ")"))
 
     if name == "github":
         if scale in ("repo",):
