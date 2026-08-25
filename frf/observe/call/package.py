@@ -168,7 +168,7 @@ def _serve_here(room: str, shim, material) -> None:
     os.chmod(run, 0o755)
 
 
-def drive(path: str) -> tuple:
+def drive(path: str, *, backend=None) -> tuple:
     """E7: drive the EMITTED package with the reference it ships. -> (passed, total).
 
     Everything else the pipeline checks measured the build tree. This opens what was actually
@@ -178,6 +178,36 @@ def drive(path: str) -> tuple:
     """
     import subprocess
     import tempfile
+
+    if backend is not None and getattr(backend, "name", "") == "remote":
+        import uuid
+        remote_root = "/tmp/frf-package-replay-%s" % uuid.uuid4().hex[:12]
+        backend.push(path, remote_root)
+        result = backend.run(
+            ["python3", "%s/tests/verify.py" % remote_root,
+             "--task-root", "%s/tests" % remote_root,
+             "--workspace", "%s/tests/reference" % remote_root],
+            workdir=remote_root,
+            env={"REWARD_PATH": "%s/reward.json" % remote_root,
+                 "SUBMISSION_ROOT": "%s/tests/reference" % remote_root},
+            timeout=1800)
+        reports = []
+        for line in (result.stdout or "").splitlines():
+            try:
+                value = json.loads(line)
+                if isinstance(value, dict) and "correctness_total" in value:
+                    reports.append(value)
+            except (TypeError, ValueError):
+                continue
+        report = reports[-1] if reports else {}
+        if not report:
+            raise RuntimeError("remote package replay produced no report: %s" % result.tail(500))
+        passed = int(report.get("correctness_passed", 0))
+        total = int(report.get("correctness_total", 0))
+        if passed != total:
+            raise RuntimeError(report.get("note") or
+                               "package reference replay mismatch (%d/%d)" % (passed, total))
+        return passed, total
 
     tests = os.path.join(path, "tests")
     with tempfile.TemporaryDirectory() as logs:

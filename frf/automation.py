@@ -267,7 +267,8 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
             call_package.write_tests(path, corpus, spec=material, material=material)
 
         seam = call_stages.Seam(implementation, destination=output_dir,
-                                write_tests=writer, drive=call_package.drive)
+                                write_tests=writer,
+                                drive=lambda path: call_package.drive(path, backend=factory.backend()))
     else:
         method = getattr(implementation, "write_tests", None)
         if method is None:
