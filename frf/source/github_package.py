@@ -62,18 +62,20 @@ class GitHubPackages:
         url = str(detail.get("repository") or "")
         commit = str(detail.get("commit") or "")
         identity = str(detail.get("identity") or "")
-        if not url or not commit or repository.language.lower() not in ("python", ""):
+        language = repository.language.lower()
+        if not url or not commit or language not in ("python", "javascript", "typescript"):
             self.rejection_counts["unsupported-or-unpinned"] = self.rejection_counts.get("unsupported-or-unpinned", 0) + 1
             return None
         root = self._materialise(url, commit)
         if root is None:
             self.rejection_counts["checkout-failed"] = self.rejection_counts.get("checkout-failed", 0) + 1
             return None
-        package_root, package_name = _find_package_root(root)
+        package_root, package_name = _find_package_root(root, language)
         if not package_root or not package_name:
             self.rejection_counts["no-package-root"] = self.rejection_counts.get("no-package-root", 0) + 1
             return None
-        dispatch = _public_dispatch(root, package_root, package_name)
+        dispatch = (_public_dispatch(root, package_root, package_name) if language == "python"
+                    else _javascript_dispatch(root, package_root, package_name))
         # The call seam is JSON-only. Do not ask the model to invent an encoding for bytes, paths,
         # handles, or other non-JSON arguments; retain only operations the adapter proved safe.
         dispatch = [entry for entry in dispatch if bool(entry.get("json_safe", True))]
@@ -85,7 +87,7 @@ class GitHubPackages:
         dispatch = dispatch[:40]
         return Candidate(
             identity="github:%s@%s" % (identity, commit[:12]),
-            scale="package", language="python", source="github-packages",
+            scale="package", language=("javascript" if language == "javascript" else language), source="github-packages",
             detail={
                 "root": root,
                 "package_name": package_name,
@@ -120,7 +122,19 @@ class GitHubPackages:
         return room
 
 
-def _find_package_root(root: str):
+def _find_package_root(root: str, language: str = "python"):
+    if language in ("javascript", "typescript"):
+        manifest = os.path.join(root, "package.json")
+        if os.path.isfile(manifest):
+            try:
+                import json
+                data = json.load(open(manifest, encoding="utf-8"))
+                name = str(data.get("name") or "").split("/")[-1]
+                if name:
+                    return root, name
+            except (OSError, ValueError, TypeError):
+                return "", ""
+        return "", ""
     candidates = []
     for directory, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in (".git", "tests", "test", "docs", "examples")]
@@ -140,6 +154,11 @@ def _find_package_root(root: str):
     # into an internal helper task.
     _, directory, name = sorted(candidates, key=lambda x: (x[0], x[1]))[0]
     return directory, name
+
+
+def _javascript_dispatch(root: str, package_root: str, package_name: str):
+    from .package_adapters import _javascript
+    return _javascript(root, package_name, package_root)
 
 
 def _public_dispatch(root: str, package_root: str, package_name: str):

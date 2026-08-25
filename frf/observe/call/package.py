@@ -107,6 +107,18 @@ def _serve_package_here(room: str, shim, material) -> None:
         destination = os.path.join(room, package_name)
         if os.path.abspath(package_root) != os.path.abspath(destination):
             shutil.copytree(package_root, destination, dirs_exist_ok=True)
+    if getattr(material, "language", "python") in ("javascript", "typescript"):
+        adapter = os.path.join(room, "subject.js")
+        dispatch = {entry["name"]: (entry["module"], entry["symbol"])
+                    for entry in material.dispatch}
+        with open(adapter, "w", encoding="utf-8") as handle:
+            handle.write("const DISPATCH = %r;\nexports.entry = async function(op, ...args) {\n"
+                         "  if (!DISPATCH[op]) throw new Error('unknown operation');\n"
+                         "  const [mod, symbol] = DISPATCH[op];\n"
+                         "  const loaded = await import(mod);\n"
+                         "  return loaded[symbol](...args);\n}\n" % dispatch)
+        _serve_here(room, shim, type("AdapterMaterial", (), {"source_path": adapter, "symbol": "entry"})())
+        return
     adapter = os.path.join(room, "subject.py")
     dispatch = {entry["name"]: (entry["module"], entry["symbol"])
                 for entry in material.dispatch}
