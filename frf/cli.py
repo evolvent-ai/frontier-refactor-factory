@@ -174,6 +174,7 @@ def _run_command(args) -> int:
                               # Parsed from the config and previously dropped here, so a run that
                               # asked for a different number of freeze passes silently got five.
                               freeze_runs=cfg.freeze_runs,
+                              ledger_file=cfg.ledger_file,
                               candidate_workers=max(1, cfg.max_concurrent // max(1, len(cfg.jobs))))
             return job, report, None
         except Exception as exc:

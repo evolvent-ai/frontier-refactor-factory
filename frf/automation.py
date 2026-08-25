@@ -22,6 +22,7 @@ from .observe.probes.generator import run_in as run_generator_in
 from .observe.process import stages as process_stages
 from .observe import checkout_task
 from .core.contract import CheckoutContract
+from .core.ledger import BatchLedger, LedgerRecord
 from .core.harbor import Package as HarborPackage
 from .core import pipeline
 from .core.scale import TaskForm
@@ -131,7 +132,7 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         output_dir: str = "tasks", backend: str = "remote", subset: str = "",
         form: str = "inplace", target_language: str = "",
         freeze_runs: int = pipeline.FREEZE_RUNS, candidates=None,
-        candidate_workers: int = 1) -> BatchReport:
+        candidate_workers: int = 1, ledger_file: str = "") -> BatchReport:
     """Run one scale from an automatically selected enumerable index.
 
     The returned report separates the pipeline summary from elapsed wall time. The call/process
@@ -267,6 +268,15 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
     try:
         result = factory.build(name, budget, candidates=candidates)
         summary = result.summary()
+        if ledger_file:
+            ledger = BatchLedger(ledger_file)
+            for outcome in result.batch.emitted + result.batch.refused:
+                ledger.append(LedgerRecord(
+                    identity=getattr(outcome, "identity", getattr(getattr(outcome, "spec", None), "name", "")),
+                    scale=name, status="emitted" if outcome.ok else "refused",
+                    stage=getattr(outcome, "stage", ""), reason=getattr(outcome, "reason", ""),
+                    fault=getattr(getattr(outcome, "fault", None), "value", ""),
+                    path=getattr(outcome, "path", "")))
         coverage = getattr(idx, "last_coverage", None)
         if coverage is not None:
             summary["sourcing"] = coverage.to_json()

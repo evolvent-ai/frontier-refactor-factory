@@ -43,6 +43,7 @@ class RunConfig:
     llm_max_concurrent: int = 10
     llm_calls_per_minute: int = 60
     checkpoint_file: str = ""       # "" = auto-generate from timestamp
+    ledger_file: str = ""
     sandboxed: bool = True
 
     def __post_init__(self) -> None:
@@ -91,6 +92,7 @@ class RunConfig:
             llm_max_concurrent=int(data.get("llm_max_concurrent", 10)),
             llm_calls_per_minute=int(data.get("llm_calls_per_minute", 60)),
             checkpoint_file=str(data.get("checkpoint_file", "")),
+            ledger_file=str(data.get("ledger_file", "")),
             sandboxed=bool(data.get("sandboxed", True)),
         )
 
@@ -110,6 +112,7 @@ class RunConfig:
             "llm_max_concurrent": self.llm_max_concurrent,
             "llm_calls_per_minute": self.llm_calls_per_minute,
             "checkpoint_file": self.checkpoint_file,
+            "ledger_file": self.ledger_file,
             "sandboxed": self.sandboxed,
             "jobs": [],
         }
