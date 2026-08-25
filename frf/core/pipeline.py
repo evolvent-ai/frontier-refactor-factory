@@ -223,7 +223,13 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     observer = scale.observe()
 
     log("stage freeze: start runs=%d probes=%d" % (freeze_runs, getattr(source, "count", 0)))
-    report = hooks.freeze(spec, observer, source, runs=freeze_runs)
+    try:
+        report = hooks.freeze(spec, observer, source, runs=freeze_runs)
+    except RuntimeError as why:
+        # A repository-owned corpus can contain malformed commands or fixtures. Those are
+        # material failures; letting them escape as unclassified makes one bad repo poison the
+        # batch trust signal and hides the actionable source diagnosis.
+        raise Stage("freeze", "reference-corpus-failed", Fault.MATERIAL, str(why)[:2000])
     _check_corpus(report)
     log("froze %d probe(s), %d point(s), discarded %.0f%%"
         % (report.probes, report.graded_points, 100 * report.discard_rate))
