@@ -97,9 +97,10 @@ class Observer:
                         ignore=shutil.ignore_patterns("__pycache__", ".git"))
         dispatch = {entry["name"]: (entry["module"], entry["symbol"])
                     for entry in self.material.dispatch}
-        adapter = os.path.join(self.workspace, "subject.py")
+        native = spec.language in ("javascript", "typescript")
+        adapter = os.path.join(self.workspace, "subject.js" if native else "subject.py")
         with open(adapter, "w", encoding="utf-8") as handle:
-            handle.write(_adapter_source(dispatch))
+            handle.write(_native_adapter_source(dispatch) if native else _adapter_source(dispatch))
         _, self._argv = shims.materialise(self.workspace, spec.language, adapter, "entry")
 
     def subject(self, spec: Spec | None = None, *, mutated: bool = False,
@@ -404,4 +405,18 @@ def entry(op, *args):
         raise ValueError("unknown operation: %%s" %% op)
     module_name, symbol = _DISPATCH[op]
     return getattr(importlib.import_module(module_name), symbol)(*args)
+""" % dispatch
+
+
+def _native_adapter_source(dispatch: dict) -> str:
+    return """const DISPATCH = %r;
+exports.entry = async function(op, ...args) {
+  if (!DISPATCH[op]) throw new Error('unknown operation: ' + op);
+  const [mod, symbol] = DISPATCH[op];
+  let loaded;
+  try { loaded = await import(mod); } catch (e) { loaded = require(mod); }
+  const fn = loaded[symbol] || (loaded.default && loaded.default[symbol]) || loaded.default;
+  if (typeof fn !== 'function') throw new Error('export is not callable: ' + symbol);
+  return fn(...args);
+};
 """ % dispatch
