@@ -149,7 +149,9 @@ def build_template(api_key: str) -> str:
     # e2b 2.x exposes deployment as the class method `Template.build(template)`; the
     # builder returned by the fluent setup API is only the template definition. Request
     # enough resources for package/repo builds and return the resulting template id.
-    build_info = Template.build(builder, name="frf-dind", cpu_count=4, memory_mb=4096,
+    # Package/repo freezes can run concurrently inside separate sandboxes. 4 GiB made otherwise
+    # valid subjects get SIGKILL under the 32-worker smoke; provision enough headroom per sandbox.
+    build_info = Template.build(builder, name="frf-dind", cpu_count=8, memory_mb=8192,
                                 api_key=api_key)
     template_id = getattr(build_info, "template_id", None) or getattr(build_info, "id", None)
     if not template_id:
