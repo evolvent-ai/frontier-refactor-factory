@@ -280,6 +280,9 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
     try:
         result = factory.build(name, budget, candidates=candidates)
         summary = result.summary()
+        elapsed_so_far = time.perf_counter() - started
+        summary["metrics"] = {"scale": name, "batch_seconds": round(elapsed_so_far, 3),
+                               "seconds_per_attempt": round(elapsed_so_far / max(1, summary.get("attempted", 0)), 3)}
         if harbor_check:
             passed = failed = 0
             harbor_failures = []
@@ -322,7 +325,8 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
                     scale=name, status="emitted" if outcome.ok else "refused",
                     stage=getattr(outcome, "stage", ""), reason=getattr(outcome, "reason", ""),
                     fault=getattr(getattr(outcome, "fault", None), "value", ""),
-                    path=getattr(outcome, "path", "")))
+                    path=getattr(outcome, "path", ""),
+                    seconds=round(elapsed_so_far / max(1, summary.get("attempted", 0)), 3)))
         coverage = getattr(idx, "last_coverage", None)
         if coverage is not None:
             summary["sourcing"] = coverage.to_json()
