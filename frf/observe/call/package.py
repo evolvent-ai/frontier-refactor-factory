@@ -247,7 +247,10 @@ class Subject:
         line = self.proc.stdout.readline()
         if not line:
             raise RuntimeError("the submission exited without answering")
-        return json.loads(line)
+        reply = json.loads(line)
+        if reply.get("id") != payload.get("id"):
+            raise RuntimeError("the submission returned a mismatched response id")
+        return reply
 
     def call(self, args):
         self.next_id += 1

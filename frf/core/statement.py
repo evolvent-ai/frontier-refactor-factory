@@ -127,7 +127,9 @@ def render(facts: Facts) -> str:
     if facts.scale in ("module", "kernel", "package"):
         protocol = ("## Interface\n\nThe program is a JSON-lines service. Read one JSON object per line from standard input and "
                     "produce one JSON object per line on standard output. Each request contains an "
-                    "`id` and an `args` array; preserve the id in the matching response. The "
+                    "`id` and an `args` array; preserve the id in the matching response. A successful "
+                    "response has `{\\\"id\\\": id, \\\"ok\\\": true, \\\"value\\\": result}`; a failed "
+                    "call has `{\\\"id\\\": id, \\\"ok\\\": false, \\\"error\\\": message}`. The "
                     "reference artifact shows the selected symbol's argument order and result shape.\n")
     return "\n\n".join((
         "# %s" % facts.name,
