@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
 
-from . import evidence
+from . import evidence, harbor
 from .scale import Candidate, Scale, Spec
 
 # How many times the reference is run before anything it did is believed. Measured rather than
@@ -302,6 +302,11 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     log("evidence: %d check(s) held" % len(battery.verdicts))
 
     path = hooks.emit(spec, report, battery)
+
+    quality_errors = harbor.deterministic_quality(path)
+    if quality_errors:
+        raise Stage("emit", "deterministic-quality-failed", Fault.FACTORY,
+                    "; ".join(quality_errors))
 
     # THE LAST GATE OPENS WHAT WAS WRITTEN. Everything above measured the build tree. This drives
     # the emitted package with the reference the package itself ships, which is where a whole class

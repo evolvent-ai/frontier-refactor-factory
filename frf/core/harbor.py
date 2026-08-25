@@ -379,6 +379,29 @@ def validate_task_toml(toml_text: str) -> list[str]:
         return [str(exc)]
 
 
+def deterministic_quality(path: str) -> list[str]:
+    """Cheap rubric invariants that do not require an agent or an E2B sandbox."""
+    errors: list[str] = []
+    root = os.path.abspath(path)
+    task_file = os.path.join(root, "task.toml")
+    if not os.path.isfile(task_file):
+        # Test/custom seams may emit a non-Harbor artifact; their own replay gate remains the
+        # authority. The Harbor preflight applies only once the task claims Harbor layout.
+        return []
+    if not os.path.isfile(os.path.join(root, "tests", "verify.py")):
+        return []
+    errors.extend(validate_task_toml(open(task_file, encoding="utf-8").read()))
+    for required in ("instruction.md", "environment", "tests/verify.py", "tests/test.sh"):
+        if not os.path.exists(os.path.join(root, required)):
+            errors.append("missing %s" % required)
+    environment = os.path.join(root, "environment")
+    if os.path.exists(os.path.join(environment, "tests")):
+        errors.append("runtime environment contains tests")
+    if os.path.exists(os.path.join(environment, "reference")):
+        errors.append("runtime environment contains reference")
+    return errors
+
+
 
 def _safe_task_name(name: str) -> str:
     """Harbor registry names allow only organization/name-safe characters."""
