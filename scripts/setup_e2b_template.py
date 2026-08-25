@@ -91,6 +91,8 @@ def _write_env_var(env_path: str, key: str, value: str) -> None:
 # ---------------------------------------------------------------------------
 
 DOCKER_INSTALL_CMDS = [
+    # Harbor starts agents in /app and collects verifier logs from /logs.
+    "mkdir -p /app /logs/verifier",
     "apt-get update -qq",
     (
         "apt-get install -y --no-install-recommends "
@@ -151,7 +153,7 @@ def build_template(api_key: str) -> str:
     # enough resources for package/repo builds and return the resulting template id.
     # Package/repo freezes can run concurrently inside separate sandboxes. 4 GiB made otherwise
     # valid subjects get SIGKILL under the 32-worker smoke; provision enough headroom per sandbox.
-    build_info = Template.build(builder, name="frf-dind", cpu_count=8, memory_mb=8192,
+    build_info = Template.build(builder, name="frf-dind-v2", cpu_count=8, memory_mb=8192,
                                 api_key=api_key)
     template_id = getattr(build_info, "template_id", None) or getattr(build_info, "id", None)
     if not template_id:

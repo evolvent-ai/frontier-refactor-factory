@@ -193,6 +193,12 @@ def dockerfile_for(source_language: str, target_language: str,
         lines.append("RUN pip install --no-cache-dir %s" % quoted)
         lines.append("")
 
+    # Harbor's E2B runner uses /app as cwd before copying the task and collects
+    # verifier artifacts below /logs; create both explicitly for images/runners
+    # that do not materialize WORKDIR until the first command.
+    lines.append("RUN mkdir -p /app /logs/verifier")
+    lines.append("")
+
     # --- WORKDIR ---
     lines.append("WORKDIR /app")
     lines.append("")
@@ -439,6 +445,12 @@ flat = {
     "note": str(detail.get("note", "")),
 }
 json.dump(flat, open("/logs/verifier/reward.json", "w"), indent=2)
+# Harbor's check wrapper collects this exact artifact from the task workspace.
+try:
+    os.makedirs("/app", exist_ok=True)
+    json.dump(flat, open("/app/check-result.json", "w"), indent=2)
+except OSError as exc:
+    pass
 print("[test.sh] reward.json:", flat)
 PY
 exit $rc
