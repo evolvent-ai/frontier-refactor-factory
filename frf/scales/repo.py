@@ -1084,6 +1084,17 @@ for name, target in scripts.items():
             raise ValueError("repository %s has no discoverable executable shape" % candidate.identity)
         if candidate.source == "github" and not detail.get("scenarios") and not repo_survey.has_workload:
             raise ValueError("repository %s has no deterministic input/corpus workload" % candidate.identity)
+        quality_files = [os.path.join(root, name) for name in ("README.md", "pyproject.toml", "setup.py")
+                         if os.path.isfile(os.path.join(root, name))]
+        quality_text = "\n".join(open(name, encoding="utf-8", errors="replace").read().lower()
+                                   for name in quality_files)
+        if candidate.source == "github" and any(token in quality_text for token in
+               ("equivalant", "depedency", "inadvertant", "failes", "ciites.csv")):
+            raise ValueError("repository %s contains obvious documentation/path typos" % candidate.identity)
+        pyproject = os.path.join(root, "pyproject.toml")
+        if candidate.source == "github" and os.path.isfile(pyproject) and any(token in open(pyproject, encoding="utf-8").read()
+                                             for token in ("^", "poetry-core>=", "setuptools>=")):
+            raise ValueError("repository %s has unpinned Python build/dependency constraints" % candidate.identity)
         return Material(
             identity=candidate.identity, language=candidate.language,
             root=root, build=build,
