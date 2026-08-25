@@ -217,6 +217,9 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
         # execution backend. Both are candidate/setup failures here, never an unclassified
         # factory crash; the detail remains visible for diagnosis.
         raise Stage("probes", "probe-generator-failed", Fault.MATERIAL, str(why)[:2000])
+    # A scale may enrich the immutable Spec with material-derived contract details while drawing
+    # probes (repo workloads do this). Carry that replacement into freeze, adequacy and emit.
+    spec = getattr(scale, "_spec", spec)
     observer = scale.observe()
 
     log("stage freeze: start runs=%d probes=%d" % (freeze_runs, getattr(source, "count", 0)))

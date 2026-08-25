@@ -801,7 +801,8 @@ for name, target in scripts.items():
                   "files for these repository-owned cases." %
                   (len(scenarios), ", ".join(commands[:8]) or "the repository entrypoint",
                    ", ".join(fixtures[:8]) or "stdin cases"))
-        spec.description = (spec.description or "").rstrip() + detail
+        from dataclasses import replace
+        self._spec = replace(spec, description=(spec.description or "").rstrip() + detail)
         return ProbeSource(scenarios)
 
     def _harvest_repository_workload(self) -> tuple:
