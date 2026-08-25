@@ -71,14 +71,7 @@ def _task_line(facts: Facts) -> str:
 
 def _grading(facts: Facts) -> str:
     channels = "\n".join("* **%s**" % name.replace("_", " ") for name in facts.channels)
-    protocol = (
-        "The submission is a JSON-lines service: read one JSON object per line from stdin and "
-        "write exactly one JSON result per line to stdout; the exact request fields and result "
-        "shape are documented by the reference artifact and must be preserved.\n\n"
-        if facts.scale in ("module", "kernel", "package") else ""
-    )
     return (
-        protocol +
         "We run **%d probe(s)** against your submission and compare what comes back with what the "
         "reference produced. For each we look at:\n\n%s\n\n"
         "That is **%d graded observation(s)** in total.\n\n"
