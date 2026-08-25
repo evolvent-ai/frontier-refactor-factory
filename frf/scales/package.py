@@ -256,6 +256,22 @@ class Package:
             labels = drawn.get("labels")
             drawn = drawn.get("probes")
         probes = _as_argument_lists(drawn)
+        if len(probes) < 60 and self._material.language in ("javascript", "typescript"):
+            # Native JS packages often expose functions without machine-readable signatures. Add a
+            # bounded JSON-safe boundary battery rather than emitting a tiny, lucky corpus; the
+            # reference still decides which cases are valid and freeze/replay can reject it.
+            expanded = list(probes)
+            labels_out = list(labels) if labels is not None else ["valid"] * len(probes)
+            cases = [([], "boundary"), ([None], "error"), ([0], "boundary"), ([""], "boundary"),
+                     ([[]], "error"), ([{}], "error")]
+            for entry in self._material.dispatch:
+                name = str(entry.get("name"))
+                for args, label in cases:
+                    if len(expanded) >= 60:
+                        break
+                    expanded.append([name] + args)
+                    labels_out.append(label)
+            probes, labels = expanded, labels_out
         _audit_probe_contract(probes, self._material.dispatch, labels=labels)
         from dataclasses import replace
         counts = {}
