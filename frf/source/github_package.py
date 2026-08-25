@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import os
+import sys
 import shutil
 import subprocess
 import warnings
@@ -165,6 +166,17 @@ def _public_dispatch(root: str, package_root: str, package_name: str):
                     warnings.simplefilter("ignore", SyntaxWarning)
                     tree = ast.parse(open(path, encoding="utf-8", errors="replace").read(), path)
             except (OSError, SyntaxError, ValueError):
+                continue
+            imported = set()
+            for child in ast.walk(tree):
+                if isinstance(child, ast.Import):
+                    imported.update(alias.name.split(".", 1)[0] for alias in child.names)
+                elif isinstance(child, ast.ImportFrom) and child.module and child.level == 0:
+                    imported.add(child.module.split(".", 1)[0])
+            own = {package_name.lower().replace("-", "_")}
+            foreign = {name for name in imported
+                       if name not in own and name not in getattr(sys, "stdlib_module_names", ())}
+            if foreign:
                 continue
             rel = os.path.relpath(path, package_root)[:-3].replace(os.sep, ".")
             module_name = package_name + ("." + rel if rel != "__init__" else "")
