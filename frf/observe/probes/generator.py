@@ -27,7 +27,7 @@ import tempfile
 
 # How long a generator may run inside the container. Generous, because building two hundred inputs
 # for a wide surface can be real work; bounded, because a generator that loops must not hold a batch.
-TIMEOUT = 300.0
+TIMEOUT = float(os.environ.get("FRF_GENERATOR_TIMEOUT", "900"))
 
 # What the container is asked to run. The generator is written beside it and imported, rather than
 # concatenated into it, so a syntax error is reported against the generator's own line numbers.

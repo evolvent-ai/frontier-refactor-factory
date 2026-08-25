@@ -31,6 +31,7 @@ import json
 import urllib.error
 import urllib.request
 import time
+import os
 
 from . import credentials
 
@@ -40,7 +41,7 @@ DEFAULT_MODEL = "gpt-5.6-terra"
 
 # Long enough for a model to write fifty lines, short enough that a hung gateway does not hold a
 # batch. Sourcing has the same bound for the same reason.
-TIMEOUT = 180.0
+TIMEOUT = float(os.environ.get("FRF_LLM_TIMEOUT", "600"))
 
 
 class ModelError(RuntimeError):
