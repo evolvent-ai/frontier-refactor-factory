@@ -610,6 +610,10 @@ class Repo:
         # command-not-found and every probe becomes a trivial fixed failure.
         dockerfile = os.path.join(path, "environment", "Dockerfile")
         if os.path.exists(dockerfile):
+            ignore = os.path.join(path, "environment", ".dockerignore")
+            with open(ignore, "w", encoding="utf-8") as handle:
+                handle.write(".git\n.gitignore\ntests\ntest\n**/tests\n**/test\nfixtures\n**/fixtures\n"
+                             "docs\n**/docs\n*.md\n*.rst\n")
             helper = os.path.join(path, "environment", ".frf_install_scripts.py")
             with open(helper, "w", encoding="utf-8") as handle:
                 handle.write("""import pathlib, tomllib
