@@ -199,8 +199,13 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
     e2b_slot = backend == "remote"
     if e2b_slot:
         _E2B_SLOTS.acquire()
-    factory = Factory(Settings(sandboxed=True, backend=backend, output_dir=output_dir,
-                               freeze_runs=freeze_runs), log=print)
+    try:
+        factory = Factory(Settings(sandboxed=True, backend=backend, output_dir=output_dir,
+                                   freeze_runs=freeze_runs), log=print)
+    except Exception:
+        if e2b_slot:
+            _E2B_SLOTS.release()
+        raise
     # Bind the actual selected backend into the scale before any observer is built. Constructing
     # the scale first silently made automatic runs use local execution even when Settings required
     # remote E2B.
