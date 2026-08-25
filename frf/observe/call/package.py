@@ -244,6 +244,10 @@ def digest(ok, value, error):
             "ValueError: max() iterable argument is empty",
             "ValueError: max() arg is an empty sequence"}:
         error = "ValueError: max() arg is an empty sequence"
+    if isinstance(error, str) and ("Cannot find module" in error or
+                                   "module resolution failed" in error or
+                                   "ERR_MODULE_NOT_FOUND" in error):
+        error = "Error: module resolution failed"
     body = json.dumps({"ok": ok, "value": value, "error": error},
                       sort_keys=True, separators=(",", ":"), default=str)
     return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
