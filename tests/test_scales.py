@@ -27,9 +27,19 @@ from frf.scales.repo import (                                          # noqa: E
     _setup_console_script,
     _cargo_package_name,
 )
+from frf.observe.probes.schema import Schema                              # noqa: E402
+from frf.scales.module import ProbeSource                                  # noqa: E402
 
 _NUMERIC = {"params": [{"kind": "float_array", "dtype": "float64", "size": "n"}]}
 _SCALAR = {"params": [{"kind": "int", "low": 0, "high": 100}]}
+
+
+def test_module_probe_prefix_contains_semantic_positive_and_negative_cases():
+    schema = Schema.from_json({"params": [{"kind": "string"}, {"kind": "string"}]})
+    probes = ProbeSource(schema).draw(8)
+    assert ["ab", "ba"] in probes
+    assert ["ab", "aa"] in probes
+    assert ["listen", "silent"] in probes
 
 
 def _candidate(scale: str, **detail) -> Candidate:
