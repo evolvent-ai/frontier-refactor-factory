@@ -167,7 +167,12 @@ def drive(path: str) -> tuple:
                                % (done.stderr or done.stdout)[-500:])
         with open(reward, encoding="utf-8") as handle:
             report = json.load(handle)
-    return int(report.get("correctness_passed", 0)), int(report.get("correctness_total", 0))
+    passed = int(report.get("correctness_passed", 0))
+    total = int(report.get("correctness_total", 0))
+    if passed != total:
+        raise RuntimeError(report.get("note") or
+                           "package reference replay mismatch (%d/%d)" % (passed, total))
+    return passed, total
 
 
 # The verifier, shipped whole. Written as a string rather than kept as a module and copied, because
