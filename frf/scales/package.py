@@ -111,7 +111,7 @@ class Observer:
             shutil.rmtree(room, ignore_errors=True)
             shutil.copytree(self.workspace, room, dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns(".mutant-*", "__pycache__"))
-            adapter = os.path.join(room, "subject.py")
+            adapter = os.path.join(room, "subject.js" if spec.language in ("javascript", "typescript") else "subject.py")
             original = open(adapter, encoding="utf-8").read()
             if attempt == 0:
                 original += "\n_old_entry = entry\ndef entry(op, *args):\n    return None\n"
