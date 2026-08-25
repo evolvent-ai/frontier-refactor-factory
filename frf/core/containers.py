@@ -233,16 +233,23 @@ class Remote:
         # older generic spelling as a compatibility fallback for manually configured deployments.
         self._template = (template or credentials.get("E2B_DIND_TEMPLATE")
                           or credentials.get("E2B_TEMPLATE") or "")
-        try:
-            if self._template:
-                self._sandbox = Sandbox.create(template=self._template, timeout=int(timeout),
-                                               api_key=key)
-            else:
-                self._sandbox = Sandbox.create(timeout=int(timeout), api_key=key)
-        except Exception as exc:                              # noqa: BLE001 -- the SDK's own errors
-            raise SandboxError(
-                "could not open a remote sandbox%s: %s"
-                % (" from template %r" % self._template if self._template else "", exc)) from exc
+        for attempt in range(3):
+            try:
+                if self._template:
+                    self._sandbox = Sandbox.create(template=self._template, timeout=int(timeout),
+                                                   api_key=key)
+                else:
+                    self._sandbox = Sandbox.create(timeout=int(timeout), api_key=key)
+                break
+            except Exception as exc:                          # noqa: BLE001 -- SDK transport/errors
+                message = str(exc)
+                transient = bool(re.search(r"dns|connect|connection|temporar|5\d\d|no connections",
+                                           message, re.I))
+                if not transient or attempt == 2:
+                    raise SandboxError(
+                        "could not open a remote sandbox%s: %s"
+                        % (" from template %r" % self._template if self._template else "", message)) from exc
+                time.sleep(2 ** attempt)
 
     def close(self) -> None:
         try:
