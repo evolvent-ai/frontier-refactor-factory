@@ -625,7 +625,7 @@ for name, target in scripts.items():
     out.chmod(0o755)
 """)
             lines = [open(dockerfile, encoding="utf-8").read().rstrip(),
-                     "", "COPY environment/ /app"]
+                     "", "COPY . /app"]
             if self._spec.language.lower() == "python":
                 lines += ["RUN pip install --no-cache-dir --no-deps -e . || python3 /app/.frf_install_scripts.py"]
             import shlex

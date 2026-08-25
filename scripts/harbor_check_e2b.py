@@ -27,6 +27,16 @@ def _assemble_with_environment(*args, **kwargs):
     destination = wrapper / "environment" / "Dockerfile"
     if source.exists():
         shutil.copy2(source, destination)
+        reviewed_environment = task_dir / "environment"
+        wrapper_environment = wrapper / "environment"
+        for item in reviewed_environment.iterdir():
+            if item.name == "Dockerfile":
+                continue
+            target = wrapper_environment / item.name
+            if item.is_dir():
+                shutil.copytree(item, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, target)
         dockerfile = destination.read_text()
         if "COPY task /app/task" not in dockerfile:
             destination.write_text("COPY task /app/task\n" + dockerfile)
