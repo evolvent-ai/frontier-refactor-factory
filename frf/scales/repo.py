@@ -605,6 +605,23 @@ class Repo:
             os.chmod(run, 0o755)
         tests = os.path.join(path, "tests")
         os.makedirs(tests, exist_ok=True)
+        # The generic language Dockerfile only installs the toolchain. A repo task must also
+        # install its copied project, otherwise console entry points (e.g. ``knead``) resolve to
+        # command-not-found and every probe becomes a trivial fixed failure.
+        dockerfile = os.path.join(path, "environment", "Dockerfile")
+        if os.path.exists(dockerfile):
+            lines = [open(dockerfile, encoding="utf-8").read().rstrip(),
+                     "", "COPY . /app"]
+            if self._spec.language.lower() == "python":
+                lines += ["RUN pip install --no-cache-dir --no-deps -e ."]
+            import shlex
+            for command in self._spec.build:
+                rendered = (shlex.join(str(x) for x in command) if isinstance(command, (list, tuple))
+                            else str(command)).replace("{ROOT}", ".")
+                if rendered:
+                    lines.append("RUN " + rendered)
+            lines.append("")
+            open(dockerfile, "w", encoding="utf-8").write("\n".join(lines))
         if self._material.fixtures and os.path.isdir(self._material.fixtures):
             shutil.copytree(self._material.fixtures, os.path.join(tests, "fixtures"), dirs_exist_ok=True)
         with open(os.path.join(tests, "expectations.json"), "w", encoding="utf-8") as handle:
