@@ -610,10 +610,24 @@ class Repo:
         # command-not-found and every probe becomes a trivial fixed failure.
         dockerfile = os.path.join(path, "environment", "Dockerfile")
         if os.path.exists(dockerfile):
+            helper = os.path.join(path, "environment", ".frf_install_scripts.py")
+            with open(helper, "w", encoding="utf-8") as handle:
+                handle.write("""import pathlib, tomllib
+root = pathlib.Path('/app')
+data = tomllib.loads((root / 'pyproject.toml').read_text())
+scripts = dict(data.get('project', {}).get('scripts', {}))
+scripts.update(data.get('tool', {}).get('poetry', {}).get('scripts', {}))
+for name, target in scripts.items():
+    module, func = str(target).split(':', 1)
+    body = '#!/bin/sh\\nexec python3 -c \\\"from %s import %s; raise SystemExit(%s())\\\" \\\"$@\\\"\\n' % (module, func, func)
+    out = pathlib.Path('/usr/local/bin') / name
+    out.write_text(body)
+    out.chmod(0o755)
+""")
             lines = [open(dockerfile, encoding="utf-8").read().rstrip(),
                      "", "COPY . /app"]
             if self._spec.language.lower() == "python":
-                lines += ["RUN pip install --no-cache-dir --no-deps -e ."]
+                lines += ["RUN pip install --no-cache-dir --no-deps -e . || python3 /app/.frf_install_scripts.py"]
             import shlex
             for command in self._spec.build:
                 rendered = (shlex.join(str(x) for x in command) if isinstance(command, (list, tuple))
