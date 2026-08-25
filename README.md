@@ -154,9 +154,9 @@ DESIGN.md                 authoritative design record
   TypeScript, Go, Rust, Ruby, Java, C and C++.
 - [ ] Complete offline dependency-closure materialization for each ecosystem; reject packages that
   can only install from the network.
-- [ ] Make generator validation enforce operation coverage, valid/error/boundary balance and
+- [x] Make generator validation enforce operation coverage, valid/error/boundary balance and
   distinctness before freeze.
-- [ ] Stabilize emitted Package reference replay at `correctness_passed == correctness_total`.
+- [x] Gate Package emission on reference replay at `correctness_passed == correctness_total`.
 - [ ] Produce and audit 10 high-quality Package tasks with 10 E2B workers.
 
 ### Repo
@@ -173,9 +173,12 @@ DESIGN.md                 authoritative design record
 
 - [ ] Make roll mode stop only after the requested number of emitted, fully verified tasks.
 - [ ] Persist per-stage latency, E2B startup cost, source/API calls and refusal reasons.
-- [ ] Verify checkpoint/resume under long high-concurrency runs.
+- [x] Add crash-safe checkpoint/ledger semantics: retry factory failures, skip emitted/material.
+- [ ] Verify checkpoint/resume under a multi-hour high-concurrency soak.
 - [ ] After Package and Repo each reach 10, run the unified 40-task format/security/E7 audit.
-- [ ] Run the 1000+ task E2B scalability test.
+- [x] Add bounded scalability validation for 32-worker scheduling, active-sandbox limits and resume.
+- [ ] Run a bounded multi-hour production soak; do not require 1000 real tasks merely to prove
+  scheduler scalability.
 
 `DESIGN.md` is authoritative. If implementation and design disagree, fix the implementation or update
 the design before continuing.
