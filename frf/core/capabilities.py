@@ -25,7 +25,10 @@ class LanguageCapability:
 
 
 _REGISTRY: dict[str, LanguageCapability] = {
-    "python": LanguageCapability("python", "certified", "python", ("module", "kernel", "package", "repo")),
+    # Certification is evidence-backed per scale.  Repo has not completed the final Harbor
+    # reference-vs-reference audit yet, so it must remain repo-capable rather than inheriting a
+    # language-wide certified label from the call seam.
+    "python": LanguageCapability("python", "certified", "python", ("module", "kernel", "package")),
     "javascript": LanguageCapability("javascript", "call-capable", "javascript", ("package", "repo")),
     "typescript": LanguageCapability("typescript", "call-capable", "typescript", ("package", "repo")),
     "go": LanguageCapability("go", "repo-capable", "go", ("repo",)),
@@ -43,8 +46,16 @@ def capability(language: str, *, scale: str = "") -> LanguageCapability:
     if found is None:
         return LanguageCapability(key, "discovered", scales=(), reason="adapter not registered")
     if scale and scale not in found.scales:
-        return LanguageCapability(found.language, "repo-capable" if "repo" in found.scales else "discovered",
-                                  found.adapter, found.scales, "scale adapter not certified")
+        # A registered call adapter remains call-capable even when this particular scale has no
+        # certified evidence.  Reporting it as discovered would erase the distinction between an
+        # unknown language and a known adapter that is awaiting a scale-specific gate.
+        # Use the registry's declared level rather than branching on scale names in core.  This
+        # keeps the pipeline language/scale agnostic while still distinguishing a registered call
+        # adapter from a repository-only toolchain.
+        level = ("call-capable" if found.adapter and found.level in ("call-capable", "certified")
+                 else ("repo-capable" if "repo" in found.scales else "discovered"))
+        return LanguageCapability(found.language, level, found.adapter, found.scales,
+                                  "scale adapter not certified")
     return found
 
 

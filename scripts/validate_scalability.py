@@ -6,6 +6,7 @@ The local model proves scheduler invariants; --e2b adds a small real sandbox smo
 from __future__ import annotations
 
 import argparse
+import json
 import threading
 import time
 
@@ -63,7 +64,10 @@ def main() -> int:
     args = parser.parse_args()
     scheduler = scheduler_check(args.workers, args.active)
     checkpoint = checkpoint_check()
-    print({"scheduler": scheduler, "checkpoint": checkpoint})
+    report = {"scheduler": scheduler, "checkpoint": checkpoint}
+    # JSON makes the result consumable by CI and keeps the evidence unambiguous (Python's repr
+    # uses single quotes and cannot be parsed by the matrix/audit tooling).
+    print(json.dumps(report, sort_keys=True))
     return int(bool(scheduler["failures"] or scheduler["peak_active"] > args.active
                     or not checkpoint["factory_retried"]))
 

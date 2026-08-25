@@ -320,7 +320,15 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
             summary["harbor_failed"] = failed
             if harbor_failures:
                 summary["harbor_failures"] = harbor_failures
-                summary["emitted"] = max(0, summary.get("emitted", 0) - failed)
+                # Harbor is a production gate.  Removing the count from the summary alone left
+                # failed packages in `result.batch.emitted`, so callers iterating the Result (and
+                # ledger writers) could still treat them as shipped.  Keep the public result and
+                # its summary consistent: only tasks that pass the configured review remain
+                # emitted.
+                failed_paths = {item["path"] for item in harbor_failures}
+                result.batch.emitted[:] = [item for item in result.batch.emitted
+                                           if getattr(item, "path", "") not in failed_paths]
+                summary["emitted"] = len(result.batch.emitted)
         if ledger_file:
             ledger = BatchLedger(ledger_file)
             for outcome in result.batch.emitted + result.batch.refused:
@@ -364,9 +372,10 @@ def _index(name: str, *, subset: str, scale: str = ""):
         # Open-world default: enumerate multiple language sources instead of silently restricting
         # package discovery to Python. Unsupported adapters remain explicit source rejections.
         package_languages = ("python", "javascript", "typescript", "rust", "go", "ruby", "java")
-        return cls(Chain([source.GitHub(language=item, query="topic:algorithms", scale="package")
-                          for item in package_languages],
-                         name="github-packages(" + "|".join(package_languages) + ")"))
+        return cls(source.Chain(
+            [source.GitHub(language=item, query="topic:algorithms", scale="package")
+             for item in package_languages],
+            name="github-packages(" + "|".join(package_languages) + ")"))
 
     if name == "github":
         if scale in ("repo",):

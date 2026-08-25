@@ -164,6 +164,6 @@ def grouped_input_scenarios(root: str, relatives: list[str], *, group_size: int 
     for start in range(0, len(relatives), group_size):
         group = relatives[start:start + group_size]
         result.append(Scenario(probe_id="corpus-%04d" % (start // group_size),
-                               steps=[Step(argv=invocation + [relative])],
+                               steps=[Step(argv=invocation + [relative]) for relative in group],
                                fixture="inputs-%04d.tar.gz" % (start // group_size)))
     return tuple(result)

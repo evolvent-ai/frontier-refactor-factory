@@ -11,31 +11,101 @@ import json
 
 from frf.automation import _index
 from frf.core.capabilities import capability
+from frf.core.scale import SCALES
+
+
+_SOURCE_INDEX = {
+    "repo": "github",
+    "module": "github-functions",
+    "kernel": "github-functions",
+    "package": "github-packages",
+}
+
+
+def _evidence_fields() -> dict:
+    """Stable fields for one language/scale audit row.
+
+    Source collection is intentionally separate from execution.  A row can therefore describe a
+    discovered or rejected language without pretending that a local probe was an E2B certification.
+    The fields are also the contract consumed by production matrix reports.
+    """
+    return {
+        "source_eligible": False,
+        "adapter_status": "unregistered",
+        "e2b_smoke": "not-run",
+        "build": "not-run",
+        "workload": "not-run",
+        "freeze": "not-run",
+        "replay": "not-run",
+        "adequacy": "not-run",
+        "verifier": "not-run",
+        "harbor": "not-run",
+        "yield": None,
+        "seconds": None,
+        "concurrency": {"workers": None, "active_limit": None, "peak_active": None},
+    }
 
 
 def collect(languages: list[str], scale: str, count: int) -> list[dict]:
+    if scale not in SCALES:
+        raise ValueError("unknown scale %r; expected one of %s" % (scale, ", ".join(SCALES)))
     rows = []
     for language in languages:
+        cap = capability(language, scale=scale)
         item = {"language": language, "scale": scale,
-                "capability": capability(language, scale=scale).__dict__,
-                "candidates": [], "errors": []}
+                "capability": cap.__dict__, "candidates": [], "errors": [],
+                **_evidence_fields()}
+        # Keep the adapter state aligned with the capability ladder so a matrix consumer can
+        # distinguish a discovered language from a registered repo-only adapter and a certified
+        # call adapter without reading two unrelated fields.
+        item["adapter_status"] = cap.level if cap.adapter else "unregistered"
         try:
-            index_name = "github" if scale == "repo" else "github-packages"
+            index_name = _SOURCE_INDEX[scale]
             index = _index(index_name, subset=language, scale=scale)
             for candidate in list(index.page(0, size=count))[:count]:
                 item["candidates"].append({"identity": candidate.identity,
                                            "language": candidate.language,
                                            "capability": candidate.capability})
             item["source_rejections"] = dict(getattr(index, "rejection_counts", {}))
+            item["source_eligible"] = bool(item["candidates"])
         except Exception as exc:
             item["errors"].append(str(exc)[:1000])
         rows.append(item)
     return rows
 
 
+def apply_batch_report(row: dict, report: dict) -> dict:
+    """Merge an executed batch report into a source row without inventing stage evidence.
+
+    ``collect`` is intentionally cheap and source-only.  Production callers can run the selected
+    candidate through ``automation.run`` and feed its JSON report here; only fields actually
+    present in that report are promoted to evidence.  Missing stages stay ``not-run`` rather than
+    being inferred from a non-zero emitted count.
+    """
+    merged = dict(row)
+    summary = report.get("summary", report)
+    metrics = summary.get("metrics", {})
+    if "seconds" in report:
+        merged["seconds"] = report["seconds"]
+    elif "batch_seconds" in metrics:
+        merged["seconds"] = metrics["batch_seconds"]
+    if "yield_rate" in summary:
+        merged["yield"] = summary["yield_rate"]
+    if "harbor_checked" in summary:
+        merged["harbor"] = ("passed" if summary.get("harbor_failed", 0) == 0 else "failed")
+    for field in ("e2b_smoke", "build", "workload", "freeze", "replay", "adequacy", "verifier"):
+        value = summary.get(field)
+        if value is not None:
+            merged[field] = value
+    concurrency = summary.get("concurrency")
+    if isinstance(concurrency, dict):
+        merged["concurrency"] = {**merged["concurrency"], **concurrency}
+    return merged
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scale", choices=("package", "repo"), required=True)
+    parser.add_argument("--scale", choices=SCALES, required=True)
     parser.add_argument("--languages", default="python,javascript,typescript,go,rust,java,ruby,cpp")
     parser.add_argument("--count", type=int, default=3)
     args = parser.parse_args()
