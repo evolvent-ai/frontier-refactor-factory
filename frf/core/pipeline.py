@@ -92,6 +92,7 @@ class Refused:
     reason: str
     fault: Fault
     detail: str = ""
+    identity: str = ""
 
     ok = False
 
@@ -173,7 +174,7 @@ def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
     except Stage as refusal:
         log("refused at %s: %s (%s): %s" %
             (refusal.stage, refusal.reason, refusal.fault.value, refusal.detail[:400]))
-        return Refused(refusal.stage, refusal.reason, refusal.fault, refusal.detail)
+        return Refused(refusal.stage, refusal.reason, refusal.fault, refusal.detail, candidate.identity)
     except KeyboardInterrupt:
         # An operator stopping a batch is not a candidate failing. Re-raised so that Ctrl-C is not
         # silently recorded as twenty unsuitable packages.
@@ -181,7 +182,7 @@ def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
     except BaseException as unexpected:                        # noqa: BLE001 -- see the docstring
         detail = "%s: %s" % (type(unexpected).__name__, unexpected)
         log("refused at unclassified: %s (factory)" % detail.splitlines()[0][:160])
-        return Refused("unclassified", type(unexpected).__name__, Fault.FACTORY, detail[:2000])
+        return Refused("unclassified", type(unexpected).__name__, Fault.FACTORY, detail[:2000], candidate.identity)
 
 
 def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], None],

@@ -272,7 +272,7 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
             ledger = BatchLedger(ledger_file)
             for outcome in result.batch.emitted + result.batch.refused:
                 ledger.append(LedgerRecord(
-                    identity=getattr(outcome, "identity", getattr(getattr(outcome, "spec", None), "name", "")),
+                    identity=getattr(outcome, "identity", getattr(outcome, "name", "")),
                     scale=name, status="emitted" if outcome.ok else "refused",
                     stage=getattr(outcome, "stage", ""), reason=getattr(outcome, "reason", ""),
                     fault=getattr(getattr(outcome, "fault", None), "value", ""),
