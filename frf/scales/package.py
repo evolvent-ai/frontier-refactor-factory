@@ -238,7 +238,8 @@ class Package:
                 repair = model.ask(
                     "Repair this probes(n) generator. It must return a dict with probes and labels; "
                     "each probe is [operation_name, ...], labels are valid/error/boundary, all "
-                    "values JSON-safe, and every dispatch name covered twice. Return code only.\n"
+                    "values JSON-safe, every dispatch name covered twice, and return at least 60 "
+                    "distinct probes. Return code only.\n"
                     "Error from sandbox: %s\nGenerator:\n%s" %
                     (str(exc)[:1800], self._material.generator),
                     system="Return only valid Python defining probes(n).", timeout=60)
