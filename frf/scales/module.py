@@ -341,6 +341,11 @@ class Module:
     def probes(self, spec: Spec) -> ProbeSource:
         if self._material is None:
             raise RuntimeError("probes() was asked for before specify() chose a subject")
+        from dataclasses import replace
+        kinds = [param.kind for param in self._material.schema.params]
+        self._spec = replace(spec, notes=(spec.notes or "") +
+                             " probe contract: semantic prefix covers empty/equal/reordered/mismatch/boundary cases; "
+                             "parameter kinds=%s" % ",".join(kinds))
         return ProbeSource(self._material.schema)
 
     # ------------------------------------------------------------------ internals

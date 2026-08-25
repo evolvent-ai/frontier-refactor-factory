@@ -255,6 +255,17 @@ class Package:
             drawn = drawn.get("probes")
         probes = _as_argument_lists(drawn)
         _audit_probe_contract(probes, self._material.dispatch, labels=labels)
+        from dataclasses import replace
+        counts = {}
+        for probe in probes:
+            counts[str(probe[0])] = counts.get(str(probe[0]), 0) + 1
+        classes = {}
+        for label in labels or []:
+            classes[label] = classes.get(label, 0) + 1
+        self._spec = replace(spec, notes=(spec.notes or "") +
+                             " package coverage: %d operation(s), %d probe(s), operations=%s, classes=%s" %
+                             (len(counts), len(probes), json.dumps(counts, sort_keys=True),
+                              json.dumps(classes, sort_keys=True)))
         return ProbeSource(probes)
 
     def _locate(self, candidate: Candidate) -> Material:

@@ -55,10 +55,12 @@ class Kernel(Module):
             "gpus": int(detail.get("gpus", 0)),
             "gpu_types": list(detail.get("gpu_types", ())),
         })
-        return Spec(name=spec.name, scale=self.name, language=spec.language,
+        enriched = Spec(name=spec.name, scale=self.name, language=spec.language,
                     description=spec.description, build=spec.build, invoke=spec.invoke,
                     entry=spec.entry, target_language=spec.target_language,
                     environment=environment, notes=spec.notes)
+        self._spec = enriched
+        return enriched
 
     def probes(self, spec: Spec):
         """Sampled like a module's, at sizes where the arithmetic dominates the call."""
