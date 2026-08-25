@@ -76,6 +76,12 @@ def _worth_probing(function) -> bool:
     params = schema.get("params", ()) if isinstance(schema, dict) else ()
     if not params or symbol.startswith("_"):
         return False
+    # The module corpus is sampled at up to 1024 elements. These names conventionally denote
+    # exponential/backtracking routines whose input size dominates the probe timeout; refusing
+    # them before E2B is both cheaper and more honest than discovering it after five freeze runs.
+    explosive = ("combination", "permutation", "subset", "backtrack", "fibonacci", "power_set")
+    if any(word in symbol.lower() for word in explosive):
+        return False
     # Avoid obvious state/time/random subjects before paying for E2B freeze. This is deliberately
     # conservative: dynamic nondeterminism is still caught by the five-run freeze gate.
     try:
