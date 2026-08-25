@@ -53,6 +53,17 @@ def test_what_was_tried_before_is_not_tried_again():
         assert len(sourcing.Memory.load(path)) == 10, "the record survives the process"
 
 
+def test_checkpoint_resume_retries_factory_failures(tmp_path):
+    from frf.core.checkpoint import CheckpointRecord, CheckpointWriter
+    path = str(tmp_path / "run.jsonl")
+    writer = CheckpointWriter(path)
+    base = dict(scale="module", task_form="", stage="", reason="", timestamp="now", path="")
+    writer.write(CheckpointRecord(identity="emitted", status="emitted", fault="", **base))
+    writer.write(CheckpointRecord(identity="material", status="refused", fault="material", **base))
+    writer.write(CheckpointRecord(identity="factory", status="refused", fault="factory", **base))
+    assert writer.load_completed() == {"emitted", "material"}
+
+
 def test_the_mechanical_filter_runs_before_anything_is_cloned():
     """`keep` is cheap and deterministic. Judgement about quality belongs to the gates, which
     answer with evidence rather than with a prediction."""

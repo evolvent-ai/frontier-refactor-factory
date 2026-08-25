@@ -76,7 +76,13 @@ class CheckpointWriter:
                     continue
                 try:
                     record = json.loads(line)
-                    if "identity" in record:
+                    # Emitted tasks and deterministic material refusals are complete. Factory
+                    # failures remain eligible on resume because they may have been transient
+                    # E2B/transport/resource errors.
+                    if "identity" in record and (
+                            record.get("status") == "emitted"
+                            or (record.get("status") == "refused"
+                                and record.get("fault") == "material")):
                         completed.add(record["identity"])
                 except json.JSONDecodeError:
                     pass
