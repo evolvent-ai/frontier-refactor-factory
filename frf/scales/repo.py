@@ -200,6 +200,25 @@ def _discover_entrypoint(root: str) -> tuple:
             name = next(iter(scripts))
             return [["pip", "install", "--quiet", "{ROOT}"]], [name]
 
+    # 2b. Node/TypeScript package scripts and bin declarations. Keep the native language in the
+    # candidate; the E2B image owns npm/node and the smoke gate decides whether the command really
+    # has a deterministic workload.
+    package_json = os.path.join(root, "package.json")
+    if os.path.isfile(package_json):
+        try:
+            import json
+            manifest = json.load(open(package_json, encoding="utf-8"))
+            bins = manifest.get("bin")
+            name = next(iter(bins)) if isinstance(bins, dict) else (manifest.get("name") if isinstance(bins, str) else "")
+            if name:
+                return [["npm", "install", "--ignore-scripts", "--offline"], ["npm", "run", "build"]], [name]
+            scripts = manifest.get("scripts", {})
+            for target in ("start", "cli", "run"):
+                if target in scripts:
+                    return [["npm", "install", "--ignore-scripts", "--offline"]], ["npm", "run", target]
+        except (OSError, ValueError, TypeError):
+            pass
+
     # 3. Conventional Python entry points
     for rel in ("main.py", "src/main.py", "__main__.py"):
         if os.path.isfile(os.path.join(root, rel)):
