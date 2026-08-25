@@ -27,7 +27,7 @@ from __future__ import annotations
 
 _LANGUAGE_SETUP: dict[str, dict] = {
     "python": {
-        "base_image": "python:3.12-slim",
+        "base_image": "python:3.12.8-slim-bookworm",
         "apt_packages": [],
         "install_cmds": [],
         "copy_from_image": None,
