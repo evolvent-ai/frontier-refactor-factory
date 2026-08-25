@@ -30,21 +30,16 @@ class Operation:
 def operations(root: str, language: str, package_name: str, package_root: str) -> list[dict]:
     """Discover production operations for a supported package ecosystem."""
     language = (language or "").lower()
-    if language == "python":
-        return _python(root, package_name, package_root)
-    if language in ("javascript", "typescript"):
-        return _javascript(root, package_name, package_root)
-    if language == "rust":
-        return _rust(root, package_name, package_root)
-    if language == "go":
-        return _go(root, package_name, package_root)
-    if language == "ruby":
-        return _ruby(root, package_name, package_root)
-    if language == "java":
-        return _java(root, package_name, package_root)
-    if language in ("c", "cpp"):
-        return _c_cpp(root, package_name, package_root)
-    return []
+    adapter_name = _ADAPTER_NAMES.get(language)
+    adapter = globals().get(adapter_name) if adapter_name else None
+    return adapter(root, package_name, package_root) if adapter else []
+
+
+_ADAPTER_NAMES = {
+    "python": "_python", "javascript": "_javascript", "typescript": "_javascript",
+    "rust": "_rust", "go": "_go", "ruby": "_ruby", "java": "_java",
+    "c": "_c_cpp", "cpp": "_c_cpp",
+}
 
 
 def _python(root, package_name, package_root):
