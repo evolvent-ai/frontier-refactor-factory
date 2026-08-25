@@ -174,7 +174,18 @@ def _public_dispatch(root: str, package_root: str, package_name: str):
                     seen.add(node.name)
                     # JSON seam cannot represent a set/bytes result. Mark obvious set literals as
                     # unsafe so the package source filter rejects them before LLM/E2B work.
+                    # Reject obvious non-wire values before paying for a model generator. Sets,
+                    # pathlib/file objects, and user-defined class instances cannot cross the JSON
+                    # call seam; allowing them merely defers a deterministic material failure to
+                    # freeze.
                     unsafe = any(isinstance(child, ast.Set) for child in ast.walk(node))
+                    unsafe = unsafe or any(
+                        isinstance(child, ast.Call) and (
+                            (isinstance(child.func, ast.Name) and
+                             (child.func.id[:1].isupper() or child.func.id in {"open", "Path"}))
+                            or (isinstance(child.func, ast.Attribute) and
+                                child.func.attr in {"Path", "open"})
+                        ) for child in ast.walk(node))
                     result.append({"name": node.name, "module": module_name,
                                    "symbol": node.name, "signature": _signature(node),
                                    "json_safe": not unsafe})
