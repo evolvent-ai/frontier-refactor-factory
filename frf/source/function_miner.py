@@ -82,6 +82,14 @@ def _worth_probing(function) -> bool:
     explosive = ("combination", "permutation", "subset", "backtrack", "fibonacci", "power_set")
     if any(word in symbol.lower() for word in explosive):
         return False
+    if "search" in symbol.lower() and any(getattr(p, "kind", "") in {"int_array", "float_array"}
+                                          for p in params):
+        # Search routines conventionally require an ordered domain. If the AST schema did not
+        # capture that precondition, random probes are mostly out-of-contract and produce a weak
+        # task (as opposed to a useful benchmark), so defer this candidate.
+        schema = getattr(function, "schema", {}) or {}
+        if not any(bool(p.get("sorted")) for p in schema.get("params", ()) if isinstance(p, dict)):
+            return False
     # Avoid obvious state/time/random subjects before paying for E2B freeze. This is deliberately
     # conservative: dynamic nondeterminism is still caught by the five-run freeze gate.
     try:
