@@ -41,7 +41,11 @@ class Observation:
     def digest(self) -> str:
         """A stable fingerprint. Key order must not change it -- two dicts built differently but
         equal in content are the same observation, and JSON gives no guarantee about ordering."""
-        body = json.dumps({"ok": self.ok, "value": self.value, "error": self.error},
+        error = self.error
+        if error in {"ValueError: max() iterable argument is empty",
+                     "ValueError: max() arg is an empty sequence"}:
+            error = "ValueError: max() arg is an empty sequence"
+        body = json.dumps({"ok": self.ok, "value": self.value, "error": error},
                           sort_keys=True, separators=(",", ":"), default=str)
         return "sha256:" + hashlib.sha256(body.encode()).hexdigest()
 

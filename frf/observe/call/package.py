@@ -212,6 +212,13 @@ def digest(ok, value, error):
     That is the duplication this file cannot avoid -- the container has no `frf` to import -- so the
     format is written out here deliberately and E7 is what keeps the two copies honest.
     """
+    # Python minor versions changed the wording of this standard-library error. The operation
+    # and failure class are identical, so freeze the stable semantic spelling rather than making
+    # package replay depend on the interpreter used by the factory host.
+    if isinstance(error, str) and error in {
+            "ValueError: max() iterable argument is empty",
+            "ValueError: max() arg is an empty sequence"}:
+        error = "ValueError: max() arg is an empty sequence"
     body = json.dumps({"ok": ok, "value": value, "error": error},
                       sort_keys=True, separators=(",", ":"), default=str)
     return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
