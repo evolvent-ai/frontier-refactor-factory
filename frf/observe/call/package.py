@@ -96,7 +96,8 @@ def _serve_package_here(room: str, shim, material) -> None:
     """Copy package sources and a generated dispatch adapter into a call-seam workspace."""
     os.makedirs(room, exist_ok=True)
     shutil.copytree(material.root, room, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns(".git", "__pycache__"))
+                    ignore=shutil.ignore_patterns(".git", "__pycache__", "tests", "test",
+                                                   "fixtures", "docs"))
     package_root = material.package_root or material.root
     package_name = material.package_name
     # The package root is already copied by the first copytree when it lives inside material.root.
