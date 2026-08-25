@@ -112,14 +112,14 @@ def _serve_package_here(room: str, shim, material, *, language: str = "python") 
         dispatch = {entry["name"]: (entry["module"], entry["symbol"])
                     for entry in material.dispatch}
         with open(adapter, "w", encoding="utf-8") as handle:
-            handle.write("const DISPATCH = %r;\nexports.entry = async function(op, ...args) {\n"
+            handle.write("const DISPATCH = %s;\nexports.entry = async function(op, ...args) {\n"
                          "  if (!DISPATCH[op]) throw new Error('unknown operation');\n"
                          "  const [mod, symbol] = DISPATCH[op];\n"
                          "  let loaded;\n"
                          "  try { loaded = await import(mod); } catch (e) { loaded = require(mod); }\n"
                          "  const fn = loaded[symbol] || (loaded.default && loaded.default[symbol]) || loaded.default;\n"
                          "  if (typeof fn !== 'function') throw new Error('export is not callable: ' + symbol);\n"
-                         "  return fn(...args);\n}\n" % dispatch)
+                         "  return fn(...args);\n}\n" % json.dumps(dispatch, sort_keys=True))
         _serve_here(room, shim, type("AdapterMaterial", (), {"source_path": adapter, "symbol": "entry"})())
         return
     adapter = os.path.join(room, "subject.py")

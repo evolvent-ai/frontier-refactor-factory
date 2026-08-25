@@ -409,7 +409,7 @@ def entry(op, *args):
 
 
 def _native_adapter_source(dispatch: dict) -> str:
-    return """const DISPATCH = %r;
+    return """const DISPATCH = %s;
 exports.entry = async function(op, ...args) {
   if (!DISPATCH[op]) throw new Error('unknown operation: ' + op);
   const [mod, symbol] = DISPATCH[op];
@@ -419,4 +419,4 @@ exports.entry = async function(op, ...args) {
   if (typeof fn !== 'function') throw new Error('export is not callable: ' + symbol);
   return fn(...args);
 };
-""" % dispatch
+""" % json.dumps(dispatch, sort_keys=True)
