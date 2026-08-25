@@ -791,6 +791,17 @@ for name, target in scripts.items():
             raise ValueError("repository %s yielded flags-only probes without a real input workload"
                              % self._material.identity)
         _validate_scenarios_call_subject(scenarios)
+        # The scenario corpus is the concrete contract for a process task. Feed a compact summary
+        # back into the statement so a solver can see what is actually exercised instead of only
+        # receiving the repository's broad README description.
+        fixtures = sorted({str(s.fixture) for s in scenarios if s.fixture})
+        commands = sorted({str(step.argv[0]) for s in scenarios for step in s.steps if step.argv})
+        detail = ("\n\nThe frozen workload contains %d deterministic scenario(s). Commands exercised: %s. "
+                  "Input fixtures: %s. Preserve exit status, standard output/error, and produced "
+                  "files for these repository-owned cases." %
+                  (len(scenarios), ", ".join(commands[:8]) or "the repository entrypoint",
+                   ", ".join(fixtures[:8]) or "stdin cases"))
+        spec.description = (spec.description or "").rstrip() + detail
         return ProbeSource(scenarios)
 
     def _harvest_repository_workload(self) -> tuple:
