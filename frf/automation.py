@@ -184,25 +184,27 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         target = budget
         source_index = _index(index_name, subset=subset, scale=name)
         source_scale = _scale(name, source_index, backend=None, workspace=tempfile.mkdtemp(prefix="frf-source-%s-" % name))
-        page_budget = max(4, target * 3)
-        # One widening walk, not a fresh source scale per page. Reconstructing the index would
-        # rediscover the same pinned repositories forever and make a high-target roll non-terminating.
-        collected = list(source_scale.find(page_budget))
         diversity = DiversityPolicy(max_per_repository=4)
-        collected = [candidate for candidate in collected if diversity.accept(candidate.identity)]
-        if not collected:
-            return BatchReport({"attempted": 0, "emitted": 0, "yield_rate": 0.0,
-                                "refused_material": 0, "refused_factory": 0,
-                                "trustworthy": True, "by_reason": {}, "scale": name},
-                               0.0, index_name)
         started = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=candidate_workers) as pool:
-            futures = [pool.submit(run, name, budget=1, index=index_name,
-                                   output_dir=output_dir, backend=backend, subset=subset,
-                                   form=form, target_language=target_language,
-                                   freeze_runs=freeze_runs, candidates=[candidate])
-                       for candidate in collected]
-            reports = [future.result() for future in as_completed(futures)]
+        reports = []
+        seen = set()
+        requested = max(4, target * 3)
+        while sum(r.summary.get("emitted", 0) for r in reports) < target:
+            batch = list(source_scale.find(requested))
+            fresh = [c for c in batch if c.identity not in seen and diversity.accept(c.identity)]
+            seen.update(c.identity for c in batch)
+            if not fresh:
+                if len(batch) < requested:
+                    break
+                requested += max(4, target * 2)
+                continue
+            with ThreadPoolExecutor(max_workers=candidate_workers) as pool:
+                futures = [pool.submit(run, name, budget=1, index=index_name,
+                                       output_dir=output_dir, backend=backend, subset=subset,
+                                       form=form, target_language=target_language,
+                                       freeze_runs=freeze_runs, candidates=[candidate])
+                           for candidate in fresh]
+                reports.extend(future.result() for future in as_completed(futures))
         merged = _merge_reports(reports, index_name, time.perf_counter() - started)
         return merged
 
