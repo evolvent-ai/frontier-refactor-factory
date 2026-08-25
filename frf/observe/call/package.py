@@ -327,6 +327,7 @@ def main():
     # exactly the emitted reference and report its real stderr; it must never silently substitute
     # the factory workspace.
     passed = total = 0
+    mismatches = []
     note = ""
     try:
         with Subject(submission, cwd=workspace) as subject:
@@ -338,6 +339,8 @@ def main():
                 try:
                     if observed_digest(subject.call(probe)) == expectation["digest"]:
                         passed += 1
+                    else:
+                        mismatches.append(expectation["probe_id"])
                 except Exception as exc:
                     note = "the submission stopped answering: %s" % exc
                     break
@@ -348,7 +351,8 @@ def main():
     if passed < total or total == 0:
         return report(reward=score(passed, total, 0.0), correct=False,
                       correctness_passed=passed, correctness_total=total, speedup=0.0,
-                      note=note or "not every graded probe matched the reference")
+                      note=note or "not every graded probe matched the reference: %s" %
+                           ", ".join(mismatches[:8]))
 
     # TIMED ONLY ONCE CORRECT, and on inputs held out of grading, so that a submission cannot
     # answer them during the correctness pass and replay a cache when the clock starts.
