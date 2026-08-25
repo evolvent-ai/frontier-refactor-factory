@@ -308,7 +308,9 @@ class RemoteSubject:
         one-E2B-command-per-probe overhead.
         """
         results = {}
-        chunk_size = 4
+        # Package freeze sends many small JSON requests. Sixteen keeps one pathological request
+        # from monopolising a command while reducing E2B process round-trips by ~4x.
+        chunk_size = 16
         for start in range(0, len(items), chunk_size):
             requests = []
             ids = []
