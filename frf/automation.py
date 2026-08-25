@@ -10,6 +10,7 @@ import tempfile
 import os
 import time
 import hashlib
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -24,6 +25,9 @@ from .core.contract import CheckoutContract
 from .core.harbor import Package as HarborPackage
 from .core import pipeline
 from .core.scale import TaskForm
+
+_E2B_ACTIVE_LIMIT = max(1, int(os.environ.get("FRF_E2B_MAX_ACTIVE", "8")))
+_E2B_SLOTS = threading.BoundedSemaphore(_E2B_ACTIVE_LIMIT)
 
 
 @dataclass(frozen=True)
@@ -190,6 +194,11 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         merged = _merge_reports(reports, index_name, time.perf_counter() - started)
         return merged
 
+    # Worker concurrency and active sandbox concurrency are separate controls. Keep many workers
+    # queued for throughput, but cap live E2B sandboxes to the account/template memory envelope.
+    e2b_slot = backend == "remote"
+    if e2b_slot:
+        _E2B_SLOTS.acquire()
     factory = Factory(Settings(sandboxed=True, backend=backend, output_dir=output_dir,
                                freeze_runs=freeze_runs), log=print)
     # Bind the actual selected backend into the scale before any observer is built. Constructing
@@ -257,6 +266,8 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         return BatchReport(summary, time.perf_counter() - started, index_name)
     finally:
         factory.close()
+        if e2b_slot:
+            _E2B_SLOTS.release()
 
 
 def _index(name: str, *, subset: str, scale: str = ""):

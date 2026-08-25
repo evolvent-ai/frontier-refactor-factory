@@ -105,6 +105,8 @@ Meaning of the important fields:
 
 - `freeze_runs`: must remain `5` for production.
 - `max_concurrent`: E2B/candidate worker limit; each candidate receives an isolated workspace.
+- `FRF_E2B_MAX_ACTIVE`: maximum live remote E2B sandboxes (default `8`); workers above this
+  account/resource limit wait rather than causing concurrent OOM kills.
 - `llm_max_concurrent` and `llm_calls_per_minute`: independent LLM rate limits.
 - `sandboxed: true`: mandatory for production; local-process is development-only.
 - `source_language`: source filter; it does not change the scale semantics.
