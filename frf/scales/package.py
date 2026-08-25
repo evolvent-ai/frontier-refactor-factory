@@ -227,7 +227,8 @@ class Package:
                 "execute inside a container; Package(run_generator=...) is how that is supplied.")
         try:
             print("[package] running probe generator for %s" % self._material.identity, flush=True)
-            drawn = self._run_generator(self._material.generator, PROBE_COUNT)
+            requested = 80 if self._material.language in ("javascript", "typescript") else PROBE_COUNT
+            drawn = self._run_generator(self._material.generator, requested)
             print("[package] probe generator completed for %s" % self._material.identity, flush=True)
         except Exception as exc:
             # One repair is cheap compared with discarding a package after a model formatting or
@@ -247,7 +248,7 @@ class Package:
                 repaired = validated_generator(repair)
                 print("[package] retrying repaired probe generator for %s" % self._material.identity,
                       flush=True)
-                drawn = self._run_generator(repaired, PROBE_COUNT)
+                drawn = self._run_generator(repaired, requested)
             except Exception as repair_exc:
                 raise ValueError("package probe generator failed in the sandbox: %s; repair failed: %s"
                                  % (str(exc)[:900], str(repair_exc)[:900])) from repair_exc
