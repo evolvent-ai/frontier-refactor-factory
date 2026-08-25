@@ -80,8 +80,13 @@ def _javascript(root, package_name, package_root):
             text = open(os.path.join(directory, filename), encoding="utf-8", errors="replace").read()
             module = package_name + "." + os.path.relpath(os.path.join(directory, filename), root)
             module = re.sub(r"\.(mjs|cjs|js|ts)$", "", module).replace(os.sep, ".")
-            for name in re.findall(r"(?:export\s+(?:async\s+)?function|exports\.(\w+)|export\s*\{[^}]*\b)(\w+)", text):
-                symbol = next((x for x in name if x), "")
+            names = []
+            names.extend(re.findall(r"\bexport\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)", text))
+            names.extend(re.findall(r"\bexports\.([A-Za-z_$][\w$]*)\s*=", text))
+            names.extend(re.findall(r"\bmodule\.exports\.([A-Za-z_$][\w$]*)\s*=", text))
+            for block in re.findall(r"\bexport\s*\{([^}]*)\}", text):
+                names.extend(re.findall(r"\b([A-Za-z_$][\w$]*)\b", block))
+            for symbol in names:
                 if symbol and not symbol.startswith("_"):
                     result.append(Operation(symbol, module, symbol, language="javascript").to_json())
     return _unique(result)
