@@ -632,6 +632,10 @@ for name, target in scripts.items():
             for command in self._spec.build:
                 rendered = (shlex.join(str(x) for x in command) if isinstance(command, (list, tuple))
                             else str(command)).replace("{ROOT}", ".")
+                if self._spec.language.lower() == "python" and "pip install" in rendered:
+                    # The project install above has an offline console-script fallback; repeating
+                    # a backend-dependent pip command would fail the image after the fallback ran.
+                    continue
                 if rendered:
                     lines.append("RUN " + rendered)
             lines.append("")
