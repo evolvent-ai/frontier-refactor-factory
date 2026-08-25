@@ -68,6 +68,12 @@ class Candidate:
         if self.scale not in SCALES:
             raise ValueError("unknown scale %r; expected one of %s" % (self.scale, ", ".join(SCALES)))
 
+    @property
+    def capability(self) -> dict:
+        """Open-world capability snapshot; unknown languages remain explicitly discovered."""
+        from .capabilities import capability
+        return capability(self.language, scale=self.scale).__dict__
+
 
 @dataclass(frozen=True)
 class Spec:
