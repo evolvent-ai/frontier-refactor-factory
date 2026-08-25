@@ -115,8 +115,11 @@ def _serve_package_here(room: str, shim, material) -> None:
             handle.write("const DISPATCH = %r;\nexports.entry = async function(op, ...args) {\n"
                          "  if (!DISPATCH[op]) throw new Error('unknown operation');\n"
                          "  const [mod, symbol] = DISPATCH[op];\n"
-                         "  const loaded = await import(mod);\n"
-                         "  return loaded[symbol](...args);\n}\n" % dispatch)
+                         "  let loaded;\n"
+                         "  try { loaded = await import(mod); } catch (e) { loaded = require(mod); }\n"
+                         "  const fn = loaded[symbol] || (loaded.default && loaded.default[symbol]) || loaded.default;\n"
+                         "  if (typeof fn !== 'function') throw new Error('export is not callable: ' + symbol);\n"
+                         "  return fn(...args);\n}\n" % dispatch)
         _serve_here(room, shim, type("AdapterMaterial", (), {"source_path": adapter, "symbol": "entry"})())
         return
     adapter = os.path.join(room, "subject.py")

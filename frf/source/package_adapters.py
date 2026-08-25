@@ -78,8 +78,9 @@ def _javascript(root, package_name, package_root):
             if not filename.endswith((".js", ".mjs", ".cjs", ".ts")):
                 continue
             text = open(os.path.join(directory, filename), encoding="utf-8", errors="replace").read()
-            module = package_name + "." + os.path.relpath(os.path.join(directory, filename), root)
-            module = re.sub(r"\.(mjs|cjs|js|ts)$", "", module).replace(os.sep, ".")
+            # Store a filesystem-relative module path. Node's ESM loader cannot resolve the
+            # Python-style dotted name that the first adapter emitted, especially for src/ trees.
+            module = "./" + os.path.relpath(os.path.join(directory, filename), root).replace(os.sep, "/")
             names = []
             names.extend(re.findall(r"\bexport\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)", text))
             names.extend(re.findall(r"\bexports\.([A-Za-z_$][\w$]*)\s*=", text))
