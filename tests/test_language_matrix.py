@@ -99,3 +99,8 @@ def test_collect_matrix_emits_every_language_scale_pair(monkeypatch):
     rows = matrix.collect_matrix(["zig"], 1, scales=("module", "repo"))
     assert [(row["language"], row["scale"]) for row in rows] == [
         ("zig", "module"), ("zig", "repo")]
+
+
+def test_shipped_call_verifier_diagnoses_non_object_replies():
+    from frf.observe.call.package import VERIFIER_SOURCE
+    assert "non-object JSON reply" in VERIFIER_SOURCE

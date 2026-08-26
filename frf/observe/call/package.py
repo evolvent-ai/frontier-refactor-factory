@@ -319,6 +319,9 @@ class Subject:
         if not line:
             raise RuntimeError("the submission exited without answering")
         reply = json.loads(line)
+        if not isinstance(reply, dict):
+            raise RuntimeError("the subject returned a non-object JSON reply (%s)" %
+                               type(reply).__name__)
         if reply.get("id") != payload.get("id"):
             raise RuntimeError("the submission returned a mismatched response id")
         return reply
