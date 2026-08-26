@@ -161,7 +161,7 @@ class Observer:
         """
         build, argv = shims.materialise(self.workspace, spec.language,
                                         self.material.source_path, self.material.symbol)
-        if getattr(self._backend, "name", "") in ("docker", "remote"):
+        if self._backend is not None and getattr(self._backend, "name", "") != "local-process":
             # Production references are built in the same sandbox image that will freeze them.
             # Keep a per-observer remote directory so concurrent candidates never share compiler
             # outputs; pull it back because RemoteSubject stages this host workspace for each run.
