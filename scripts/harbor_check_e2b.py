@@ -126,8 +126,9 @@ def main() -> int:
         agent_env["OPENAI_ENDPOINT"] = llm_base
         os.environ.setdefault("OPENAI_BASE_URL", llm_base)
         os.environ.setdefault("OPENAI_API_BASE", llm_base)
+    model = args.model if "/" in args.model else "openai/" + args.model
     report, _ = asyncio.run(checker.run_checks(
-        args.task, agent=args.agent, model=args.model,
+        args.task, agent=args.agent, model=model,
         environment=checker.EnvironmentType.E2B,
         n_concurrent=args.concurrent, n_attempts=1,
         agent_env=agent_env or None,
