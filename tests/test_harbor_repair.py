@@ -68,3 +68,9 @@ def test_harbor_check_timeout_is_a_task_failure_not_a_batch_crash(monkeypatch, t
 def test_validator_exposes_schema_only_mode():
     text = (Path(__file__).parents[1] / "scripts" / "harbor_run_validate.py").read_text()
     assert "--schema-only" in text
+
+
+def test_harbor_agent_bridge_resolves_openai_connection_in_host_process():
+    text = (Path(__file__).parents[1] / "scripts" / "harbor_check_e2b.py").read_text()
+    assert 'os.environ.setdefault("OPENAI_BASE_URL"' in text
+    assert 'os.environ.setdefault("OPENAI_API_KEY"' in text

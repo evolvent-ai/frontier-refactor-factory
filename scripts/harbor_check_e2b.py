@@ -97,8 +97,18 @@ def main() -> int:
     agent_env = {}
     if os.environ.get("LLM_API_KEY"):
         agent_env["OPENAI_API_KEY"] = os.environ["LLM_API_KEY"]
+        # Harbor resolves the model connection in the host process before it creates the E2B
+        # agent. Setting only agent_env is too late for Codex's generated config.toml.
+        os.environ.setdefault("OPENAI_API_KEY", os.environ["LLM_API_KEY"])
     if os.environ.get("LLM_BASE_URL"):
         agent_env["OPENAI_BASE_URL"] = os.environ["LLM_BASE_URL"]
+        # Different Codex builds have used different names while provider configuration was
+        # stabilising. Supplying all aliases is harmless and keeps a custom OpenAI-compatible
+        # gateway from silently falling back to api.openai.com.
+        agent_env["OPENAI_API_BASE"] = os.environ["LLM_BASE_URL"]
+        agent_env["OPENAI_ENDPOINT"] = os.environ["LLM_BASE_URL"]
+        os.environ.setdefault("OPENAI_BASE_URL", os.environ["LLM_BASE_URL"])
+        os.environ.setdefault("OPENAI_API_BASE", os.environ["LLM_BASE_URL"])
     report, _ = asyncio.run(checker.run_checks(
         args.task, agent=args.agent, model=args.model,
         environment=checker.EnvironmentType.E2B,
