@@ -322,7 +322,7 @@ class Package:
                 "Include valid, invalid and boundary cases for every operation. "
                 "Return only code.\n" + surface,
                 system="Define only a top-level probes(n) generator. Do not execute the package.",
-                timeout=60)
+                timeout=min(60, model.TIMEOUT))
             try:
                 generator = validated_generator(answer)
                 print("[package] received probe generator for %s" % candidate.identity, flush=True)
@@ -332,7 +332,7 @@ class Package:
                 raise
             except (ValueError, SyntaxError):
                 answer = model.ask("Return ONLY valid Python defining probes(n).\n" + surface,
-                                   system="Define exactly probes(n).", timeout=60)
+                                   system="Define exactly probes(n).", timeout=min(60, model.TIMEOUT))
                 generator = validated_generator(answer)
         operations = tuple(PackageOperation(str(entry.get("name") or ""),
                                              str(entry.get("module") or ""),
