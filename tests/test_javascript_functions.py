@@ -27,6 +27,16 @@ export function constant(value) { return 1; }
     assert [item.symbol for item in scan(str(tmp_path), "pkg", "1")] == []
 
 
+def test_scan_excludes_unexported_helpers_that_the_shim_cannot_dispatch(tmp_path):
+    (tmp_path / "subject.js").write_text("""
+function helper(value) { return value.map((item) => item + 1); }
+/** @param {number[]} values */
+exports.publicFn = (values) => values.map((item) => item + 1);
+""", encoding="utf-8")
+    found = scan(str(tmp_path), "pkg", "1")
+    assert [item.symbol for item in found] == ["publicFn"]
+
+
 def test_javascript_scan_requires_jsdoc_for_untyped_parameters(tmp_path):
     path = tmp_path / "subject.js"
     path.write_text("""

@@ -19,6 +19,9 @@ _FUNCTION = re.compile(
 _ARROW = re.compile(
     r"(?m)^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?\(([^)]*)\)\s*(?::\s*[^=]+)?=>\s*\{"
 )
+_EXPORTED_ARROW = re.compile(
+    r"(?m)^\s*(?:exports|module\.exports)\.([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?\(([^)]*)\)\s*=>\s*(?:\{|[^\n;]+;?)"
+)
 _TYPES = {
     "number": {"kind": "float"}, "string": {"kind": "string", "size": "n"},
     "boolean": {"kind": "bool"}, "bigint": {"kind": "int", "low": -1000, "high": 1000},
@@ -74,7 +77,8 @@ def scan(root: str, package: str = "", version: str = "") -> list:
                 continue
             module = os.path.relpath(path, root).replace(os.sep, "/")
             module = re.sub(r"\.(m?js|cjs|ts)$", "", module)
-            matches = list(_FUNCTION.finditer(source)) + list(_ARROW.finditer(source))
+            matches = (list(_FUNCTION.finditer(source)) + list(_ARROW.finditer(source))
+                       + list(_EXPORTED_ARROW.finditer(source)))
             for match in matches:
                 # Regex is used only after this lexical guard. Indented declarations are usually
                 # nested helpers, not a standalone export the shim can import reliably.
@@ -82,6 +86,14 @@ def scan(root: str, package: str = "", version: str = "") -> list:
                     continue
                 symbol, raw = match.groups()
                 if symbol.startswith("_"):
+                    continue
+                # The shim loads the module and dispatches an exported property. Internal helper
+                # functions can be perfectly parseable yet unreachable over that boundary, which
+                # otherwise wastes a full freeze before failing with "entry is not a function".
+                exported = (re.search(r"(?m)^\s*export\s+(?:async\s+)?function\s+" + re.escape(symbol), source)
+                            or re.search(r"(?m)^\s*export\s+const\s+" + re.escape(symbol) + r"\b", source)
+                            or re.search(r"(?:exports|module\.exports)\." + re.escape(symbol) + r"\b", source))
+                if exported is None:
                     continue
                 prefix = source[max(0, match.start() - 1200):match.start()]
                 jsdoc_match = re.search(r"/\*\*.*?\*/\s*$", prefix, re.S)
