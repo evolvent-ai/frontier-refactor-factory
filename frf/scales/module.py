@@ -266,6 +266,17 @@ class Observer:
 
         build, argv = shims.materialise(room, self.material.language, perturbed,
                                         self.material.symbol)
+        if self._backend is not None and getattr(self._backend, "name", "") != "local-process":
+            remote = "/tmp/frf-mutant-%s" % uuid.uuid4().hex[:12]
+            self._backend.push(room, remote)
+            for command in build:
+                remote_command = [part.replace(room, remote)
+                                  if isinstance(part, str) else part for part in command]
+                done = self._backend.run(remote_command, workdir=remote, timeout=BUILD_TIMEOUT)
+                if not done.ok:
+                    return self._argv, self.workspace
+            self._backend.pull(remote, room)
+            return argv, room
         for command in build:
             done = subprocess.run(command, cwd=room, capture_output=True, text=True,
                                   timeout=BUILD_TIMEOUT)

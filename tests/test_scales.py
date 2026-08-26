@@ -65,6 +65,30 @@ def test_remote_call_build_uses_backend_instead_of_host_subprocess(tmp_path):
     assert [call[0] for call in backend.calls] == ["push", "run", "pull"]
 
 
+def test_remote_mutant_build_uses_backend_instead_of_host_subprocess(tmp_path):
+    source = tmp_path / "subject.ts"
+    source.write_text("export function entry(value: number): number { return value + 1; }\n",
+                      encoding="utf-8")
+
+    class Backend:
+        name = "remote"
+        def __init__(self): self.calls = []
+        def push(self, local, remote): self.calls.append("push")
+        def run(self, argv, *, workdir=None, timeout=0, env=None):
+            self.calls.append("run")
+            from frf.core.sandbox import Result
+            return Result(0, "", "")
+        def pull(self, remote, local): self.calls.append("pull")
+
+    backend = Backend()
+    material = ModuleMaterial("test", "typescript", str(source), "entry", "d",
+                              Schema.from_json(_SCALAR))
+    observer = ModuleObserver(str(tmp_path), material, backend=backend)
+    observer._argv = ["node"]
+    observer._mutant(0)
+    assert backend.calls[:2] == ["push", "run"]
+
+
 def _candidate(scale: str, **detail) -> Candidate:
     return Candidate("test://%s" % scale, scale, "python", "fixture", detail)
 
