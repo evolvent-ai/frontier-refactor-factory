@@ -190,7 +190,7 @@ def _discover_entrypoint(root: str) -> tuple:
       3. Conventional main.py / src/main.py
       4. setup.py console_scripts
       5. cmd/<name>/main.go  (Go)
-      6. src/main.rs  (Rust, via cargo)
+      6. src/main.rs or src/bin/*  (Rust, via cargo)
       7. pom.xml explicit Maven mainClass
       8. Makefile `run` / `start` / `serve` target
 
@@ -268,7 +268,18 @@ def _discover_entrypoint(root: str) -> tuple:
                     ["{ROOT}/program"],
                 )
 
-    # 6. src/main.rs via Cargo
+    # 6. Rust binaries via Cargo. Multi-binary crates conventionally use src/bin/*.rs; selecting
+    # the declared/stem name is deterministic and avoids guessing from arbitrary source files.
+    cargo_bin = ""
+    bin_dir = os.path.join(root, "src", "bin")
+    if os.path.isdir(bin_dir):
+        names = sorted(name[:-3] for name in os.listdir(bin_dir)
+                       if name.endswith(".rs") and os.path.isfile(os.path.join(bin_dir, name)))
+        if names:
+            cargo_bin = names[0]
+    if cargo_bin:
+        return ([['cargo', 'build', '--release', '--bin', cargo_bin]],
+                ['{ROOT}/target/release/' + cargo_bin])
     if os.path.isfile(os.path.join(root, "src", "main.rs")):
         cargo = os.path.join(root, "Cargo.toml")
         name = _cargo_package_name(cargo) if os.path.isfile(cargo) else ""

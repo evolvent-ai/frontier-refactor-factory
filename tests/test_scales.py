@@ -89,6 +89,15 @@ def test_remote_mutant_build_uses_backend_instead_of_host_subprocess(tmp_path):
     assert backend.calls[:2] == ["push", "run"]
 
 
+def test_rust_src_bin_entrypoint_is_discovered(tmp_path):
+    (tmp_path / "Cargo.toml").write_text('[package]\nname = "tools"\nversion = "0.1.0"\n', encoding="utf-8")
+    (tmp_path / "src" / "bin").mkdir(parents=True)
+    (tmp_path / "src" / "bin" / "cli.rs").write_text("fn main() {}\n", encoding="utf-8")
+    build, invoke = _discover_entrypoint(str(tmp_path))
+    assert build == [["cargo", "build", "--release", "--bin", "cli"]]
+    assert invoke == ["{ROOT}/target/release/cli"]
+
+
 def test_typescript_expression_arrow_gets_a_semantic_mutant():
     source = "export const entry = (value: number): number => value + 1;\n"
     mutant = mutate(source, "typescript", "entry", 0)
