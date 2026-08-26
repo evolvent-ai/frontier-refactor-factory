@@ -166,6 +166,23 @@ def _cargo_package_name(path: str) -> str:
         return ""
 
 
+def _cargo_binary_target(path: str) -> tuple[str, str]:
+    """Return the first explicit Cargo [[bin]] name/path, or empty strings."""
+    try:
+        import tomllib
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+        entries = data.get("bin", [])
+        if isinstance(entries, dict):
+            entries = [entries]
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("name"):
+                return str(entry["name"]), str(entry.get("path", "src/main.rs"))
+    except Exception:  # malformed manifests are handled by normal discovery/refusal
+        pass
+    return "", ""
+
+
 def _maven_main_class(path: str) -> str:
     """Read an explicitly declared Maven main class, never infer one from source names."""
     import re
@@ -271,6 +288,12 @@ def _discover_entrypoint(root: str) -> tuple:
     # 6. Rust binaries via Cargo. Multi-binary crates conventionally use src/bin/*.rs; selecting
     # the declared/stem name is deterministic and avoids guessing from arbitrary source files.
     cargo_bin = ""
+    cargo_toml = os.path.join(root, "Cargo.toml")
+    if os.path.isfile(cargo_toml):
+        cargo_bin, cargo_path = _cargo_binary_target(cargo_toml)
+        if cargo_bin and os.path.isfile(os.path.join(root, cargo_path)):
+            return ([['cargo', 'build', '--release', '--bin', cargo_bin]],
+                    ['{ROOT}/target/release/' + cargo_bin])
     bin_dir = os.path.join(root, "src", "bin")
     if os.path.isdir(bin_dir):
         names = sorted(name[:-3] for name in os.listdir(bin_dir)
