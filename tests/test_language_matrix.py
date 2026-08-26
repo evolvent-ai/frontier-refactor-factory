@@ -101,6 +101,21 @@ def test_collect_matrix_emits_every_language_scale_pair(monkeypatch):
         ("zig", "module"), ("zig", "repo")]
 
 
+def test_matrix_row_timeout_is_recorded_without_becoming_empty_source(monkeypatch):
+    matrix = _module()
+
+    class Index:
+        rejection_counts = {}
+
+        def page(self, _number, *, size):
+            raise TimeoutError("slow registry")
+
+    monkeypatch.setattr(matrix, "_index", lambda *args, **kwargs: Index())
+    row = matrix.collect(["python"], "repo", 1, timeout=1)
+    assert row[0]["matrix_status"] == "timeout"
+    assert "matrix row timeout" in row[0]["errors"][0]
+
+
 def test_shipped_call_verifier_diagnoses_non_object_replies():
     from frf.observe.call.package import VERIFIER_SOURCE
     assert "non-object JSON reply" in VERIFIER_SOURCE

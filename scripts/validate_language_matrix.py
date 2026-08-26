@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
+from contextlib import contextmanager
 
 from frf.automation import _index
 from frf.core.capabilities import capability
@@ -46,7 +48,28 @@ def _evidence_fields() -> dict:
     }
 
 
-def collect(languages: list[str], scale: str, count: int) -> list[dict]:
+@contextmanager
+def _row_deadline(seconds: float):
+    """Bound one registry row without turning a slow endpoint into a hung matrix."""
+    if seconds <= 0 or not hasattr(signal, "setitimer"):
+        yield
+        return
+    try:
+        previous = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError("matrix row timeout")))
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        yield
+    except ValueError:  # called outside the main thread
+        yield
+    finally:
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+        except (ValueError, UnboundLocalError):
+            pass
+
+
+def collect(languages: list[str], scale: str, count: int, *, timeout: float = 60.0) -> list[dict]:
     if scale not in SCALES:
         raise ValueError("unknown scale %r; expected one of %s" % (scale, ", ".join(SCALES)))
     rows = []
@@ -60,14 +83,18 @@ def collect(languages: list[str], scale: str, count: int) -> list[dict]:
         # call adapter without reading two unrelated fields.
         item["adapter_status"] = cap.level if cap.adapter else "unregistered"
         try:
-            index_name = _SOURCE_INDEX[scale]
-            index = _index(index_name, subset=language, scale=scale)
-            for candidate in list(index.page(0, size=count))[:count]:
-                item["candidates"].append({"identity": candidate.identity,
-                                           "language": candidate.language,
-                                           "capability": candidate.capability})
-            item["source_rejections"] = dict(getattr(index, "rejection_counts", {}))
-            item["source_eligible"] = bool(item["candidates"])
+            with _row_deadline(timeout):
+                index_name = _SOURCE_INDEX[scale]
+                index = _index(index_name, subset=language, scale=scale)
+                for candidate in list(index.page(0, size=count))[:count]:
+                    item["candidates"].append({"identity": candidate.identity,
+                                               "language": candidate.language,
+                                               "capability": candidate.capability})
+                item["source_rejections"] = dict(getattr(index, "rejection_counts", {}))
+                item["source_eligible"] = bool(item["candidates"])
+        except TimeoutError:
+            item["errors"].append("matrix row timeout after %.1fs" % timeout)
+            item["matrix_status"] = "timeout"
         except Exception as exc:
             item["errors"].append(str(exc)[:1000])
         rows.append(item)
@@ -103,11 +130,11 @@ def apply_batch_report(row: dict, report: dict) -> dict:
     return merged
 
 
-def collect_matrix(languages: list[str], count: int, scales=SCALES) -> list[dict]:
+def collect_matrix(languages: list[str], count: int, scales=SCALES, *, timeout: float = 60.0) -> list[dict]:
     """Collect one auditable row for every requested language/scale pair."""
     rows = []
     for scale in scales:
-        rows.extend(collect(languages, scale, count))
+        rows.extend(collect(languages, scale, count, timeout=timeout))
     return rows
 
 
@@ -116,10 +143,12 @@ def main() -> int:
     parser.add_argument("--scale", choices=(*SCALES, "all"), default="all")
     parser.add_argument("--languages", default="python,javascript,typescript,go,rust,java,ruby,cpp")
     parser.add_argument("--count", type=int, default=3)
+    parser.add_argument("--timeout", type=float, default=60.0,
+                        help="maximum seconds per language/scale row (default: 60)")
     args = parser.parse_args()
     languages = [x.strip() for x in args.languages.split(",") if x.strip()]
-    rows = (collect_matrix(languages, max(1, args.count)) if args.scale == "all"
-            else collect(languages, args.scale, max(1, args.count)))
+    rows = (collect_matrix(languages, max(1, args.count), timeout=max(0, args.timeout)) if args.scale == "all"
+            else collect(languages, args.scale, max(1, args.count), timeout=max(0, args.timeout)))
     print(json.dumps(rows, indent=2, ensure_ascii=False))
     return 0
 
