@@ -173,16 +173,34 @@ def main() -> int:
         os.environ.setdefault("OPENAI_BASE_URL", llm_base)
         os.environ.setdefault("OPENAI_API_BASE", llm_base)
     model = args.model if "/" in args.model else "openai/" + args.model
-    job_name = re.sub(r"[^A-Za-z0-9_-]+", "-", args.job_name).strip("-") or None
-    report, _ = asyncio.run(checker.run_checks(
-        args.task, agent=args.agent, model=model,
-        environment=checker.EnvironmentType.E2B,
-        n_concurrent=args.concurrent, n_attempts=max(1, args.attempts),
-        agent_env=agent_env or None,
-        job_name=job_name,
-    ))
-    print(report.model_dump_json(indent=2))
-    return 0 if all(item.error is None for item in report.results) else 1
+    job_name = re.sub(r"[^A-Za-z0-9_-]+", "-", args.job_name).strip("-") or "frf-review"
+    task_dirs = ([args.task] if (args.task / "task.toml").exists()
+                 else sorted(p.parent for p in args.task.rglob("task.toml")))
+    if not task_dirs:
+        print(json.dumps({"results": [], "error": "no task.toml files found"}, indent=2))
+        return 1
+
+    async def run_one(task_dir, index):
+        return await checker.run_checks(
+            task_dir, agent=args.agent, model=model,
+            environment=checker.EnvironmentType.E2B,
+            n_concurrent=args.concurrent, n_attempts=max(1, args.attempts),
+            agent_env=agent_env or None,
+            job_name="%s-%03d" % (job_name, index),
+        )
+
+    reports = asyncio.run(run_all(task_dirs, run_one))
+    results = []
+    for report, _job_dir in reports:
+        results.extend(report.results)
+    payload = {"results": [item.model_dump() for item in results]}
+    print(json.dumps(payload, indent=2, default=str))
+    return 0 if all(item.error is None for item in results) else 1
+
+
+async def run_all(task_dirs, runner):
+    """Run parent-directory task reviews concurrently with bounded task count."""
+    return await asyncio.gather(*(runner(path, i) for i, path in enumerate(task_dirs)))
 
 
 if __name__ == "__main__":
