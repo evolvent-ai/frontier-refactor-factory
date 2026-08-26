@@ -70,7 +70,7 @@ def test_javascript_shim_dispatches_the_mined_symbol(tmp_path):
     from frf.observe.call.runner import Subject
 
     (tmp_path / "source.js").write_text(
-        "exports.scale = (values, factor) => values.map((v) => v * factor);\n",
+        "export const scale = (values, factor) => values.map((v) => v * factor);\n",
         encoding="utf-8")
     # The source scanner needs explicit JSDoc for JavaScript, but the shim itself only needs the
     # exported symbol and is tested independently here.

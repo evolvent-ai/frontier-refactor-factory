@@ -18,9 +18,12 @@
 // make this template JavaScript-only and force a second, near-identical one for TypeScript -- a
 // copy to keep in step for no behaviour of its own.
 const path = require('path');
-const subject = require(path.resolve(__dirname, process.argv[2] || './subject.js'));
+const { pathToFileURL } = require('url');
+const subjectPath = path.resolve(__dirname, process.argv[2] || './subject.js');
 const symbol = process.argv[3] || 'entry';
-const entry = subject[symbol];
+// Dynamic import handles native ES modules (the common GitHub shape) and also exposes CommonJS
+// exports as a namespace. Static require would make every `export const` subject die at startup.
+const subjectReady = import(pathToFileURL(subjectPath).href);
 
 /** The type and the message, never the stack: a stack carries absolute paths from this machine. */
 function describe(failure) {
@@ -48,7 +51,7 @@ function isThenable(value) {
  * `await` on a plain value still costs a turn of the microtask queue, and for the small subjects
  * this pipeline produces that turn is a measurable part of what op="time" reports.
  */
-async function callEntry(args) {
+async function callEntry(entry, args) {
   // Spread: `args` is the argument LIST, so a subject declared `entry(a, b)` is called with
   // two arguments. See the contract in protocol.py -- packing instead would mean editing
   // real material to serve it, and then grading the edit.
@@ -82,6 +85,8 @@ async function handle(line) {
   const id = request.id;
   const args = Array.isArray(request.args) ? request.args : [];
   const op = request.op === undefined ? 'run' : request.op;
+  const subject = await subjectReady;
+  const entry = subject[symbol];
 
   if (op === 'time') {
     // TIMED HERE, on this side of the pipe. Measuring from the factory would charge the subject for
@@ -91,7 +96,7 @@ async function handle(line) {
     const started = process.hrtime.bigint();
     for (let i = 0; i < repeats; i += 1) {
       try {
-        await callEntry(args);
+      await callEntry(entry, args);
       } catch (thrown) {
         failure = thrown;
         break;
@@ -105,7 +110,7 @@ async function handle(line) {
   }
 
   try {
-    const value = await callEntry(args);
+    const value = await callEntry(entry, args);
     // JSON.stringify drops a key whose value is undefined; a subject that returned nothing should
     // still answer with a value, so it is reported as null as every other shim would report it.
     emit({ id: id, ok: true, value: value === undefined ? null : value });
