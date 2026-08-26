@@ -27,6 +27,7 @@ import asyncio
 import json
 import os
 import sys
+import traceback
 
 from . import __version__
 from .core import credentials, sandbox
@@ -183,7 +184,8 @@ def _run_command(args) -> int:
                               target_emitted=True, max_attempts=job.max_attempts)
             return job, report, None
         except Exception as exc:
-            return job, None, exc
+            detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            return job, None, RuntimeError(detail[-6000:])
 
     workers = min(cfg.max_concurrent, len(cfg.jobs)) if cfg.max_concurrent > 1 else 1
     with ThreadPoolExecutor(max_workers=workers) as pool:
