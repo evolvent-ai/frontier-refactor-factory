@@ -62,3 +62,20 @@ def test_an_unknown_scale_is_rejected_by_the_parser(capsys):
         assert exit_code.code == 2
     else:
         raise AssertionError("an unknown scale must not be accepted")
+
+
+def test_configured_run_targets_emitted_tasks_with_a_finite_attempt_limit(monkeypatch, capsys):
+    from frf.automation import BatchReport
+
+    received = []
+    monkeypatch.setattr("frf.automation.run",
+                        lambda *args, **kwargs: (received.append(kwargs)
+                                                or BatchReport({"emitted": 2,
+                                                                "yield_rate": 1.0},
+                                                               0.1, "github")))
+    monkeypatch.setattr("frf.core.rate_limiter.configure", lambda **kwargs: None)
+    monkeypatch.setattr("frf.automation.configure_e2b_slots", lambda limit: None)
+
+    assert cli.main(["run", "--scale", "repo", "--form", "inplace", "--budget", "2"]) == 0
+    assert received[0]["target_emitted"] is True
+    assert received[0]["max_attempts"] == 0  # automation resolves this to 10 x target

@@ -78,13 +78,13 @@ class Shim:
 TEMPLATES = {
     "python": Shim("serve.py", "subject.py", ("python3", "{entry}", "{module}", "{symbol}"),
                    tool="python3"),
-    "javascript": Shim("serve.js", "subject.js", ("node", "--experimental-specifier-resolution=node", "{entry}", "subject.js"), tool="node"),
+    "javascript": Shim("serve.js", "subject.js", ("node", "--experimental-specifier-resolution=node", "{entry}", "subject.js", "{symbol}"), tool="node"),
     # TypeScript runs through the same shim on Node's own type stripping (22.6+). No compiler and
     # no third-party loader: the alternative was to copy a .ts subject to `subject.js` and hand it
     # to a runtime that cannot read it, which failed at the first type annotation and made the
     # typescript row a claim rather than a capability.
     "typescript": Shim("serve.js", "subject.ts",
-                       ("node", "--experimental-strip-types", "--experimental-specifier-resolution=node", "{entry}", "subject.ts"),
+                       ("node", "--experimental-strip-types", "--experimental-specifier-resolution=node", "{entry}", "subject.ts", "{symbol}"),
                        tool="node"),
     "ruby": Shim("serve.rb", "subject.rb", ("ruby", "{entry}"), tool="ruby"),
     "go": Shim("serve.go", "subject.go", ("{binary}",), tool="go",

@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import time
 import ast
+from .javascript_functions import scan as scan_javascript
 
 from ..core.scale import Candidate
 from .functions import scan
@@ -63,7 +64,7 @@ def _function_rank(function, *, kernel: bool) -> tuple:
             str(getattr(function, "symbol", "")))
 
 
-def _worth_probing(function) -> bool:
+def _worth_probing(function, language: str = "python") -> bool:
     """Cheap, source-agnostic gate before a mined function enters E2B.
 
     A callable with no declared inputs cannot express an input-dependent speedup; in practice these
@@ -93,6 +94,8 @@ def _worth_probing(function) -> bool:
             return False
     # Avoid obvious state/time/random subjects before paying for E2B freeze. This is deliberately
     # conservative: dynamic nondeterminism is still caught by the five-run freeze gate.
+    if language not in {"python", "python3"}:
+        return True
     try:
         tree = ast.parse(open(function.path, encoding="utf-8", errors="replace").read())
         imports = {alias.name.split(".", 1)[0] for node in ast.walk(tree)
@@ -197,8 +200,20 @@ class GitHubFunctions:
             return []
 
         stem = full_name.rsplit("/", 1)[-1] or full_name
-        found = scan(root, stem, commit)
-        found = [function for function in found if _worth_probing(function)]
+        language = str(getattr(repository, "language", "") or detail.get("language") or "").lower()
+        # The Python scanner is not a generic source parser. Never feed a non-Python checkout
+        # through it and then label the result as Python: that would silently downgrade an
+        # open-world source into a false call candidate. Until a language-specific call adapter is
+        # registered, the repository remains eligible only for the process-seam repo scale.
+        if language in {"python", "python3"}:
+            found = scan(root, stem, commit)
+        elif language in {"javascript", "typescript"}:
+            found = scan_javascript(root, stem, commit)
+        else:
+            reason = "call-adapter-not-registered:%s" % (language or "unknown")
+            self.rejection_counts[reason] = self.rejection_counts.get(reason, 0) + 1
+            return []
+        found = [function for function in found if _worth_probing(function, language)]
         if self._scale == "kernel":
             # Older scanners represented explicitly typed list[int]/list[float] parameters as
             # generic lists.  They are still numeric, sized inputs and satisfy the kernel contract;
@@ -222,7 +237,7 @@ class GitHubFunctions:
                             for param in function.schema.get("params", ()))]
         found = found[:self._per_repository]
         return [_to_candidate(function, root=root, full_name=full_name,
-                              commit=commit, scale=self._scale)
+                              commit=commit, scale=self._scale, language=language)
                 for function in found]
 
     def materialise(self, url: str, commit: str, *, deadline: float | None = None) -> str | None:
@@ -255,7 +270,7 @@ class GitHubFunctions:
 
 
 def _to_candidate(function, *, root: str, full_name: str, commit: str,
-                  scale: str = "module") -> Candidate:
+                  scale: str = "module", language: str = "python") -> Candidate:
     """One located function -> a Candidate the module scale can specify.
 
     `detail` carries exactly what `Module._locate` requires, which is the whole point: a repository
@@ -264,7 +279,7 @@ def _to_candidate(function, *, root: str, full_name: str, commit: str,
     """
     return Candidate(
         identity="github:%s@%s#%s.%s" % (full_name, commit[:12], function.module, function.symbol),
-        scale=scale, language="python", source="github-functions",
+        scale=scale, language=language, source="github-functions",
         detail={
             "source_path": function.path,
             "symbol": function.symbol,

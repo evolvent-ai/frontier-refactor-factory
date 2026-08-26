@@ -21,6 +21,9 @@ class JobConfig:
     source_language: str = ""   # "" = any
     target_language: str = ""   # "" = same as source for inplace
     budget: int = 10
+    # In configured roll mode, budget is the number of fully emitted tasks. This bounds how much
+    # unsuitable material may be consumed while trying to reach that target.
+    max_attempts: int = 0          # 0 = max(budget, budget * 10)
     index: str = ""             # which source index to use; "" = auto
     subset: str = ""            # index-specific filter
 
@@ -31,6 +34,10 @@ class JobConfig:
             raise ValueError("form must be 'inplace' or 'cross', got %r" % self.form)
         if self.budget < 1:
             raise ValueError("budget must be at least 1, got %d" % self.budget)
+        if self.max_attempts < 0:
+            raise ValueError("max_attempts must be non-negative")
+        if self.max_attempts and self.max_attempts < self.budget:
+            raise ValueError("max_attempts cannot be smaller than the emitted-task budget")
 
 
 @dataclass
@@ -56,8 +63,8 @@ class RunConfig:
             raise ValueError("max_concurrent must be at least 1")
         if self.e2b_max_active < 1:
             raise ValueError("e2b_max_active must be at least 1")
-        if self.freeze_runs < 1:
-            raise ValueError("freeze_runs must be at least 1")
+        if self.freeze_runs < 2:
+            raise ValueError("freeze_runs must be at least 2")
         if self.harbor_max_repairs < 0:
             raise ValueError("harbor_max_repairs must be non-negative")
 
@@ -86,6 +93,7 @@ class RunConfig:
                 source_language=j.get("source_language", ""),
                 target_language=j.get("target_language", ""),
                 budget=int(j.get("budget", 10)),
+                max_attempts=int(j.get("max_attempts", 0)),
                 index=j.get("index", ""),
                 subset=j.get("subset", ""),
             ))
@@ -132,6 +140,8 @@ class RunConfig:
         for job in self.jobs:
             entry: dict[str, Any] = {"scale": job.scale, "form": job.form,
                                      "budget": job.budget}
+            if job.max_attempts:
+                entry["max_attempts"] = job.max_attempts
             if job.source_language:
                 entry["source_language"] = job.source_language
             if job.target_language:
@@ -161,6 +171,7 @@ class RunConfig:
                     "source_language": j.source_language,
                     "target_language": j.target_language,
                     "budget": j.budget,
+                    "max_attempts": j.max_attempts,
                     "index": j.index,
                     "subset": j.subset,
                 }.items() if v or k in ("scale", "form", "budget")}

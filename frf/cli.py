@@ -178,7 +178,8 @@ def _run_command(args) -> int:
                               # asked for a different number of freeze passes silently got five.
                               freeze_runs=cfg.freeze_runs,
                               ledger_file=cfg.ledger_file,
-                              candidate_workers=max(1, cfg.max_concurrent // max(1, len(cfg.jobs))))
+                              candidate_workers=max(1, cfg.max_concurrent // max(1, len(cfg.jobs))),
+                              target_emitted=True, max_attempts=job.max_attempts)
             return job, report, None
         except Exception as exc:
             return job, None, exc

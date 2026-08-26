@@ -18,7 +18,9 @@
 // make this template JavaScript-only and force a second, near-identical one for TypeScript -- a
 // copy to keep in step for no behaviour of its own.
 const path = require('path');
-const { entry } = require(path.resolve(__dirname, process.argv[2] || './subject.js'));
+const subject = require(path.resolve(__dirname, process.argv[2] || './subject.js'));
+const symbol = process.argv[3] || 'entry';
+const entry = subject[symbol];
 
 /** The type and the message, never the stack: a stack carries absolute paths from this machine. */
 function describe(failure) {

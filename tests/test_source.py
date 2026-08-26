@@ -171,6 +171,22 @@ def test_facts_survive_the_round_trip_they_are_recorded_for():
     assert filters.keep(_Candidate())
 
 
+def test_github_function_miner_refuses_non_python_call_adapters(tmp_path):
+    from frf.source.function_miner import GitHubFunctions
+    from frf.core.scale import Candidate
+
+    miner = GitHubFunctions(object(), workspace=str(tmp_path))
+    root = tmp_path / "repo"
+    root.mkdir()
+    miner.materialise = lambda *args, **kwargs: str(root)
+    repository = Candidate("github:org/js@abc", "repo", "javascript", "github",
+                           detail={"repository": "https://example.invalid/org/js",
+                                   "commit": "abc", "identity": "org/js",
+                                   "language": "JavaScript"})
+    assert miner._widen(repository) == []
+    assert miner.rejection_counts["no-drawable-functions"] == 1
+
+
 def test_the_filters_say_which_check_refused():
     """A filter that only answers False teaches nothing about why a yield fell."""
     io_bound = filters.Facts(name="httpserver", version="1.0",

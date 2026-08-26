@@ -178,7 +178,7 @@ def test_settings_travel_whole_so_a_run_can_be_explained_later():
     assert Settings().sandboxed is True, "sandboxing is the default, not an opt-in"
 
 
-def test_the_sandboxed_setting_actually_reaches_a_backend():
+def test_the_sandboxed_setting_actually_reaches_a_backend(monkeypatch):
     """A setting that nothing reads is worse than a setting that is absent.
 
     `sandboxed` was documented as load-bearing -- "an expectation frozen against the factory's own
@@ -197,6 +197,7 @@ def test_the_sandboxed_setting_actually_reaches_a_backend():
             opened.append("closed")
 
     factory = Factory(Settings(sandboxed=True))
+    monkeypatch.setattr("frf.factory.sandbox.find", lambda prefer=None: _Fake())
     factory._backend = _Fake()                       # noqa: SLF001 -- standing in for a real one
 
     # Opened ONCE and shared: a batch of twenty must not pay for twenty sandboxes, and every

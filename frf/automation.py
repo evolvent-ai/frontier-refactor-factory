@@ -139,7 +139,8 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         form: str = "inplace", target_language: str = "",
         freeze_runs: int = pipeline.FREEZE_RUNS, candidates=None,
         candidate_workers: int = 1, ledger_file: str = "", harbor_check: bool = False,
-        harbor_repair: bool = True, harbor_max_repairs: int = 1) -> BatchReport:
+        harbor_repair: bool = True, harbor_max_repairs: int = 1,
+        target_emitted: bool = False, max_attempts: int = 0) -> BatchReport:
     """Run one scale from an automatically selected enumerable index.
 
     The returned report separates the pipeline summary from elapsed wall time. The call/process
@@ -183,37 +184,59 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         index_name = "github-packages"
     else:
         index_name = "github"
-    if candidate_workers > 1 and candidates is None:
-        # Roll mode: source more than the requested emitted budget because quality gates are
-        # intentionally allowed to reject unsuitable material. The caller's budget remains the
-        # number of candidates for a normal run; this mode treats it as a target and keeps rolling.
+    if target_emitted and candidates is None:
+        # Configured roll mode: keep sourcing until the requested number has passed every gate.
+        # A finite attempt limit is part of the contract: a depleted or low-yield source must end
+        # with auditable evidence, not an unbounded production run.
         target = budget
+        attempt_limit = max_attempts or max(target, target * 10)
         source_index = _index(index_name, subset=subset, scale=name)
         source_scale = _scale(name, source_index, backend=None, workspace=tempfile.mkdtemp(prefix="frf-source-%s-" % name))
         diversity = DiversityPolicy(max_per_repository=4)
         started = time.perf_counter()
         reports = []
         seen = set()
-        requested = max(4, target * 3)
-        while sum(r.summary.get("emitted", 0) for r in reports) < target:
+        requested = min(attempt_limit, max(4, target * 3))
+        attempted = 0
+        while (sum(r.summary.get("emitted", 0) for r in reports) < target
+               and attempted < attempt_limit):
             batch = list(source_scale.find(requested))
-            fresh = [c for c in batch if c.identity not in seen and diversity.accept(c.identity)]
-            seen.update(c.identity for c in batch)
-            if not fresh:
+            unseen = [c for c in batch if c.identity not in seen]
+            if not unseen:
                 if len(batch) < requested:
                     break
-                requested += max(4, target * 2)
+                if requested >= attempt_limit:
+                    break
+                requested = min(attempt_limit, requested + max(4, target * 2))
                 continue
-            with ThreadPoolExecutor(max_workers=candidate_workers) as pool:
+            remaining_tasks = target - sum(r.summary.get("emitted", 0) for r in reports)
+            room = attempt_limit - attempted
+            # One candidate can emit at most one task. Restrict each wave to the remaining target
+            # so parallel completion cannot overshoot it.
+            wave = []
+            for candidate in unseen:
+                if len(wave) >= min(remaining_tasks, room):
+                    break
+                seen.add(candidate.identity)
+                if diversity.accept(candidate.identity):
+                    wave.append(candidate)
+            if not wave:
+                continue
+            attempted += len(wave)
+            with ThreadPoolExecutor(max_workers=max(1, candidate_workers)) as pool:
                 futures = [pool.submit(run, name, budget=1, index=index_name,
                                        output_dir=output_dir, backend=backend, subset=subset,
                                        form=form, target_language=target_language,
                                        freeze_runs=freeze_runs, candidates=[candidate],
+                                       ledger_file=ledger_file,
                                        harbor_check=harbor_check, harbor_repair=harbor_repair,
                                        harbor_max_repairs=harbor_max_repairs)
-                           for candidate in fresh]
+                           for candidate in wave]
                 reports.extend(future.result() for future in as_completed(futures))
         merged = _merge_reports(reports, index_name, time.perf_counter() - started)
+        merged.summary["target_emitted"] = target
+        merged.summary["target_met"] = merged.summary.get("emitted", 0) >= target
+        merged.summary["max_attempts"] = attempt_limit
         return merged
 
     # Worker concurrency and active sandbox concurrency are separate controls. Keep many workers

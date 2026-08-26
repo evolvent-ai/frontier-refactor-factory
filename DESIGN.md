@@ -730,3 +730,34 @@ parser 冒充，package 不能退化为单一函数，repo workload 不能脱离
 因此后续 batch 的正常顺序是：先为真实 revision 找到可隐藏执行且计时可读的 workload，
 再 emit；headroom 由解题提交实际证明，不能由出题链路预判。旧的四个
 `envsubst` 目录仅保留为 layout/self-replay smoke，不计入这项验收。
+
+### 16.4 生产 roll 的停止条件（2026-08-27）
+
+配置式 `frf run` 的 `budget` 表示通过完整 pipeline、E7，以及显式启用时 Harbor gate 的
+**最终 emitted task 数量**，不是恰好尝试同样数量的候选。质量闸门本来就应拒绝多数不合适
+素材；若候选数和产出数混为一个字段，低良率语言永远无法按计划形成题集。
+
+roll 同时必须有有限的 `max_attempts`（默认 `10 x budget`）。达到 emitted 目标立即停止；
+素材耗尽或达到尝试上限仍未达标时，结果必须明确写出 `target_met: false`，并保留真实
+attempted、yield 和 refusal 分布。并发 wave 最多只启动“还差多少题”个候选，避免多个已在途
+候选让最终产出超过目标。直接调用 `frf build` 或 `automation.run(..., target_emitted=False)`
+仍把 `budget` 解释为候选尝试数，供诊断和固定样本复现使用。
+
+### 16.5 JavaScript/TypeScript function adapter（2026-08-27）
+
+JS/TS 的 Module/Kernel source adapter 只接受静态可证明的形态：顶层函数或顶层箭头函数，
+固定参数（最多四个），TypeScript 类型注解或 JSDoc 参数类型，以及 JSON-safe 标量/数组。
+不带类型的参数、rest 参数、动态/相对依赖、嵌套 helper 和没有可变工作量信号的常量标量
+函数均在 source 阶段拒绝。不能用 Python AST scanner 解析 JS/TS，也不能把它们标为 Python；
+未注册的语言必须显式拒绝并记录原因。
+
+该 adapter 的 parser/schema 测试属于离线证据；只有在真实 Node/TypeScript E2B runtime 中
+完成 build、五次 freeze、adequacy、evidence、E7 replay 和多个候选稳定 yield 后，JS/TS
+Module/Kernel 才能从 `call-capable` 升为 `certified`。
+
+JS/TS shim 通过 argv 接收实际 symbol 并从 subject module 动态 dispatch；不能假设源码导出名
+为 `entry`。这一点与 Python shim 的 symbol 参数保持一致，避免 source discovery 成功后在
+第一次真实调用才暴露协议错误。
+
+所有生产配置也必须在启动前满足链路不变量：`freeze_runs >= 2`。单次运行不能证明可重复
+行为，因而在 `RunConfig` 层直接拒绝，而不是让并发候选进入 pipeline 后才失败。

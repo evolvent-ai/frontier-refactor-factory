@@ -77,6 +77,7 @@ jobs:
     form: inplace
     source_language: python
     budget: 30
+    max_attempts: 300
   - scale: kernel
     form: inplace
     source_language: python
@@ -112,7 +113,9 @@ Meaning of the important fields:
 - `sandboxed: true`: mandatory for production; local-process is development-only.
 - `source_language`: source filter; it does not change the scale semantics.
 - `target_language` plus `form: cross`: cross-language framing.
-- `budget`: candidate attempts, not guaranteed emitted tasks. Quality gates may reject candidates.
+- `budget`: in configured `frf run` rolls, the number of fully verified tasks to emit.
+- `max_attempts`: finite candidate-attempt ceiling for reaching that target; defaults to `10 x budget`.
+  A roll that exhausts it reports `target_met: false` instead of running without bound.
 
 ## Pipeline and safety rules
 
@@ -172,7 +175,8 @@ DESIGN.md                 authoritative design record
 
 ### Scale
 
-- [ ] Make roll mode stop only after the requested number of emitted, fully verified tasks.
+- [x] Make roll mode stop only after the requested number of emitted, fully verified tasks, or its
+  explicit finite candidate-attempt ceiling is exhausted.
 - [ ] Persist per-stage latency, E2B startup cost, source/API calls and refusal reasons.
 - [x] Add crash-safe checkpoint/ledger semantics: retry factory failures, skip emitted/material.
 - [ ] Verify checkpoint/resume under a multi-hour high-concurrency soak.
