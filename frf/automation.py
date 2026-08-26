@@ -313,7 +313,9 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
                                             scale=name).__dict__
         elapsed_so_far = time.perf_counter() - started
         summary["metrics"] = {"scale": name, "batch_seconds": round(elapsed_so_far, 3),
-                               "seconds_per_attempt": round(elapsed_so_far / max(1, summary.get("attempted", 0)), 3)}
+                               "seconds_per_attempt": round(elapsed_so_far / max(1, summary.get("attempted", 0)), 3),
+                               "backend_name": getattr(factory.backend(), "name", "none"),
+                               "backend_type": type(factory.backend()).__name__}
         if harbor_check:
             passed = failed = 0
             harbor_failures = []
