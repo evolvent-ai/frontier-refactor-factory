@@ -139,6 +139,8 @@ def main() -> int:
                         help="Execution backend for harbor run (default: local)")
     parser.add_argument("--check-only", action="store_true",
                         help="Run schema + harbor check only, skip harbor run (no Docker needed)")
+    parser.add_argument("--schema-only", action="store_true",
+                        help="Validate task.toml with the local schema checker only")
     parser.add_argument("--timeout", type=int, default=600,
                         help="Timeout in seconds for harbor run per task (default: 600)")
     parser.add_argument("--fail-fast", action="store_true",
@@ -146,7 +148,7 @@ def main() -> int:
     args = parser.parse_args()
 
     harbor_bin = find_harbor_bin()
-    if harbor_bin is None and not args.check_only:
+    if harbor_bin is None and not (args.check_only or args.schema_only):
         print("ERROR: harbor binary not found. Install with: pip install 'harbor>=0.21.0'")
         print("       or run with --check-only to skip harbor run")
         return 1
@@ -181,7 +183,7 @@ def main() -> int:
             continue
 
         # Step 2: harbor check (if harbor available)
-        if harbor_bin:
+        if harbor_bin and not args.schema_only:
             ok, msg = harbor_check(task_dir, harbor_bin)
             print("   harbor check:  %s  %s" % ("✅" if ok else "❌", msg))
             if not ok:
@@ -192,7 +194,7 @@ def main() -> int:
                 continue
 
         # Step 3: harbor run (unless --check-only)
-        if not args.check_only and harbor_bin:
+        if not args.check_only and not args.schema_only and harbor_bin:
             ok, msg = harbor_run(task_dir, harbor_bin, args.backend, args.timeout)
             elapsed = time.monotonic() - t0
             print("   harbor run:    %s  %s  (%.1fs)" % ("✅" if ok else "❌", msg, elapsed))

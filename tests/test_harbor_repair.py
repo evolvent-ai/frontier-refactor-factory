@@ -63,3 +63,8 @@ def test_harbor_check_timeout_is_a_task_failure_not_a_batch_crash(monkeypatch, t
     ok, message = module.harbor_check(tmp_path, "harbor")
     assert not ok
     assert "timed out" in message
+
+
+def test_validator_exposes_schema_only_mode():
+    text = (Path(__file__).parents[1] / "scripts" / "harbor_run_validate.py").read_text()
+    assert "--schema-only" in text
