@@ -97,6 +97,12 @@ def test_typescript_expression_arrow_gets_a_semantic_mutant():
     assert "value + 1" not in mutant
 
 
+def test_typescript_block_function_has_observable_entry_fallback():
+    source = "export function entry(value: number): number { return value + 1; }\n"
+    mutant = mutate(source, "typescript", "entry", 1)
+    assert "throw new Error('frf mutant')" in mutant
+
+
 def _candidate(scale: str, **detail) -> Candidate:
     return Candidate("test://%s" % scale, scale, "python", "fixture", detail)
 

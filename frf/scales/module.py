@@ -501,7 +501,8 @@ def mutate(source: str, language: str, symbol: str = "", attempt: int = 0) -> st
     # would discard the only mutation site. Block-bodied declarations still start their body on
     # the following line or use the generic operator sites below.
     arrow_on_line = signature_end != -1 and source.find("=>", start, signature_end) != -1
-    if signature_end != -1 and not arrow_on_line:
+    block_on_line = signature_end != -1 and source.find("{", start, signature_end) != -1
+    if signature_end != -1 and not arrow_on_line and not block_on_line:
         start = signature_end + 1
     # EVERY PLACE A PERTURBATION COULD LAND, in a stable order, so that `attempt` selects among
     # them. Enumerating the sites rather than the RULES is what makes the retry work: a subject
@@ -535,6 +536,13 @@ def mutate(source: str, language: str, symbol: str = "", attempt: int = 0) -> st
             body = match.group(1)
             sites.append((at, "=>" + source[at + 2:at + 2 + len(match.group(0)) - 2],
                           "=> null /* mutant */"))
+        # A branch-local return can be unreachable for the generated probes. For block-bodied
+        # functions, an entry throw is a deterministic, always-observable fallback and remains
+        # valid JavaScript/TypeScript. It is appended after semantic edits so ordinary mutations
+        # retain their stronger signal when available.
+        opening = source.find("{", start, end)
+        if opening != -1:
+            sites.append((opening + 1, "", " throw new Error('frf mutant'); "))
     for original, replacement in _PERTURBATIONS:
         at = source.find(original, start, end)
         while at != -1:
