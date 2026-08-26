@@ -206,13 +206,26 @@ def main() -> int:
                 continue
 
         elapsed = time.monotonic() - t0
-        results.append((label, True, "all checks passed (%.1fs)" % elapsed))
-        print("   result:        ✅ passed\n")
+        if args.schema_only:
+            # Schema validation is deliberately weaker than a verifier/replay run.  Do not call
+            # it a task result: downstream audit reports must not mistake protocol validity for
+            # evidence that the reference executes correctly in an isolated environment.
+            results.append((label, True, "schema-only validation passed (%.1fs)" % elapsed))
+            print("   result:        ✅ schema-only (no execution)\n")
+        elif args.check_only:
+            results.append((label, True, "schema + harbor check passed (%.1fs)" % elapsed))
+            print("   result:        ✅ checked (no execution)\n")
+        else:
+            results.append((label, True, "all checks passed (%.1fs)" % elapsed))
+            print("   result:        ✅ passed\n")
 
     # Summary
     print("\n%s\n" % ("=" * 60))
     passed = len(results) - failed
-    print("Results: %d passed, %d failed (of %d tasks)" % (passed, failed, len(results)))
+    qualifier = " (schema-only; no execution)" if args.schema_only else (
+        " (schema + harbor check; no execution)" if args.check_only else "")
+    print("Results: %d passed, %d failed (of %d tasks)%s" %
+          (passed, failed, len(results), qualifier))
     if failed:
         print("\nFailed tasks:")
         for label, ok, msg in results:
