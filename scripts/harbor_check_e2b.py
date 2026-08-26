@@ -48,7 +48,9 @@ def _assemble_with_environment(*args, **kwargs):
                 shutil.copy2(item, target)
         dockerfile = destination.read_text()
         if "COPY task /app/task" not in dockerfile:
-            destination.write_text("COPY task /app/task\n" + dockerfile)
+            # COPY must follow FROM; placing it before the base image makes Docker ignore/reject
+            # the reviewed environment and can surface as missing toolchains (e.g. go not found).
+            destination.write_text(dockerfile.rstrip() + "\nCOPY task /app/task\n")
         config_path = wrapper / "task.toml"
         config = tomllib.loads(config_path.read_text())
         task = config.setdefault("task", {})
