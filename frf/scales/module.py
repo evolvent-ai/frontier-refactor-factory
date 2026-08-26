@@ -184,8 +184,15 @@ class Observer:
             self._argv = argv
             return
         for command in build:
-            done = subprocess.run(command, cwd=self.workspace, capture_output=True, text=True,
-                                  timeout=BUILD_TIMEOUT)
+            try:
+                done = subprocess.run(command, cwd=self.workspace, capture_output=True, text=True,
+                                      timeout=BUILD_TIMEOUT)
+            except FileNotFoundError as exc:
+                raise BuildFailed("%s could not execute local build command %r (backend=%s/%s); "
+                                  "production builds require a sandbox" %
+                                  (self.material.identity, command,
+                                   getattr(self._backend, "name", "none"),
+                                   type(self._backend).__name__)) from exc
             if done.returncode != 0:
                 raise BuildFailed("%s did not build: %s"
                                   % (self.material.identity,
