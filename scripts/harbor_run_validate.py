@@ -17,8 +17,8 @@ Usage:
     # Validate all tasks in a directory
     python scripts/harbor_run_validate.py work/tasks/
 
-    # Validate with e2b backend (runs each task in an isolated sandbox)
-    python scripts/harbor_run_validate.py --backend e2b work/tasks/
+    # Run task-native E2B review (Harbor CLI itself has no --backend e2b option)
+    python scripts/harbor_check_e2b.py work/tasks/ --model gpt-5.6-terra
 
     # Quick schema+check only (no Docker required)
     python scripts/harbor_run_validate.py --check-only work/tasks/
