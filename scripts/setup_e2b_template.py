@@ -117,6 +117,9 @@ DOCKER_INSTALL_CMDS = [
         "python3 python3-pip nodejs npm "
         "build-essential"
     ),
+    # TypeScript call subjects compile inside the sandbox; pin the compiler so the shim does not
+    # depend on the remote image's Node experimental flags or a networked npx invocation later.
+    "npm install -g typescript@5.6.3",
     "curl -fsSL https://go.dev/dl/go1.26.0.linux-amd64.tar.gz | tar -C /usr/local -xz",
     "ln -sf /usr/local/go/bin/go /usr/local/bin/go && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt",
     "curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal",
