@@ -48,6 +48,13 @@ module.exports = { decode };
     assert [item.symbol for item in scan(str(tmp_path), "pkg", "1")] == ["decode"]
 
 
+def test_scan_rejects_top_level_output_that_would_corrupt_jsonl(tmp_path):
+    (tmp_path / "subject.ts").write_text(
+        "export function distance(a: string, b: string): number { return a.length + b.length; }\n"
+        "console.log(distance('a', 'b'));\n", encoding="utf-8")
+    assert scan(str(tmp_path), "pkg", "1") == []
+
+
 def test_javascript_scan_requires_jsdoc_for_untyped_parameters(tmp_path):
     path = tmp_path / "subject.js"
     path.write_text("""

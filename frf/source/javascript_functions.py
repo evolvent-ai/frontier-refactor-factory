@@ -75,6 +75,11 @@ def scan(root: str, package: str = "", version: str = "") -> list:
                 continue
             if re.search(r"(?m)^\s*import\s+|require\s*\(", source):
                 continue
+            # Module-load output corrupts the JSON-lines protocol before the shim can answer. Only
+            # reject statements at column zero; logging inside a discovered function is observable
+            # behavior and remains the subject's responsibility.
+            if re.search(r"(?m)^(?:console\.log|process\.stdout\.write)\s*\(", source):
+                continue
             module = os.path.relpath(path, root).replace(os.sep, "/")
             module = re.sub(r"\.(m?js|cjs|ts)$", "", module)
             matches = (list(_FUNCTION.finditer(source)) + list(_ARROW.finditer(source))
