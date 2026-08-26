@@ -59,6 +59,11 @@ def _assemble_with_environment(*args, **kwargs):
                             "(apt-get update && apt-get install -y --no-install-recommends golang-go "
                             "&& rm -rf /var/lib/apt/lists/*)\n")
                 dockerfile = dockerfile[:line_end + 1] + fallback + dockerfile[line_end + 1:]
+        if "go build" in dockerfile and "go mod download" not in dockerfile:
+            # Harbor builds a fresh E2B template, so the Go module cache present during FRF's
+            # reference build is not available. Resolve declared modules before the native build.
+            build_marker = "RUN go build"
+            dockerfile = dockerfile.replace(build_marker, "RUN go mod download\n" + build_marker, 1)
         if "COPY task /app/task" not in dockerfile:
             # COPY must follow FROM; placing it before the base image makes Docker ignore/reject
             # the reviewed environment and can surface as missing toolchains (e.g. go not found).
