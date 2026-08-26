@@ -47,6 +47,21 @@ def _assemble_with_environment(*args, **kwargs):
             else:
                 shutil.copy2(item, target)
         dockerfile = destination.read_text()
+        reference_program = task_dir / "tests" / "reference" / "program"
+        use_native_binary = "go build" in dockerfile and reference_program.is_file()
+        if use_native_binary:
+            # Review images are built offline. The factory already built and replayed this pinned
+            # native reference, so use that artifact for Harbor's quality review instead of trying
+            # to download an uncacheable Go module graph in a fresh no-network template.
+            shutil.copy2(reference_program, wrapper / "environment" / "program")
+            os.chmod(wrapper / "environment" / "program", 0o755)
+            lines = []
+            for line in dockerfile.splitlines():
+                if line.lstrip().startswith("RUN go mod download") or line.lstrip().startswith("RUN go build"):
+                    lines.append("RUN true")
+                else:
+                    lines.append(line)
+            dockerfile = "\n".join(lines) + "\nCOPY program /app/program\n"
         if "go build" in dockerfile and "command -v go" not in dockerfile:
             # Some Harbor/E2B base-image aliases do not expose the toolchain expected by a
             # repository-native Dockerfile even when the nominal golang image is selected. Make

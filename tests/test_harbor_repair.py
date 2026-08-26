@@ -87,3 +87,4 @@ def test_task_copy_is_after_dockerfile_from_instruction():
     assert 'dockerfile.rstrip() + "\\nCOPY task /app/task\\n"' in text
     assert 'command -v go >/dev/null 2>&1' in text
     assert 'RUN go mod download' in text
+    assert 'reference_program = task_dir / "tests" / "reference" / "program"' in text
