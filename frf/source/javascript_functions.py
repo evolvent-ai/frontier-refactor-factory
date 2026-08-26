@@ -92,7 +92,9 @@ def scan(root: str, package: str = "", version: str = "") -> list:
                 # otherwise wastes a full freeze before failing with "entry is not a function".
                 exported = (re.search(r"(?m)^\s*export\s+(?:async\s+)?function\s+" + re.escape(symbol), source)
                             or re.search(r"(?m)^\s*export\s+const\s+" + re.escape(symbol) + r"\b", source)
-                            or re.search(r"(?:exports|module\.exports)\." + re.escape(symbol) + r"\b", source))
+                            or re.search(r"(?:exports|module\.exports)\." + re.escape(symbol) + r"\b", source)
+                            or re.search(r"module\.exports\s*=\s*\{[^}]*\b%s\b" % re.escape(symbol), source,
+                                         re.S))
                 if exported is None:
                     continue
                 prefix = source[max(0, match.start() - 1200):match.start()]

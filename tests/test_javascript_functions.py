@@ -37,6 +37,17 @@ exports.publicFn = (values) => values.map((item) => item + 1);
     assert [item.symbol for item in found] == ["publicFn"]
 
 
+def test_scan_accepts_commonjs_object_export_keys(tmp_path):
+    (tmp_path / "subject.js").write_text("""
+function decode(values) { return values.map((item) => item + 1); }
+module.exports = { decode };
+""", encoding="utf-8")
+    # The adapter still requires an explicit JSDoc contract for JavaScript parameters.
+    (tmp_path / "subject.js").write_text("/** @param {number[]} values */\n" +
+        (tmp_path / "subject.js").read_text(), encoding="utf-8")
+    assert [item.symbol for item in scan(str(tmp_path), "pkg", "1")] == ["decode"]
+
+
 def test_javascript_scan_requires_jsdoc_for_untyped_parameters(tmp_path):
     path = tmp_path / "subject.js"
     path.write_text("""
