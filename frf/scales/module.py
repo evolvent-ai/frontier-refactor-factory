@@ -467,6 +467,19 @@ def mutate(source: str, language: str, symbol: str = "", attempt: int = 0) -> st
         while at != -1:
             sites.append((at, "return ", "return None # "))
             at = source.find("return ", at + 1, end)
+    elif language.lower() in ("javascript", "typescript", "js", "ts"):
+        # JS/TS modules commonly use expression-bodied exports, so the generic operator table can
+        # miss the subject entirely. Replacing a subject return expression is a compiling semantic
+        # mutant; changing `.map(` to `.filter(` is a second independent perturbation for array
+        # workloads when no return keyword exists in the selected window.
+        at = source.find("return ", start, end)
+        while at != -1:
+            sites.append((at, "return ", "return null /* mutant */; "))
+            at = source.find("return ", at + 1, end)
+        at = source.find(".map(", start, end)
+        while at != -1:
+            sites.append((at, ".map(", ".filter("))
+            at = source.find(".map(", at + 1, end)
     for original, replacement in _PERTURBATIONS:
         at = source.find(original, start, end)
         while at != -1:
@@ -478,7 +491,10 @@ def mutate(source: str, language: str, symbol: str = "", attempt: int = 0) -> st
     # actual changed observation to test.
     # By position, so the first attempt is the earliest edit and the order does not depend on how
     # the table happens to be written.
-    sites.sort()
+    # Prefer language-specific semantic edits. Generic operator positions are useful fallback, but
+    # sorting them ahead can spend all mutation attempts on inert helpers in JS modules.
+    if language.lower() not in ("javascript", "typescript", "js", "ts"):
+        sites.sort()
     if attempt >= len(sites):
         return source
     index, original, replacement = sites[attempt]
@@ -496,7 +512,8 @@ def _window_of(source: str, symbol: str) -> tuple:
     if not symbol:
         return (0, len(source))
     for marker in ("def %s(" % symbol, "func %s(" % symbol, "fn %s(" % symbol,
-                   "function %s(" % symbol, "%s(" % symbol):
+                   "function %s(" % symbol, "%s(" % symbol,
+                   "%s = (" % symbol, "%s = async (" % symbol):
         opened = source.find(marker)
         if opened == -1:
             continue
