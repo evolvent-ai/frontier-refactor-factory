@@ -201,6 +201,20 @@ def drive(path: str, *, backend=None) -> tuple:
                 continue
         report = reports[-1] if reports else {}
         if not report:
+            # The verifier writes the machine-readable result to REWARD_PATH before printing it.
+            # Some remote SDK versions have returned an incomplete stdout field while the command
+            # tail still contained the printed JSON. Read the authoritative file from the same
+            # sandbox before classifying a correct reference replay as a material failure.
+            reward = backend.run(["cat", "%s/reward.json" % remote_root],
+                                 workdir=remote_root, timeout=30)
+            if reward.ok:
+                try:
+                    value = json.loads(reward.stdout)
+                    if isinstance(value, dict):
+                        report = value
+                except (TypeError, ValueError):
+                    pass
+        if not report:
             raise RuntimeError("remote package replay produced no report: %s" % result.tail(500))
         passed = int(report.get("correctness_passed", 0))
         total = int(report.get("correctness_total", 0))

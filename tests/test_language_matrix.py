@@ -104,3 +104,12 @@ def test_collect_matrix_emits_every_language_scale_pair(monkeypatch):
 def test_shipped_call_verifier_diagnoses_non_object_replies():
     from frf.observe.call.package import VERIFIER_SOURCE
     assert "non-object JSON reply" in VERIFIER_SOURCE
+
+
+def test_remote_replay_has_a_reward_file_fallback():
+    from frf.observe.call import package
+    source = package.drive.__doc__ or ""
+    # The behavior is implemented in the function body; this test keeps the fallback visible in
+    # review without requiring a live sandbox for every unit-test run.
+    import inspect
+    assert 'cat", "%s/reward.json"' in inspect.getsource(package.drive)
