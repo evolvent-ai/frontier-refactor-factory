@@ -183,6 +183,19 @@ def _cargo_binary_target(path: str) -> tuple[str, str]:
     return "", ""
 
 
+def _cargo_workspace_members(path: str) -> list[str]:
+    """Return literal workspace member paths from Cargo.toml (globs are intentionally skipped)."""
+    try:
+        import tomllib
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+        members = data.get("workspace", {}).get("members", [])
+        return [str(item) for item in members
+                if isinstance(item, str) and "*" not in item and "?" not in item]
+    except Exception:
+        return []
+
+
 def _maven_main_class(path: str) -> str:
     """Read an explicitly declared Maven main class, never infer one from source names."""
     import re
@@ -294,6 +307,19 @@ def _discover_entrypoint(root: str) -> tuple:
         if cargo_bin and os.path.isfile(os.path.join(root, cargo_path)):
             return ([['cargo', 'build', '--release', '--bin', cargo_bin]],
                     ['{ROOT}/target/release/' + cargo_bin])
+        # Workspace roots frequently contain no src/ tree themselves. Inspect literal members in
+        # declaration order and select the first member with a deterministic binary target.
+        for member in _cargo_workspace_members(cargo_toml):
+            member_root = os.path.normpath(os.path.join(root, member))
+            member_manifest = os.path.join(member_root, "Cargo.toml")
+            if not os.path.isfile(member_manifest):
+                continue
+            member_name, member_path = _cargo_binary_target(member_manifest)
+            if member_name and os.path.isfile(os.path.join(member_root, member_path)):
+                rel_manifest = os.path.relpath(member_root, root)
+                return ([['cargo', 'build', '--release', '--manifest-path',
+                           '{ROOT}/' + rel_manifest + '/Cargo.toml', '--bin', member_name]],
+                        ['{ROOT}/target/release/' + member_name])
     bin_dir = os.path.join(root, "src", "bin")
     if os.path.isdir(bin_dir):
         names = sorted(name[:-3] for name in os.listdir(bin_dir)
