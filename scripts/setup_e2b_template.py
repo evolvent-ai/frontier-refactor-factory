@@ -114,9 +114,13 @@ DOCKER_INSTALL_CMDS = [
     (
         "apt-get install -y --no-install-recommends "
         "docker-ce docker-ce-cli containerd.io docker-buildx-plugin "
-        "python3 python3-pip nodejs npm "
+        "python3 python3-pip "
         "build-essential"
     ),
+    # Ubuntu 22.04's stock Node is too old for the pinned TypeScript compiler. Install the
+    # supported Node 22 line in the remote image before npm is used; this never touches the host.
+    "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
+    "apt-get install -y --no-install-recommends nodejs",
     # TypeScript call subjects compile inside the sandbox; pin the compiler so the shim does not
     # depend on the remote image's Node experimental flags or a networked npx invocation later.
     "npm install -g typescript@5.6.3",
