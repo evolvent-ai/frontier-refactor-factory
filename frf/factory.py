@@ -201,7 +201,12 @@ class Factory:
 
         signal.signal(signal.SIGINT, _sigint_handler)
 
-        executor = ThreadPoolExecutor()
+        # Keep the executor bounded by the same concurrency contract as the semaphore. The
+        # previous default created an unbounded thread pool even though only max_concurrent jobs
+        # could enter the pipeline; repeated waves of slow remote candidates could therefore
+        # retain one thread per submitted candidate and exhaust the host before E2B enforced its
+        # own active-sandbox limit.
+        executor = ThreadPoolExecutor(max_workers=max(1, max_concurrent))
 
         async def _build_one(index: int, candidate: Candidate) -> None:
             if stop_event.is_set():
