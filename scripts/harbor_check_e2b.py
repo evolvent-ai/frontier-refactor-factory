@@ -90,6 +90,7 @@ def main() -> int:
     parser.add_argument("--agent", default="mini-swe-agent")
     parser.add_argument("--model", required=True)
     parser.add_argument("--concurrent", type=int, default=1)
+    parser.add_argument("--job-name", default="", help="unique Harbor job name")
     parser.add_argument("--repair", action="store_true")
     parser.add_argument("--repair-only", action="store_true")
     args = parser.parse_args()
@@ -132,6 +133,7 @@ def main() -> int:
         environment=checker.EnvironmentType.E2B,
         n_concurrent=args.concurrent, n_attempts=1,
         agent_env=agent_env or None,
+        job_name=args.job_name or None,
     ))
     print(report.model_dump_json(indent=2))
     return 0 if all(item.error is None for item in report.results) else 1
