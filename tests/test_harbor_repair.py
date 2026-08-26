@@ -79,3 +79,4 @@ def test_harbor_agent_bridge_resolves_openai_connection_in_host_process():
     assert 'credentials.get("E2B_API_KEY")' in text
     assert 'parser.add_argument("--agent", default="mini-swe-agent")' in text
     assert '"openai/" + args.model' in text
+    assert 're.sub(r"[^A-Za-z0-9_-]+", "-", args.job_name)' in text

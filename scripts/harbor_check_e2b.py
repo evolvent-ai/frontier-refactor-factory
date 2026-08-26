@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import shutil
 import tomllib
 from pathlib import Path
@@ -128,12 +129,13 @@ def main() -> int:
         os.environ.setdefault("OPENAI_BASE_URL", llm_base)
         os.environ.setdefault("OPENAI_API_BASE", llm_base)
     model = args.model if "/" in args.model else "openai/" + args.model
+    job_name = re.sub(r"[^A-Za-z0-9_-]+", "-", args.job_name).strip("-") or None
     report, _ = asyncio.run(checker.run_checks(
         args.task, agent=args.agent, model=model,
         environment=checker.EnvironmentType.E2B,
         n_concurrent=args.concurrent, n_attempts=1,
         agent_env=agent_env or None,
-        job_name=args.job_name or None,
+        job_name=job_name,
     ))
     print(report.model_dump_json(indent=2))
     return 0 if all(item.error is None for item in report.results) else 1
