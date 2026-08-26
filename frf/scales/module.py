@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import uuid
 from dataclasses import dataclass
 
 from ..core import integrity
@@ -160,6 +161,26 @@ class Observer:
         """
         build, argv = shims.materialise(self.workspace, spec.language,
                                         self.material.source_path, self.material.symbol)
+        if getattr(self._backend, "name", "") in ("docker", "remote"):
+            # Production references are built in the same sandbox image that will freeze them.
+            # Keep a per-observer remote directory so concurrent candidates never share compiler
+            # outputs; pull it back because RemoteSubject stages this host workspace for each run.
+            remote = "/tmp/frf-build-%s" % uuid.uuid4().hex[:12]
+            self._backend.push(self.workspace, remote)
+            for command in build:
+                remote_command = [part.replace(self.workspace, remote)
+                                  if isinstance(part, str) else part for part in command]
+                done = self._backend.run(remote_command, workdir=remote, timeout=BUILD_TIMEOUT)
+                if not done.ok:
+                    raise BuildFailed("%s did not build: %s" %
+                                      (self.material.identity, done.tail(800)))
+            self._backend.pull(remote, self.workspace)
+            self._argv = [part.replace(self.workspace, remote)
+                          if isinstance(part, str) else part for part in argv]
+            # Subject() is not used for remote execution; RemoteSubject rewrites this host path
+            # back to its own staging directory. Keep host paths here for that contract.
+            self._argv = argv
+            return
         for command in build:
             done = subprocess.run(command, cwd=self.workspace, capture_output=True, text=True,
                                   timeout=BUILD_TIMEOUT)
