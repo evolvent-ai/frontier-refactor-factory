@@ -80,6 +80,9 @@ def harbor_check(task_dir: Path, harbor_bin: str) -> tuple[bool, str]:
 def harbor_run(task_dir: Path, harbor_bin: str, backend: str,
                timeout: int = 600, submission: Path | None = None) -> tuple[bool, str]:
     """Run `harbor run` against the task's solution/ directory as the submission."""
+    if backend == "e2b":
+        return False, ("Harbor CLI has no native --backend e2b mode; use "
+                       "scripts/harbor_check_e2b.py for task-native E2B review")
     solution_dir = submission or (task_dir / "solution")
     if not solution_dir.exists():
         return False, "no solution/ directory to use as submission"
