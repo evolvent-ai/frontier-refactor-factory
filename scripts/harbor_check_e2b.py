@@ -133,6 +133,8 @@ def main() -> int:
     parser.add_argument("--agent", default="mini-swe-agent")
     parser.add_argument("--model", required=True)
     parser.add_argument("--concurrent", type=int, default=1)
+    parser.add_argument("--attempts", type=int, default=2,
+                        help="bounded Harbor review attempts per task")
     parser.add_argument("--job-name", default="", help="unique Harbor job name")
     parser.add_argument("--repair", action="store_true")
     parser.add_argument("--repair-only", action="store_true")
@@ -175,7 +177,7 @@ def main() -> int:
     report, _ = asyncio.run(checker.run_checks(
         args.task, agent=args.agent, model=model,
         environment=checker.EnvironmentType.E2B,
-        n_concurrent=args.concurrent, n_attempts=1,
+        n_concurrent=args.concurrent, n_attempts=max(1, args.attempts),
         agent_env=agent_env or None,
         job_name=job_name,
     ))
