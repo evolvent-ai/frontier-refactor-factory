@@ -97,6 +97,15 @@ def main() -> int:
     # LLM_* so the factory can target any gateway. Forward only the two values required by the
     # agent sandbox; never write them into the task tree or logs.
     agent_env = {}
+    # Harbor's E2B environment resolves its own credentials from process environment, while FRF
+    # deliberately loads them through credentials.get() (including .env). Bridge that boundary
+    # before checker.run_checks constructs the environment.
+    e2b_key = credentials.get("E2B_API_KEY")
+    e2b_template = credentials.get("E2B_DIND_TEMPLATE")
+    if e2b_key:
+        os.environ.setdefault("E2B_API_KEY", e2b_key)
+    if e2b_template:
+        os.environ.setdefault("E2B_TEMPLATE", e2b_template)
     llm_key = credentials.get("LLM_API_KEY")
     llm_base = credentials.get("LLM_BASE_URL")
     if llm_key:

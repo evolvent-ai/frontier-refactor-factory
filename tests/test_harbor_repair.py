@@ -76,3 +76,4 @@ def test_harbor_agent_bridge_resolves_openai_connection_in_host_process():
     assert 'os.environ.setdefault("OPENAI_API_KEY"' in text
     assert 'credentials.get("LLM_API_KEY")' in text
     assert 'credentials.get("LLM_BASE_URL")' in text
+    assert 'credentials.get("E2B_API_KEY")' in text
