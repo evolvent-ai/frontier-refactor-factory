@@ -326,7 +326,11 @@ class Package:
             try:
                 generator = validated_generator(answer)
                 print("[package] received probe generator for %s" % candidate.identity, flush=True)
-            except Exception:
+            except model.ModelError:
+                # A transport/gateway timeout is not malformed model code. Retrying it as a
+                # repair request doubles the candidate wall time and can starve a bounded roll.
+                raise
+            except (ValueError, SyntaxError):
                 answer = model.ask("Return ONLY valid Python defining probes(n).\n" + surface,
                                    system="Define exactly probes(n).", timeout=60)
                 generator = validated_generator(answer)

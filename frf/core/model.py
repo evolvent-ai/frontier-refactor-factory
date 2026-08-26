@@ -82,10 +82,16 @@ def ask(prompt: str, *, system: str = "", temperature: float = 0.2,
     request = urllib.request.Request(
         "%s/chat/completions" % base, data=body,
         headers={"Content-Type": "application/json", "Authorization": "Bearer %s" % key})
+    # `timeout` is a total request budget, not a per-retry multiplier. Package candidates may ask
+    # once for a generator and once for repair; three full waits per call can otherwise starve a roll.
+    deadline = time.monotonic() + max(0.1, float(timeout))
     last_transport = None
     for attempt in range(3):
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        break
       try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=remaining) as response:
             payload = json.loads(response.read())
         break
       except urllib.error.HTTPError as error:
@@ -100,11 +106,12 @@ def ask(prompt: str, *, system: str = "", temperature: float = 0.2,
       except (urllib.error.URLError, TimeoutError, OSError) as error:
         last_transport = error
         if attempt < 2:
-            time.sleep(2 ** attempt)
+            time.sleep(min(2 ** attempt, max(0.0, deadline - time.monotonic())))
             continue
         raise ModelError("the gateway did not answer: %s" % error) from error
-    else:
+    if last_transport is not None:
         raise ModelError("the gateway did not answer: %s" % last_transport)
+    raise ModelError("the model request exceeded its %.1fs total timeout" % float(timeout))
 
     try:
         return payload["choices"][0]["message"]["content"] or ""
