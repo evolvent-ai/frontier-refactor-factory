@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import shutil
 import tomllib
 from pathlib import Path
@@ -90,10 +91,19 @@ def main() -> int:
         changed = repair_task(args.task)
         if args.repair_only:
             return 0 if changed else 2
+    # Harbor agents use the OpenAI-compatible variable names, while FRF keeps credentials under
+    # LLM_* so the factory can target any gateway. Forward only the two values required by the
+    # agent sandbox; never write them into the task tree or logs.
+    agent_env = {}
+    if os.environ.get("LLM_API_KEY"):
+        agent_env["OPENAI_API_KEY"] = os.environ["LLM_API_KEY"]
+    if os.environ.get("LLM_BASE_URL"):
+        agent_env["OPENAI_BASE_URL"] = os.environ["LLM_BASE_URL"]
     report, _ = asyncio.run(checker.run_checks(
         args.task, agent=args.agent, model=args.model,
         environment=checker.EnvironmentType.E2B,
         n_concurrent=args.concurrent, n_attempts=1,
+        agent_env=agent_env or None,
     ))
     print(report.model_dump_json(indent=2))
     return 0 if all(item.error is None for item in report.results) else 1
