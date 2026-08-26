@@ -53,6 +53,7 @@ def test_matrix_source_errors_are_recorded_without_certifying_the_row(monkeypatc
     row = matrix.collect(["python"], "package", 1)[0]
     assert row["source_eligible"] is False
     assert row["errors"] == ["network unavailable"]
+    assert row["matrix_status"] == "error"
     assert row["replay"] == "not-run"
 
 

@@ -98,6 +98,10 @@ def collect(languages: list[str], scale: str, count: int, *, timeout: float = 60
             item["matrix_status"] = "timeout"
         except Exception as exc:
             item["errors"].append(str(exc)[:1000])
+            # A broken/slow source must be attributable to this matrix cell, not terminate the
+            # audit and erase evidence for every language/scale that follows it.
+            item["matrix_status"] = "error"
+            item["source_eligible"] = False
         rows.append(item)
     return rows
 
