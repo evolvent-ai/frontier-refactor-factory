@@ -404,7 +404,11 @@ def _specify(scale: Scale, candidate: Candidate) -> Spec:
             kwargs["task_form"] = task_form
         spec = scale.specify(candidate, **kwargs)
     except Exception as exc:                                   # noqa: BLE001 -- reported, not raised
-        raise Stage("specify", "could-not-specify", Fault.MATERIAL,
+        # A model gateway/transport failure is our infrastructure, not evidence that the sourced
+        # subject is unsuitable. Keep it as a factory fault so yield and retry accounting remain
+        # honest; malformed model output remains a material refusal after the scale validates it.
+        fault = Fault.FACTORY if type(exc).__name__ in {"ModelError", "TransportError"} else Fault.MATERIAL
+        raise Stage("specify", "could-not-specify", fault,
                     "%s: %s" % (type(exc).__name__, exc))
     if not isinstance(spec, Spec):
         raise Stage("specify", "not-a-spec", Fault.FACTORY,

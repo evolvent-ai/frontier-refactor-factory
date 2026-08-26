@@ -145,6 +145,20 @@ def test_a_subject_that_will_not_repeat_itself_is_refused_before_anything_else_r
     assert "selected by luck" in refusal.detail
 
 
+def test_model_gateway_failure_is_attributed_to_factory():
+    from frf.core.model import ModelError
+
+    class Scale(_ToyScale):
+        name = "model-failure"
+        def specify(self, candidate):
+            raise ModelError("gateway unavailable")
+
+    result = Factory().register(Scale()).install_stages(**_stages()).build("model-failure", budget=1)
+    refusal = result.batch.refused[0]
+    assert refusal.fault is pipeline.Fault.FACTORY
+    assert refusal.reason == "could-not-specify"
+
+
 def test_a_package_that_cannot_reproduce_itself_is_OUR_fault_not_the_material_s():
     """The distinction that decides where a repair loop looks.
 
