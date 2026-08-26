@@ -135,6 +135,7 @@ def _run_command(args) -> int:
             form=args.form,
             source_language=getattr(args, "source", "") or "",
             budget=args.budget,
+            max_attempts=getattr(args, "max_attempts", 0),
         )])
 
     # Apply resume checkpoint.
@@ -369,7 +370,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_cmd.add_argument("--source", default="", metavar="LANGUAGE",
                          help="source language filter")
     run_cmd.add_argument("--budget", type=int, default=10,
-                         help="candidates to try (when --config is not given)")
+                         help="emitted tasks to target (when --config is not given)")
+    run_cmd.add_argument("--max-attempts", type=int, default=0,
+                         help="finite candidate-attempt ceiling (default: 10 x budget)")
     run_cmd.add_argument("--resume", default="", metavar="CHECKPOINT_JSONL",
                          help="path to an existing checkpoint file to resume from")
     run_cmd.add_argument("--dry-run", action="store_true",

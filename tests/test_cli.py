@@ -76,6 +76,7 @@ def test_configured_run_targets_emitted_tasks_with_a_finite_attempt_limit(monkey
     monkeypatch.setattr("frf.core.rate_limiter.configure", lambda **kwargs: None)
     monkeypatch.setattr("frf.automation.configure_e2b_slots", lambda limit: None)
 
-    assert cli.main(["run", "--scale", "repo", "--form", "inplace", "--budget", "2"]) == 0
+    assert cli.main(["run", "--scale", "repo", "--form", "inplace", "--budget", "2",
+                     "--max-attempts", "7"]) == 0
     assert received[0]["target_emitted"] is True
-    assert received[0]["max_attempts"] == 0  # automation resolves this to 10 x target
+    assert received[0]["max_attempts"] == 7
