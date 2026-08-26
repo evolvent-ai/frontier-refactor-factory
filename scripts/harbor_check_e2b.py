@@ -189,7 +189,7 @@ def main() -> int:
             job_name="%s-%03d" % (job_name, index),
         )
 
-    reports = asyncio.run(run_all(task_dirs, run_one))
+    reports = asyncio.run(run_all(task_dirs, run_one, max(1, args.concurrent)))
     results = []
     for report, _job_dir in reports:
         results.extend(report.results)
@@ -198,9 +198,15 @@ def main() -> int:
     return 0 if all(item.error is None for item in results) else 1
 
 
-async def run_all(task_dirs, runner):
-    """Run parent-directory task reviews concurrently with bounded task count."""
-    return await asyncio.gather(*(runner(path, i) for i, path in enumerate(task_dirs)))
+async def run_all(task_dirs, runner, limit: int):
+    """Run parent-directory task reviews with an explicit outer concurrency bound."""
+    semaphore = asyncio.Semaphore(limit)
+
+    async def bounded(path, index):
+        async with semaphore:
+            return await runner(path, index)
+
+    return await asyncio.gather(*(bounded(path, i) for i, path in enumerate(task_dirs)))
 
 
 if __name__ == "__main__":
