@@ -83,7 +83,11 @@ def repair_task(path: Path) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("task", type=Path)
-    parser.add_argument("--agent", default="codex")
+    # FRF's gateway exposes OpenAI Chat Completions. Codex CLI uses the Responses/WebSocket
+    # protocol, so it can silently fall back to api.openai.com or hang on a Chat-Completions-only
+    # gateway. Harbor's mini-swe-agent uses LiteLLM Chat Completions and is the compatible default;
+    # callers may still select another reviewed agent explicitly.
+    parser.add_argument("--agent", default="mini-swe-agent")
     parser.add_argument("--model", required=True)
     parser.add_argument("--concurrent", type=int, default=1)
     parser.add_argument("--repair", action="store_true")
