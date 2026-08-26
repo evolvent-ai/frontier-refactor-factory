@@ -1,6 +1,7 @@
 from frf.automation import BatchReport, _index, _scale, _merge_reports
 from frf.config import JobConfig, RunConfig
 from frf.core.diversity import DiversityPolicy, repository_key
+import hashlib
 
 
 def test_diversity_policy_limits_one_repository_without_losing_identity():
@@ -58,6 +59,14 @@ def test_roll_attempt_limit_round_trips_through_config():
                                           "budget": 3, "max_attempts": 21}]})
     assert cfg.jobs[0].max_attempts == 21
     assert cfg.to_json()["jobs"][0]["max_attempts"] == 21
+
+
+def test_same_candidate_isolated_per_scale_and_form():
+    identity = "github:org/repo@abc#module.fn"
+    module = hashlib.sha256(("module|inplace||" + identity).encode()).hexdigest()[:12]
+    kernel = hashlib.sha256(("kernel|inplace||" + identity).encode()).hexdigest()[:12]
+    cross = hashlib.sha256(("module|cross|rust|" + identity).encode()).hexdigest()[:12]
+    assert len({module, kernel, cross}) == 3
 
 
 def test_roll_attempt_limit_must_cover_the_emitted_target():

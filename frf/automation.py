@@ -172,7 +172,11 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         candidates = candidate_list
         if len(candidate_list) == 1:
             identity = str(getattr(candidate_list[0], "identity", "candidate"))
-            suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+            # The same sourced subject may legitimately produce Module and Kernel tasks. Include
+            # scale/form in the workspace key so one successful run cannot overwrite another
+            # scale's emitted reference and verifier while retaining the readable task name.
+            isolation_key = "%s|%s|%s|%s" % (name, form, target_language, identity)
+            suffix = hashlib.sha256(isolation_key.encode("utf-8")).hexdigest()[:12]
             output_dir = os.path.join(output_dir, ".candidates", suffix)
     # Empty `index` means automatic selection, including when it came from JobConfig.index="".
     # An explicit non-empty value is honored exactly.
