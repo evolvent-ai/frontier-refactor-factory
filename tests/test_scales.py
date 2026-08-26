@@ -26,6 +26,7 @@ from frf.scales.repo import (                                          # noqa: E
     _makefile_has_target,
     _setup_console_script,
     _cargo_package_name,
+    _maven_main_class,
 )
 from frf.observe.probes.schema import Schema                              # noqa: E402
 from frf.scales.module import ProbeSource                                  # noqa: E402
@@ -78,6 +79,16 @@ def test_a_repo_needs_scenarios_and_says_why_when_it_has_none():
         assert "no scenarios were lifted" in str(exc)
     else:
         raise AssertionError("a repository with no scenarios must be refused")
+
+
+def test_java_entrypoint_requires_explicit_maven_main_class(tmp_path):
+    pom = tmp_path / "pom.xml"
+    pom.write_text("<project><properties><mainClass>com.example.Main</mainClass></properties></project>",
+                   encoding="utf-8")
+    assert _maven_main_class(str(pom)) == "com.example.Main"
+    build, invoke = _discover_entrypoint(str(tmp_path))
+    assert build == [["mvn", "-q", "-DskipTests", "-o", "package"]]
+    assert invoke == ["java", "-cp", "{ROOT}/target/classes", "com.example.Main"]
 
 
 def test_a_cross_language_repo_names_the_target_in_the_task():

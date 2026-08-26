@@ -166,6 +166,21 @@ def _cargo_package_name(path: str) -> str:
         return ""
 
 
+def _maven_main_class(path: str) -> str:
+    """Read an explicitly declared Maven main class, never infer one from source names."""
+    import re
+    try:
+        source = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return ""
+    for pattern in (r"<mainClass>\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*</mainClass>",
+                    r"<main-class>\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*</main-class>"):
+        match = re.search(pattern, source)
+        if match:
+            return match.group(1)
+    return ""
+
+
 def _discover_entrypoint(root: str) -> tuple:
     """Discover (build_steps, invoke_argv) from a local repository tree.
 
@@ -176,7 +191,8 @@ def _discover_entrypoint(root: str) -> tuple:
       4. setup.py console_scripts
       5. cmd/<name>/main.go  (Go)
       6. src/main.rs  (Rust, via cargo)
-      7. Makefile `run` / `start` / `serve` target
+      7. pom.xml explicit Maven mainClass
+      8. Makefile `run` / `start` / `serve` target
 
     All absolute paths in the returned lists use ``{ROOT}`` in place of
     ``root`` so that the caller can point the material at any directory.
@@ -262,7 +278,16 @@ def _discover_entrypoint(root: str) -> tuple:
                 ["{ROOT}/target/release/" + name],
             )
 
-    # 7. Makefile run/start/serve target
+    # 7. Maven only when the project declares the executable class explicitly. A Java source tree
+    # with several mains is not safely dispatchable by guessing the first filename.
+    pom = os.path.join(root, "pom.xml")
+    if os.path.isfile(pom):
+        main_class = _maven_main_class(pom)
+        if main_class:
+            return ([['mvn', '-q', '-DskipTests', '-o', 'package']],
+                    ['java', '-cp', '{ROOT}/target/classes', main_class])
+
+    # 8. Makefile run/start/serve target
     makefile = os.path.join(root, "Makefile")
     if os.path.isfile(makefile):
         for target in ("run", "start", "serve"):
@@ -272,7 +297,7 @@ def _discover_entrypoint(root: str) -> tuple:
     raise ValueError(
         "no discoverable entry point in %r: checked Dockerfile ENTRYPOINT, "
         "pyproject.toml [project.scripts], main.py, setup.py console_scripts, "
-        "cmd/*/main.go, src/main.rs, and Makefile run/start/serve targets"
+        "cmd/*/main.go, src/main.rs, pom.xml mainClass, and Makefile run/start/serve targets"
         % os.path.basename(root)
     )
 
