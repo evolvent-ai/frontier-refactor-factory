@@ -47,6 +47,18 @@ def _assemble_with_environment(*args, **kwargs):
             else:
                 shutil.copy2(item, target)
         dockerfile = destination.read_text()
+        if "go build" in dockerfile and "command -v go" not in dockerfile:
+            # Some Harbor/E2B base-image aliases do not expose the toolchain expected by a
+            # repository-native Dockerfile even when the nominal golang image is selected. Make
+            # the temporary review wrapper self-healing; the emitted task remains untouched.
+            marker = "\n"
+            first_from = dockerfile.find("FROM ")
+            line_end = dockerfile.find(marker, first_from)
+            if first_from >= 0 and line_end >= 0:
+                fallback = ("\nRUN command -v go >/dev/null 2>&1 || "
+                            "(apt-get update && apt-get install -y --no-install-recommends golang-go "
+                            "&& rm -rf /var/lib/apt/lists/*)\n")
+                dockerfile = dockerfile[:line_end + 1] + fallback + dockerfile[line_end + 1:]
         if "COPY task /app/task" not in dockerfile:
             # COPY must follow FROM; placing it before the base image makes Docker ignore/reject
             # the reviewed environment and can surface as missing toolchains (e.g. go not found).
