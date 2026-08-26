@@ -161,6 +161,8 @@ class Observer:
         """
         build, argv = shims.materialise(self.workspace, spec.language,
                                         self.material.source_path, self.material.symbol)
+        if spec.language.lower() in ("typescript", "ts") and self._backend is None:
+            raise BuildFailed("TypeScript call subjects require a sandbox backend; refusing host build")
         if self._backend is not None and getattr(self._backend, "name", "") != "local-process":
             # Production references are built in the same sandbox image that will freeze them.
             # Keep a per-observer remote directory so concurrent candidates never share compiler
