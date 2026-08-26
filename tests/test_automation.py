@@ -42,3 +42,11 @@ def test_roll_report_keeps_source_rejection_reasons():
     merged = _merge_reports(reports, "github-packages", 2)
     assert merged.summary["source_rejections"] == {
         "checkout-failed": 5, "surface-too-small": 1}
+
+
+def test_empty_source_is_reported_separately_from_zero_yield():
+    from frf.automation import BatchReport
+    report = BatchReport({"attempted": 0, "emitted": 0,
+                          "source_eligibility": "empty",
+                          "source_note": "index returned no eligible candidates"}, 0.2, "github")
+    assert report.summary["source_eligibility"] == "empty"

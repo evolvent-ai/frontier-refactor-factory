@@ -346,8 +346,15 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
             summary.setdefault("sourcing", {})["repositories_walked"] = idx.repositories_walked
             summary["sourcing"]["functions_walked"] = idx.functions_walked
         rejections = getattr(idx, "rejection_counts", None)
-        if rejections:
+        if rejections is not None:
             summary["source_rejections"] = dict(sorted(rejections.items()))
+        if summary.get("attempted", 0) == 0:
+            # An empty enumerable source is not a zero-yield quality result. Preserve the
+            # distinction so matrix consumers can tell "no material was supplied" from candidates
+            # rejected by build/freeze/adequacy gates.
+            summary["source_eligibility"] = "empty"
+            summary["source_total"] = idx.total() if hasattr(idx, "total") else None
+            summary["source_note"] = "index returned no eligible candidates"
         return BatchReport(summary, time.perf_counter() - started, index_name)
     finally:
         factory.close()
