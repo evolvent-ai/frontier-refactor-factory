@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import os
 import re
+import time
 import shutil
 import tomllib
 from pathlib import Path
@@ -174,6 +175,7 @@ def main() -> int:
         os.environ.setdefault("OPENAI_API_BASE", llm_base)
     model = args.model if "/" in args.model else "openai/" + args.model
     job_name = re.sub(r"[^A-Za-z0-9_-]+", "-", args.job_name).strip("-") or "frf-review"
+    job_name = "%s-%d" % (job_name, time.time_ns())
     task_dirs = ([args.task] if (args.task / "task.toml").exists()
                  else sorted(p.parent for p in args.task.rglob("task.toml")))
     if not task_dirs:
@@ -181,13 +183,18 @@ def main() -> int:
         return 1
 
     async def run_one(task_dir, index):
-        return await checker.run_checks(
-            task_dir, agent=args.agent, model=model,
-            environment=checker.EnvironmentType.E2B,
-            n_concurrent=args.concurrent, n_attempts=max(1, args.attempts),
-            agent_env=agent_env or None,
-            job_name="%s-%03d" % (job_name, index),
-        )
+        try:
+            return await checker.run_checks(
+                task_dir, agent=args.agent, model=model,
+                environment=checker.EnvironmentType.E2B,
+                n_concurrent=args.concurrent, n_attempts=max(1, args.attempts),
+                agent_env=agent_env or None,
+                job_name="%s-%03d" % (job_name, index),
+            )
+        except Exception as exc:
+            # A single task's Harbor setup failure must remain auditable without cancelling the
+            # other bounded reviews in the batch.
+            return SimpleReport(task_dir.name, str(exc))
 
     reports = asyncio.run(run_all(task_dirs, run_one, max(1, args.concurrent)))
     results = []
@@ -207,6 +214,15 @@ async def run_all(task_dirs, runner, limit: int):
             return await runner(path, index)
 
     return await asyncio.gather(*(bounded(path, i) for i, path in enumerate(task_dirs)))
+
+
+class SimpleReport:
+    """Minimal report shape for a task that failed before Harbor produced a report."""
+    def __init__(self, task_name, error):
+        self.results = [type("Result", (), {"task_name": task_name, "error": error,
+                                            "model_dump": lambda self: {
+                                                "task_name": self.task_name, "error": self.error
+                                            }})()]
 
 
 if __name__ == "__main__":
