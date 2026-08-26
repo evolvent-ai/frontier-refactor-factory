@@ -29,7 +29,7 @@ from frf.scales.repo import (                                          # noqa: E
     _maven_main_class,
 )
 from frf.observe.probes.schema import Schema                              # noqa: E402
-from frf.scales.module import ProbeSource, Material as ModuleMaterial, Observer as ModuleObserver  # noqa: E402
+from frf.scales.module import ProbeSource, Material as ModuleMaterial, Observer as ModuleObserver, mutate  # noqa: E402
 
 _NUMERIC = {"params": [{"kind": "float_array", "dtype": "float64", "size": "n"}]}
 _SCALAR = {"params": [{"kind": "int", "low": 0, "high": 100}]}
@@ -87,6 +87,14 @@ def test_remote_mutant_build_uses_backend_instead_of_host_subprocess(tmp_path):
     observer._argv = ["node"]
     observer._mutant(0)
     assert backend.calls[:2] == ["push", "run"]
+
+
+def test_typescript_expression_arrow_gets_a_semantic_mutant():
+    source = "export const entry = (value: number): number => value + 1;\n"
+    mutant = mutate(source, "typescript", "entry", 0)
+    assert mutant != source
+    assert "=> null /* mutant */" in mutant
+    assert "value + 1" not in mutant
 
 
 def _candidate(scale: str, **detail) -> Candidate:
