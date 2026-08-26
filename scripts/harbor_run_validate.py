@@ -76,9 +76,9 @@ def harbor_check(task_dir: Path, harbor_bin: str) -> tuple[bool, str]:
 
 
 def harbor_run(task_dir: Path, harbor_bin: str, backend: str,
-               timeout: int = 600) -> tuple[bool, str]:
+               timeout: int = 600, submission: Path | None = None) -> tuple[bool, str]:
     """Run `harbor run` against the task's solution/ directory as the submission."""
-    solution_dir = task_dir / "solution"
+    solution_dir = submission or (task_dir / "solution")
     if not solution_dir.exists():
         return False, "no solution/ directory to use as submission"
 
@@ -147,6 +147,8 @@ def main() -> int:
                         help="Stop after the first failure")
     parser.add_argument("--skip-check", action="store_true",
                         help="Skip local `harbor check` before execution (useful with --backend e2b)")
+    parser.add_argument("--submission", type=Path,
+                        help="Explicit submission directory (default: <task>/solution)")
     args = parser.parse_args()
 
     harbor_bin = find_harbor_bin()
@@ -197,7 +199,8 @@ def main() -> int:
 
         # Step 3: harbor run (unless --check-only)
         if not args.check_only and not args.schema_only and harbor_bin:
-            ok, msg = harbor_run(task_dir, harbor_bin, args.backend, args.timeout)
+            ok, msg = harbor_run(task_dir, harbor_bin, args.backend, args.timeout,
+                                 args.submission)
             elapsed = time.monotonic() - t0
             print("   harbor run:    %s  %s  (%.1fs)" % ("✅" if ok else "❌", msg, elapsed))
             if not ok:
