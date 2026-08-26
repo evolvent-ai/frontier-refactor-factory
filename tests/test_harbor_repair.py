@@ -45,3 +45,21 @@ def test_repair_is_idempotent_when_instruction_is_complete(tmp_path):
     original = path.read_bytes()
     assert not repair_task(tmp_path)
     assert path.read_bytes() == original
+
+
+def test_harbor_check_timeout_is_a_task_failure_not_a_batch_crash(monkeypatch, tmp_path):
+    import importlib.util
+    import subprocess
+    path = Path(__file__).parents[1] / "scripts" / "harbor_run_validate.py"
+    spec = importlib.util.spec_from_file_location("harbor_run_validate", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("harbor", 30)
+
+    monkeypatch.setattr(module.subprocess, "run", timeout)
+    ok, message = module.harbor_check(tmp_path, "harbor")
+    assert not ok
+    assert "timed out" in message

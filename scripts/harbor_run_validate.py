@@ -59,10 +59,15 @@ def schema_check(task_dir: Path) -> tuple[bool, str]:
 
 def harbor_check(task_dir: Path, harbor_bin: str) -> tuple[bool, str]:
     """Run `harbor check <task-dir>` (no Docker needed)."""
-    result = subprocess.run(
-        [harbor_bin, "check", str(task_dir)],
-        capture_output=True, text=True, timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            [harbor_bin, "check", str(task_dir)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "harbor check timed out after 30s"
+    except OSError as exc:
+        return False, "could not execute harbor check: %s" % exc
     if result.returncode == 0:
         return True, "harbor check OK"
     output = (result.stdout + result.stderr).strip()
