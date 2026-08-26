@@ -28,8 +28,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -82,16 +84,26 @@ def harbor_run(task_dir: Path, harbor_bin: str, backend: str,
     if not solution_dir.exists():
         return False, "no solution/ directory to use as submission"
 
-    cmd = [harbor_bin, "run", str(task_dir), "--submission", str(solution_dir)]
-    if backend == "e2b":
-        cmd += ["--backend", "e2b"]
+    # Harbor's current CLI has no --submission option. Stage an explicit submission into the
+    # task layout it natively understands, keeping the source task untouched and cleaning up even
+    # when the remote run fails.
+    staging = None
+    run_task = task_dir
+    if submission is not None:
+        staging = Path(tempfile.mkdtemp(prefix="frf-harbor-task-"))
+        shutil.copytree(task_dir, staging / task_dir.name, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("solution"))
+        run_task = staging / task_dir.name
+        shutil.copytree(solution_dir, run_task / "solution", dirs_exist_ok=True)
 
+    cmd = [harbor_bin, "run", str(run_task)]
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, "harbor run timed out after %ds" % timeout
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
 
     if result.returncode != 0:
         output = (result.stdout + result.stderr).strip()[-400:]
