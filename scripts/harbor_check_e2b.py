@@ -27,6 +27,11 @@ _assemble = checker.assemble_check_task
 def _assemble_with_environment(*args, **kwargs):
     wrapper = _assemble(*args, **kwargs)
     task_dir = Path(kwargs.get("task_dir", args[0] if args else ""))
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", wrapper.name).strip("-") or "check-task"
+    if safe_name != wrapper.name:
+        safe_wrapper = wrapper.with_name(safe_name)
+        wrapper.rename(safe_wrapper)
+        wrapper = safe_wrapper
     source = task_dir / "environment" / "Dockerfile"
     destination = wrapper / "environment" / "Dockerfile"
     if source.exists():
@@ -46,6 +51,9 @@ def _assemble_with_environment(*args, **kwargs):
             destination.write_text("COPY task /app/task\n" + dockerfile)
         config_path = wrapper / "task.toml"
         config = tomllib.loads(config_path.read_text())
+        task = config.setdefault("task", {})
+        if isinstance(task, dict) and task.get("name"):
+            task["name"] = re.sub(r"[^A-Za-z0-9_-]+", "-", str(task["name"])).strip("-")
         environment = config.setdefault("environment", {})
         environment.pop("docker_image", None)
         environment["workdir"] = "/app"
