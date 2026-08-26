@@ -15,7 +15,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from frf import Factory                                                # noqa: E402
-from frf.core.scale import SCALES, Candidate                           # noqa: E402
+from frf.core.scale import SCALES, Candidate, Spec                    # noqa: E402
 from frf.scales import Kernel, Module, Package, Repo                   # noqa: E402
 from frf.observe.process.observation import freeze                     # noqa: E402
 from frf.observe.process.runner import Scenario, Step, run_scenario    # noqa: E402
@@ -29,7 +29,7 @@ from frf.scales.repo import (                                          # noqa: E
     _maven_main_class,
 )
 from frf.observe.probes.schema import Schema                              # noqa: E402
-from frf.scales.module import ProbeSource                                  # noqa: E402
+from frf.scales.module import ProbeSource, Material as ModuleMaterial, Observer as ModuleObserver  # noqa: E402
 
 _NUMERIC = {"params": [{"kind": "float_array", "dtype": "float64", "size": "n"}]}
 _SCALAR = {"params": [{"kind": "int", "low": 0, "high": 100}]}
@@ -41,6 +41,28 @@ def test_module_probe_prefix_contains_semantic_positive_and_negative_cases():
     assert ["ab", "ba"] in probes
     assert ["ab", "aa"] in probes
     assert ["listen", "silent"] in probes
+
+
+def test_remote_call_build_uses_backend_instead_of_host_subprocess(tmp_path):
+    source = tmp_path / "subject.go"
+    source.write_text("package subject\n", encoding="utf-8")
+
+    class Backend:
+        name = "remote"
+        def __init__(self): self.calls = []
+        def push(self, local, remote): self.calls.append(("push", remote))
+        def run(self, argv, *, workdir=None, timeout=0, env=None):
+            self.calls.append(("run", tuple(argv), workdir))
+            from frf.core.sandbox import Result
+            return Result(0, "", "")
+        def pull(self, remote, local): self.calls.append(("pull", remote))
+
+    backend = Backend()
+    material = ModuleMaterial("test", "go", str(source), "entry", "d",
+                              Schema.from_json(_NUMERIC))
+    observer = ModuleObserver(str(tmp_path), material, backend=backend)
+    observer.build(Spec("test", "module", "go", "d"))
+    assert [call[0] for call in backend.calls] == ["push", "run", "pull"]
 
 
 def _candidate(scale: str, **detail) -> Candidate:
