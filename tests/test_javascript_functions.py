@@ -78,3 +78,11 @@ def test_javascript_shim_dispatches_the_mined_symbol(tmp_path):
     with Subject(argv, cwd=str(tmp_path), timeout=5) as subject:
         result = subject.call("scale", [[1, 2, 3], 2])
     assert result.ok and result.value == [2, 4, 6]
+
+
+def test_typescript_shim_uses_compiler_output_instead_of_node_strip_flag():
+    from frf.observe.call import shims
+    shim = shims.load("typescript")
+    assert shim.build and shim.build[0][0] == "tsc"
+    assert "--experimental-strip-types" not in shim.run
+    assert "compiled/subject.js" in shim.run
