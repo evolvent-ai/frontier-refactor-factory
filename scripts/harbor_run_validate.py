@@ -145,6 +145,8 @@ def main() -> int:
                         help="Timeout in seconds for harbor run per task (default: 600)")
     parser.add_argument("--fail-fast", action="store_true",
                         help="Stop after the first failure")
+    parser.add_argument("--skip-check", action="store_true",
+                        help="Skip local `harbor check` before execution (useful with --backend e2b)")
     args = parser.parse_args()
 
     harbor_bin = find_harbor_bin()
@@ -183,7 +185,7 @@ def main() -> int:
             continue
 
         # Step 2: harbor check (if harbor available)
-        if harbor_bin and not args.schema_only:
+        if harbor_bin and not args.schema_only and not args.skip_check:
             ok, msg = harbor_check(task_dir, harbor_bin)
             print("   harbor check:  %s  %s" % ("✅" if ok else "❌", msg))
             if not ok:
