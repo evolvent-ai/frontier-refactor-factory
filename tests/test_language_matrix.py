@@ -116,6 +116,15 @@ def test_matrix_row_timeout_is_recorded_without_becoming_empty_source(monkeypatc
     assert "matrix row timeout" in row[0]["errors"][0]
 
 
+def test_matrix_total_deadline_marks_unstarted_rows(monkeypatch):
+    matrix = _module()
+    calls = iter((100.0, 100.1, 100.1, 102.0))
+    monkeypatch.setattr(matrix, "collect", lambda *args, **kwargs: [])
+    monkeypatch.setattr(matrix.time, "monotonic", lambda: next(calls))
+    rows = matrix.collect_matrix(["zig"], 1, scales=("module", "repo"), total_timeout=1)
+    assert rows[0]["matrix_status"] == "deadline"
+
+
 def test_shipped_call_verifier_diagnoses_non_object_replies():
     from frf.observe.call.package import VERIFIER_SOURCE
     assert "non-object JSON reply" in VERIFIER_SOURCE

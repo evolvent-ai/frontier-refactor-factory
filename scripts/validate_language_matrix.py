@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import signal
+import time
 from contextlib import contextmanager
 
 from frf.automation import _index
@@ -130,11 +131,21 @@ def apply_batch_report(row: dict, report: dict) -> dict:
     return merged
 
 
-def collect_matrix(languages: list[str], count: int, scales=SCALES, *, timeout: float = 60.0) -> list[dict]:
+def collect_matrix(languages: list[str], count: int, scales=SCALES, *, timeout: float = 60.0,
+                   total_timeout: float = 0.0) -> list[dict]:
     """Collect one auditable row for every requested language/scale pair."""
     rows = []
+    deadline = time.monotonic() + total_timeout if total_timeout > 0 else None
     for scale in scales:
-        rows.extend(collect(languages, scale, count, timeout=timeout))
+        if deadline is not None and time.monotonic() >= deadline:
+            for language in languages:
+                rows.append({"language": language, "scale": scale,
+                             "capability": capability(language, scale=scale).__dict__,
+                             "candidates": [], "errors": ["matrix total deadline exceeded"],
+                             **_evidence_fields(), "matrix_status": "deadline"})
+        else:
+            remaining = max(0.0, deadline - time.monotonic()) if deadline is not None else timeout
+            rows.extend(collect(languages, scale, count, timeout=min(timeout, remaining)))
     return rows
 
 
@@ -145,9 +156,12 @@ def main() -> int:
     parser.add_argument("--count", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=60.0,
                         help="maximum seconds per language/scale row (default: 60)")
+    parser.add_argument("--total-timeout", type=float, default=0.0,
+                        help="maximum seconds for the complete matrix; 0 means unlimited")
     args = parser.parse_args()
     languages = [x.strip() for x in args.languages.split(",") if x.strip()]
-    rows = (collect_matrix(languages, max(1, args.count), timeout=max(0, args.timeout)) if args.scale == "all"
+    rows = (collect_matrix(languages, max(1, args.count), timeout=max(0, args.timeout),
+                           total_timeout=max(0, args.total_timeout)) if args.scale == "all"
             else collect(languages, args.scale, max(1, args.count), timeout=max(0, args.timeout)))
     print(json.dumps(rows, indent=2, ensure_ascii=False))
     return 0
