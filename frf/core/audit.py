@@ -111,6 +111,17 @@ def _metadata(task_toml: str) -> dict:
         return {}
 
 
+def _record_rank(record: dict) -> int:
+    """How much a record establishes, for choosing among several for the same subject.
+
+    Rank by the status `_status_from` would give it (a full battery outranks an offline backfill),
+    then by proportion of checks held (a record that checked nothing ranks below one that checked
+    something even if the something failed), then by how many checks ran.
+    """
+    status, _backend, held, total = _status_from({}, record)
+    return (STATUSES.index(status), total > 0 and held / total, total)
+
+
 def _status_from(meta: dict, record: dict) -> tuple[str, str, int, int]:
     """-> (status, backend, held, total), preferring the sidecar and falling back to the summary.
 
@@ -152,7 +163,18 @@ def walk(root: str) -> list[Subject]:
     project's own output were sitting in hashed subdirectories while a flat listing of the batch
     directories showed nothing.
     """
-    records = {str(r.get("task", "")): r for r in attestation.collect(root)}
+    # ONE SUBJECT MAY CARRY SEVERAL RECORDS: a fresh build writes the full 8-check record, then a
+    # backfill later adds a cheap 2-check one. A dict comprehension over all of them would keep
+    # whichever `collect` reached last -- and os.walk order is not ours -- so the strongest record
+    # per identity is selected here instead, and `walk` below reads that.
+    records = {}
+    for record in attestation.collect(root):
+        name = str(record.get("task", ""))
+        if not name:
+            continue
+        current = records.get(name)
+        if current is None or _record_rank(record) < _record_rank(current):
+            records[name] = record
     seen: dict[tuple, dict] = {}
     for dirpath, _dirnames, filenames in os.walk(root):
         if "task.toml" not in filenames:

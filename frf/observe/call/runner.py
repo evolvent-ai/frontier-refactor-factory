@@ -263,7 +263,16 @@ class RemoteSubject:
                 for request in requests:
                     handle.write(request.encode())
             inbox = self._remote + "/inbox"
-            self._backend.push(staging, inbox)
+            try:
+                self._backend.push(staging, inbox)
+            except Exception as exc:                       # noqa: BLE001 -- transport, not the subject
+                # AN EXPIRED SANDBOX IS NOT A MATERIAL FAILURE. The E2B sandbox has a lifespan,
+                # and a long freeze (5 runs x hundreds of probes) can outlive it: the next push
+                # raises TimeoutException ("sandbox was not found"), which used to escape `ask`
+                # and take the whole candidate down as an unclassified crash. `call_many` catches
+                # SubjectFailed and records the chunk as an honest failed probe set, so the freeze
+                # gate can discard the corpus if enough of it is missing.
+                raise SubjectFailed("could not stage requests into the sandbox: %s" % exc) from exc
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
