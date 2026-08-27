@@ -275,7 +275,26 @@ class Remote:
         """
         blob = _tar_bytes(local_dir)
         staged = "/tmp/frf-push-%s.tar" % uuid.uuid4().hex[:8]
-        self._sandbox.files.write(staged, blob)
+        # A READ TIMEOUT HERE IS NOTHING ABOUT THE SUBJECT. `files.write` has no retry of its own
+        # and no exit code to report, so a transient transport failure -- an E2B SDK read timeout,
+        # the exact shape that killed a tree-sitter task after its freeze had succeeded -- used to
+        # escape as an unclassified exception and take the whole candidate with it. The command path
+        # below retries the same way; the file path now does too.
+        for attempt in range(3):
+            try:
+                self._sandbox.files.write(staged, blob)
+                break
+            except Exception as exc:                          # noqa: BLE001 -- the SDK's own errors
+                message = str(exc)
+                transient = bool(re.search(r"timed? ?out|timeout|request.+error|no connections",
+                                           message, re.I))
+                if transient and attempt < 2:
+                    time.sleep(1.5 ** attempt)
+                    continue
+                if transient:
+                    raise SandboxError("could not push into the sandbox after retries: %s"
+                                       % message[-500:]) from exc
+                raise
         done = self.run(["sh", "-c", "mkdir -p '%s' && tar -xf '%s' -C '%s' && rm -f '%s'"
                          % (remote_dir, staged, remote_dir, staged)], timeout=900)
         if not done.ok:
@@ -325,7 +344,24 @@ class Remote:
                                % (remote_dir, done.tail()))
         # `bytes` comes back as a bytearray from this SDK, and tarfile wants something it can wrap
         # in a BytesIO -- so it is normalised here rather than at the one place that noticed.
-        blob = bytes(self._sandbox.files.read(staged, format="bytes"))
+        # A read timeout is the same transport failure the file path above retries; it gets the same
+        # treatment so one slow pull cannot take a candidate down after its build has succeeded.
+        blob = b""
+        for attempt in range(3):
+            try:
+                blob = bytes(self._sandbox.files.read(staged, format="bytes"))
+                break
+            except Exception as exc:                          # noqa: BLE001 -- the SDK's own errors
+                message = str(exc)
+                transient = bool(re.search(r"timed? ?out|timeout|request.+error|no connections",
+                                           message, re.I))
+                if transient and attempt < 2:
+                    time.sleep(1.5 ** attempt)
+                    continue
+                if transient:
+                    raise SandboxError("could not pull from the sandbox after retries: %s"
+                                       % message[-500:]) from exc
+                raise
         self.run(["rm", "-f", staged], timeout=60)
         _untar_bytes(blob, local_dir)
 
