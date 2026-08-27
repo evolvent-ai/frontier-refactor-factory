@@ -427,7 +427,15 @@ def _index(name: str, *, subset: str, scale: str = ""):
     if name == "github-functions":
         # GitHubFunctions wraps a GitHub index — construct the inner one first.
         # Use topic:algorithms which is a valid single-qualifier GitHub search term.
-        query = "topic:algorithms language:python" if scale == "kernel" else "topic:algorithms"
+        query = "topic:algorithms"
+        # A REQUESTED LANGUAGE MUST NOT BE WIDENED BACK TO PYTHON. `GitHub` appends its own
+        # `language:` from the keyword argument, so naming one here too sends two of them -- and
+        # GitHub reads repeated qualifiers as OR, not AND. `--scale kernel --source rust` was
+        # measured returning 608 repositories: 84 Rust plus all 524 Python ones, so six candidates
+        # in seven were the language the caller had explicitly not asked for. Python stays the
+        # default only when nothing was requested, which is where kernel evidence exists today.
+        if scale == "kernel" and not language:
+            language = "python"
         github = source.GitHub(language=language, query=query, scale="module")
         return cls(github, scale=scale, log=lambda message: print("[source] " + message, flush=True))
 

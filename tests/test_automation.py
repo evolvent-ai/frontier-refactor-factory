@@ -142,3 +142,26 @@ def test_a_repo_walk_does_not_lead_with_topics_that_barely_exist():
     assert TRANSFORMER_TOPICS[-2:] == ("cli", "command-line"), TRANSFORMER_TOPICS[-2:]
     # Every scarce topic is still walked; this is an ordering claim, not a filter.
     assert _SCARCE_TOPICS <= set(TRANSFORMER_TOPICS)
+
+
+def test_a_requested_language_is_never_widened_back_to_python():
+    """The constraint the whole open-world design rests on: no silent fallback to Python.
+
+    `GitHub` appends its own `language:` from its keyword argument, so a query string that names one
+    too sends two -- and GitHub reads repeated qualifiers as OR, not AND. `--scale kernel
+    --source rust` was measured returning 608 repositories: 84 Rust plus all 524 Python ones, so six
+    candidates in seven were the language the caller had explicitly not asked for.
+    """
+    def query_of(scale, subset):
+        index = _index("github-functions", subset=subset, scale=scale)
+        return index._index._query_for(None)
+
+    rust = query_of("kernel", "rust")
+    assert "language:rust" in rust
+    assert "language:python" not in rust, rust
+    assert rust.count("language:") == 1, "two qualifiers mean OR, which widens rather than narrows"
+
+    # Python remains the default when nothing was requested -- that is where kernel evidence exists.
+    assert "language:python" in query_of("kernel", "")
+    # Module asks for no language of its own, so an unconstrained walk stays open-world.
+    assert "language:" not in query_of("module", "")

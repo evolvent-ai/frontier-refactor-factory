@@ -23,6 +23,7 @@ the only form of the requirement that cannot be ignored.
 from __future__ import annotations
 
 import os
+import glob
 import json
 import shutil
 import subprocess
@@ -210,6 +211,239 @@ def _maven_main_class(path: str) -> str:
     return ""
 
 
+def _gradle_main_class(path: str) -> str:
+    """Read an explicitly declared Gradle main class, never infer one from source names.
+
+    Both the modern `application { mainClass = '...' }` and the older top-level `mainClassName`
+    are accepted, in Groovy and Kotlin DSL alike -- the assignment looks the same in both.
+    """
+    import re
+    try:
+        source = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return ""
+    for pattern in (r"mainClass\s*(?:\.set\(|=)\s*['\"]([\w$]+(?:\.[\w$]+)*)['\"]",
+                    r"mainClassName\s*=\s*['\"]([\w$]+(?:\.[\w$]+)*)['\"]"):
+        match = re.search(pattern, source)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _gemspec_executable(root: str) -> str:
+    """The one executable a Ruby gem declares, relative to the repository root, or ''.
+
+    A declared path only. `exe/` and `bin/` are the two conventional homes -- `exe/` since bundler
+    made it the default -- and a gemspec that lists several executables is ambiguous rather than
+    convenient, so the first in sorted order is taken only when the directory holds exactly one.
+    """
+    for directory in ("exe", "bin"):
+        candidate_dir = os.path.join(root, directory)
+        if not os.path.isdir(candidate_dir):
+            continue
+        names = sorted(name for name in os.listdir(candidate_dir)
+                       if os.path.isfile(os.path.join(candidate_dir, name))
+                       # `setup` and `console` are bundler's development helpers, present in every
+                       # generated gem and never the program under test.
+                       and name not in ("setup", "console"))
+        if len(names) == 1:
+            return "%s/%s" % (directory, names[0])
+    return ""
+
+
+def _cmake_executable(path: str) -> str:
+    """The name of the first explicitly declared CMake executable target, or ''.
+
+    `add_executable(name ...)` is the declaration; a name built out of variables is skipped rather
+    than guessed at, because the value would have to come from evaluating the build file.
+    """
+    import re
+    try:
+        source = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return ""
+    for match in re.finditer(r"add_executable\s*\(\s*([A-Za-z_][\w.-]*)", source):
+        name = match.group(1)
+        if "$" not in name and name.upper() not in ("IMPORTED", "ALIAS"):
+            return name
+    return ""
+
+
+# LANGUAGE-AGNOSTIC ENTRY POINT DISCOVERY. Everything below reads a repository's OWN declaration
+# of how it is built and run, in the formats that do not name a language: CI workflows, Justfile
+# recipes, Taskfile tasks, devcontainer commands. This is what makes the repo scale genuinely
+# open-world -- a language with no manifest parser here still has a way to be served, and the
+# declarations are written by the maintainer, not inferred from filenames by us.
+#
+# Each returns (build_argv, invoke_argv) or None. Build is "how to get the thing runnable once";
+# invoke is "how to start it with the corpus".
+
+
+def _ci_run_command(root: str) -> tuple | None:
+    """The first `run:` line in a standard CI workflow that could serve as an entry point.
+
+    `run:` in a workflow step is the maintainer's own statement of how the project is exercised.
+    But CI is mostly TESTING, and a test command is not an entry point: a corpus cannot freeze
+    `cargo test` into a deterministic output, and the probes stage would refuse it -- after the
+    repository has been checked out, uploaded to E2B and built. That is a waste of the most
+    expensive stages on an outcome that was predictable from one line of YAML.
+
+    So a candidate is only a plausible entry point if its command names a runnable program, not a
+    test runner. The filtering is by command shape, not by language: `cargo run`, `go run`,
+    `npm start`, `python main.py` look like entry points; `cargo test`, `npm test`, `pytest`,
+    `go test` do not. This keeps the discovery language-agnostic while refusing the commands that
+    cannot produce a deterministic workload.
+
+    Returns (build_argv, invoke_argv) or None.
+    """
+    import re
+    _ENTRY_WORDS = re.compile(
+        r"\b(run|start|serve|exec|main|server|bin|app|demo|example)\b")
+    _TEST_WORDS = re.compile(
+        r"(^|\s)(test|lint|check|fmt|format|fix|build|cargo test|go test|pytest|npm test|"
+        r"npm run (test|lint|build|check|format)|make (test|check|lint|build))",
+        re.IGNORECASE)
+    _NETWORK_WORDS = re.compile(r"(docker|kubectl|ssh|curl|wget|git |npm install|pip install)",
+                                re.IGNORECASE)
+
+    def _command(path: str):
+        """-> the first usable `run:` command in a YAML file, or None."""
+        try:
+            lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+        except OSError:
+            return None
+        for line in lines:
+            idx = line.find("run:")
+            if idx < 0:
+                continue
+            if line.strip().startswith("runs-on"):
+                continue
+            command = line[idx + 4:].strip()
+            if not command:
+                continue
+            if _NETWORK_WORDS.search(command):
+                continue
+            # A test runner is not an entry point: the probes stage would refuse it anyway.
+            if _TEST_WORDS.search(command):
+                continue
+            if _ENTRY_WORDS.search(command):
+                return command
+        return None
+
+    # Directories are walked; single files are read directly.
+    directories = (".github/workflows", ".gitlab", ".circleci", "azure-pipelines.yml",
+                   "bitbucket-pipelines.yml", "buildkite", "jenkins")
+    single_files = (".travis.yml", ".gitlab-ci.yml", "azure-pipelines.yml",
+                    "bitbucket-pipelines.yml", ".circleci/config.yml", "appveyor.yml")
+    for rel in directories:
+        base = os.path.join(root, rel)
+        if not os.path.isdir(base):
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules")]
+            for name in sorted(filenames):
+                if not name.endswith((".yml", ".yaml")):
+                    continue
+                command = _command(os.path.join(dirpath, name))
+                if command:
+                    return [["sh", "-c", command]], ["sh", "-c", command]
+    for rel in single_files:
+        path = os.path.join(root, rel)
+        if os.path.isfile(path):
+            command = _command(path)
+            if command:
+                return [["sh", "-c", command]], ["sh", "-c", command]
+    return None
+
+
+def _justfile_recipe(root: str) -> tuple | None:
+    """The first recipe in a Justfile, if it names a command something other than `just run` twice.
+
+    Just recipes are commands; `just run` is the conventional one. A recipe whose name is `run` is
+    chosen, else the first recipe in the file.
+    """
+    import re
+    for name in ("Justfile", "justfile", ".justfile"):
+        path = os.path.join(root, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+        except OSError:
+            return None
+        recipe_lines = [ln for ln in lines if re.match(r"^[a-zA-Z0-9_-]+\s*:", ln)]
+        if not recipe_lines:
+            continue
+        target = next((ln.split(":")[0].strip() for ln in recipe_lines
+                       if ln.split(":")[0].strip() == "run"), recipe_lines[0].split(":")[0].strip())
+        body = []
+        capturing = False
+        for ln in lines:
+            if re.match(r"^%s\s*:" % re.escape(target), ln.strip()):
+                capturing = True
+                continue
+            if capturing:
+                stripped = ln.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                # Recipe indentation is tab; commands end at the next recipe line.
+                if re.match(r"^[a-zA-Z0-9_-]+\s*:", ln):
+                    break
+                body.append(stripped)
+        if body:
+            return [], ["just", "--justfile", "{ROOT}/" + name, target]
+    return None
+
+
+def _taskfile_command(root: str) -> tuple | None:
+    """The `run` task from a Taskfile.yml, if its command can be run plainly."""
+    for name in ("Taskfile.yml", "Taskfile.yaml"):
+        path = os.path.join(root, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            import yaml
+            data = yaml.safe_load(open(path, encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            continue
+        tasks = data.get("tasks", {})
+        if not isinstance(tasks, dict):
+            continue
+        for target in ("run", "default", "build"):
+            task = tasks.get(target)
+            if not isinstance(task, dict):
+                continue
+            cmd = task.get("cmd") or task.get("cmds")
+            if cmd is None:
+                continue
+            if isinstance(cmd, str):
+                return [], ["task", "-C", "{ROOT}", target]
+            if isinstance(cmd, list) and cmd and isinstance(cmd[0], (str, dict)):
+                return [], ["task", "-C", "{ROOT}", target]
+    return None
+
+
+def _devcontainer_command(root: str) -> tuple | None:
+    """The postCreateCommand from a devcontainer.json, which is how the project is exercised."""
+    for name in (".devcontainer/devcontainer.json", ".devcontainer.json"):
+        path = os.path.join(root, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            import json as _json
+            data = _json.load(open(path, encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            continue
+        cmd = data.get("postCreateCommand")
+        if isinstance(cmd, str):
+            return [], ["sh", "-c", cmd]
+    return None
+
+
 def _discover_entrypoint(root: str) -> tuple:
     """Discover (build_steps, invoke_argv) from a local repository tree.
 
@@ -221,7 +455,18 @@ def _discover_entrypoint(root: str) -> tuple:
       5. cmd/<name>/main.go  (Go)
       6. src/main.rs or src/bin/*  (Rust, via cargo)
       7. pom.xml explicit Maven mainClass
-      8. Makefile `run` / `start` / `serve` target
+      8. build.gradle explicit mainClass  (Java, via gradle)
+      9. gemspec exe/ or bin/ executable  (Ruby)
+     10. CMakeLists.txt add_executable target  (C/C++)
+     11. CI workflow / Justfile / Taskfile / devcontainer run command (LANGUAGE-AGNOSTIC)
+     12. Makefile `run` / `start` / `serve` target
+
+    EVERY CHECK WANTS A DECLARATION, never a guess from a filename. A source tree with several
+    mains is not safely dispatchable, and picking one would silently grade a different program than
+    the task claims. Steps 8 to 10 were added because their absence was structural rather than
+    incidental: repo is the only scale Java, Ruby and C++ can use at all, so a language with no
+    discovery path here could not produce a single task no matter how much material was walked.
+    All three had zero output for exactly that reason.
 
     All absolute paths in the returned lists use ``{ROOT}`` in place of
     ``root`` so that the caller can point the material at any directory.
@@ -346,7 +591,52 @@ def _discover_entrypoint(root: str) -> tuple:
             return ([['mvn', '-q', '-DskipTests', '-o', 'package']],
                     ['java', '-cp', '{ROOT}/target/classes', main_class])
 
-    # 8. Makefile run/start/serve target
+    # 8. Gradle, on the same terms as Maven: only an explicitly declared main class. The wrapper is
+    # preferred when the project ships one, because it pins the Gradle version the build expects.
+    for build_file in ("build.gradle", "build.gradle.kts"):
+        gradle_file = os.path.join(root, build_file)
+        if not os.path.isfile(gradle_file):
+            continue
+        main_class = _gradle_main_class(gradle_file)
+        if main_class:
+            launcher = ("{ROOT}/gradlew"
+                        if os.path.isfile(os.path.join(root, "gradlew")) else "gradle")
+            return ([[launcher, '--offline', '-q', '-p', '{ROOT}', '-x', 'test', 'classes']],
+                    ['java', '-cp', '{ROOT}/build/classes/java/main', main_class])
+
+    # 9. A Ruby gem's declared executable. GATED ON A RUBY MANIFEST, because `bin/` is a directory
+    # every ecosystem uses -- matching on it alone would claim any repository with a bin/ script.
+    if (glob.glob(os.path.join(root, "*.gemspec"))
+            or os.path.isfile(os.path.join(root, "Gemfile"))):
+        executable = _gemspec_executable(root)
+        if executable:
+            # No install step: a gem that needs its bundle will say so at the smoke gate, which is
+            # an honest refusal. Running `bundle install` here would fail on a no-network sandbox
+            # and refuse material that a self-contained script would have passed.
+            return [], ["ruby", "{ROOT}/" + executable]
+
+    # 10. A CMake executable target, for C and C++.
+    cmake_file = os.path.join(root, "CMakeLists.txt")
+    if os.path.isfile(cmake_file):
+        target = _cmake_executable(cmake_file)
+        if target:
+            return ([["cmake", "-S", "{ROOT}", "-B", "{ROOT}/build"],
+                     ["cmake", "--build", "{ROOT}/build", "--target", target]],
+                    ["{ROOT}/build/" + target])
+
+    # 11. LANGUAGE-AGNOSTIC DECLARATIONS. None of these name a language: a CI workflow, a Justfile,
+    # a Taskfile and a devcontainer are all the maintainer saying how the project is built and run.
+    # They are checked before the generic Makefile guess because they are explicit, and they are
+    # what makes the repo scale truly open-world -- a language with no manifest parser here is still
+    # servable whenever its repository carries one of these.
+    for discover in (_ci_run_command, _justfile_recipe, _taskfile_command, _devcontainer_command):
+        found = discover(root)
+        if found:
+            build_steps, invoke = found
+            return build_steps, [part.replace(root, "{ROOT}") if isinstance(part, str) else part
+                                 for part in invoke]
+
+    # 12. Makefile run/start/serve target
     makefile = os.path.join(root, "Makefile")
     if os.path.isfile(makefile):
         for target in ("run", "start", "serve"):
@@ -356,7 +646,9 @@ def _discover_entrypoint(root: str) -> tuple:
     raise ValueError(
         "no discoverable entry point in %r: checked Dockerfile ENTRYPOINT, "
         "pyproject.toml [project.scripts], main.py, setup.py console_scripts, "
-        "cmd/*/main.go, src/main.rs, pom.xml mainClass, and Makefile run/start/serve targets"
+        "cmd/*/main.go, src/main.rs, pom.xml mainClass, build.gradle mainClass, "
+        "gemspec exe/ or bin/ executable, CMakeLists.txt add_executable, "
+        "and Makefile run/start/serve targets"
         % os.path.basename(root)
     )
 
