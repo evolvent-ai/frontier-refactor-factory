@@ -86,6 +86,7 @@ def ask(prompt: str, *, system: str = "", temperature: float = 0.2,
     # once for a generator and once for repair; three full waits per call can otherwise starve a roll.
     deadline = time.monotonic() + max(0.1, float(timeout))
     last_transport = None
+    payload = None
     for attempt in range(3):
       remaining = deadline - time.monotonic()
       if remaining <= 0:
@@ -109,9 +110,12 @@ def ask(prompt: str, *, system: str = "", temperature: float = 0.2,
             time.sleep(min(2 ** attempt, max(0.0, deadline - time.monotonic())))
             continue
         raise ModelError("the gateway did not answer: %s" % error) from error
-    if last_transport is not None:
+    if payload is not None:
+        pass
+    elif last_transport is not None:
         raise ModelError("the gateway did not answer: %s" % last_transport)
-    raise ModelError("the model request exceeded its %.1fs total timeout" % float(timeout))
+    else:
+        raise ModelError("the model request exceeded its %.1fs total timeout" % float(timeout))
 
     try:
         return payload["choices"][0]["message"]["content"] or ""
