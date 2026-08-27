@@ -31,11 +31,20 @@ _REGISTRY: dict[str, LanguageCapability] = {
     "python": LanguageCapability("python", "certified", "python", ("module", "kernel", "package")),
     "javascript": LanguageCapability("javascript", "call-capable", "javascript", ("package", "repo")),
     "typescript": LanguageCapability("typescript", "call-capable", "typescript", ("package", "repo")),
-    "go": LanguageCapability("go", "repo-capable", "go", ("repo",)),
-    "rust": LanguageCapability("rust", "repo-capable", "rust", ("repo",)),
-    "java": LanguageCapability("java", "repo-capable", "java", ("repo",)),
-    "ruby": LanguageCapability("ruby", "repo-capable", "ruby", ("repo",)),
-    "cpp": LanguageCapability("cpp", "repo-capable", "cpp", ("repo",)),
+    # EVERY SHIMMED LANGUAGE IS CALL-CAPABLE, and the shims table is the single source of truth:
+    # nine templates ship (serve.py/js/rs/go/c/rb and Serve.java), each with a toolchain image and
+    # a verify command in _LANGUAGE_SETUP. These five used to be declared repo-capable only, with
+    # scales=("repo",), which did not match what the code could do: module.py and kernel.py call
+    # shims.materialise directly and never consult this registry, so a Go module task was being
+    # built while its capability record said the language could not do module scale. Reporting
+    # less than what is implemented quietly hides coverage; reporting a scale is a claim, not
+    # evidence -- so these stay call-capable (adapter registered) rather than certified, and
+    # certification per scale comes from the audit matrix, not from this table.
+    "go": LanguageCapability("go", "call-capable", "go", ("module", "kernel", "package", "repo")),
+    "rust": LanguageCapability("rust", "call-capable", "rust", ("module", "kernel", "package", "repo")),
+    "java": LanguageCapability("java", "call-capable", "java", ("module", "kernel", "package", "repo")),
+    "ruby": LanguageCapability("ruby", "call-capable", "ruby", ("module", "kernel", "package", "repo")),
+    "cpp": LanguageCapability("cpp", "call-capable", "cpp", ("module", "kernel", "package", "repo")),
 }
 
 
