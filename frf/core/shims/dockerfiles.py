@@ -84,7 +84,11 @@ _LANGUAGE_SETUP: dict[str, dict] = {
     },
     "java": {
         "base_image": "eclipse-temurin:21-jdk-jammy",
-        "apt_packages": [],
+        # Temurin ships the JDK but NOT Maven. The repo scale's pom.xml entry point build runs
+        # `mvn package`, so a missing mvn was refusing every Maven candidate with
+        # `mvn: command not found` -- reported as `reference-will-not-build (material)`, which
+        # attributed our missing toolchain to the candidate.
+        "apt_packages": ["maven"],
         "install_cmds": [],
         "copy_from_image": "eclipse-temurin:21-jdk-jammy",
         "copy_from_paths": [
@@ -128,7 +132,11 @@ _LANGUAGE_SETUP: dict[str, dict] = {
     },
     "ruby": {
         "base_image": "ruby:3.3-slim-bookworm",
-        "apt_packages": [],
+        # ruby slim ships ruby and gem but NOT bundler, so a gemspec entry point's `bundle install`
+        # failed with `bundle: not found` on every Ruby candidate -- misreported as
+        # `reference-will-not-build (material)`. bundler is a Debian package; apt is the most
+        # reliable install here (gem install needs network at image build time).
+        "apt_packages": ["ruby-bundler"],
         "install_cmds": [],
         "copy_from_image": "ruby:3.3-slim-bookworm",
         "copy_from_paths": [
