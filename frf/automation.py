@@ -129,18 +129,27 @@ FUNCTION_TOPICS = ("algorithms", "data-structures", "string", "math", "matrix",
                    "graph", "text-processing", "datetime", "geometry")
 
 
-def _chain_of_topics(cls, topics: tuple, language: str, *, scale: str = "repo"):
-    """One index per topic, walked end to end.
+def _chain_of_topics(cls, topics: tuple, language: str, *, scale: str = "repo",
+                     quota: int = 0):
+    """One index per topic, walked end to end -- or round-robin, for a diverse corpus.
 
-    GitHub answers 422 to `topic:a OR topic:b`, so several topics is several searches. Chaining
-    them keeps `sourcing.walk`'s contract intact: one index, one denominator, empty only when
-    every topic is spent.
+    `quota=0` (the default, used by the repo scale) keeps the depth-first `Chain`: the links are
+    in preference order and a small budget spends itself on the first, most likely topic.
+
+    `quota>0` (used by the function scales) returns `QuotaChain`, which gives every topic its
+    turn in bounded pages. With nine function topics and a budget of three, the depth-first walk
+    spent the whole batch on `algorithms` and never reached `string` or `math`; the corpus was
+    as concentrated as the single search this replaces, just later.
+
+    GitHub answers 422 to `topic:a OR topic:b`, so several topics is several searches. Either way
+    `sourcing.walk` sees one index, one denominator, empty only when every topic is spent.
     """
-    from .source.chain import Chain
+    from .source.chain import Chain, QuotaChain
 
-    return Chain([cls(language=language, query="topic:%s" % topic, scale=scale)
-                  for topic in topics],
-                 name="github(%s)" % "|".join(topics))
+    links = [cls(language=language, query="topic:%s" % topic, scale=scale)
+             for topic in topics]
+    name = "github(%s)" % "|".join(topics)
+    return Chain(links, name=name) if quota <= 0 else QuotaChain(links, quota=quota, name=name)
 
 
 def _merge_reports(reports, index_name, elapsed):
@@ -453,7 +462,7 @@ def _index(name: str, *, subset: str, scale: str = ""):
         # default only when nothing was requested, which is where kernel evidence exists today.
         if scale == "kernel" and not language:
             language = "python"
-        github = _chain_of_topics(source.GitHub, FUNCTION_TOPICS, language, scale="module")
+        github = _chain_of_topics(source.GitHub, FUNCTION_TOPICS, language, scale="module", quota=2)
         return cls(github, scale=scale, log=lambda message: print("[source] " + message, flush=True))
 
     if name == "github-packages":
@@ -461,13 +470,13 @@ def _index(name: str, *, subset: str, scale: str = ""):
             # One language, several topics chained: a package corpus is the same kind of
             # concentration problem a repo corpus is, and `topic:algorithms` alone would draw
             # every night from the same puzzle-library family.
-            return cls(_chain_of_topics(source.GitHub, FUNCTION_TOPICS, language, scale="package"),
+            return cls(_chain_of_topics(source.GitHub, FUNCTION_TOPICS, language, scale="package", quota=2),
                        scale="package", log=lambda message: print("[source] " + message, flush=True))
         # Open-world default: enumerate multiple language sources instead of silently restricting
         # package discovery to Python. Unsupported adapters remain explicit source rejections.
         package_languages = ("python", "javascript", "typescript", "rust", "go", "ruby", "java")
         return cls(source.Chain(
-            [_chain_of_topics(source.GitHub, FUNCTION_TOPICS, item, scale="package")
+            [_chain_of_topics(source.GitHub, FUNCTION_TOPICS, item, scale="package", quota=2)
              for item in package_languages],
             name="github-packages(%s)" % "|".join(package_languages)))
 
