@@ -119,3 +119,26 @@ def test_roll_continues_past_refusals_and_stops_at_the_emitted_target(monkeypatc
     assert report.summary["emitted"] == 2
     assert report.summary["target_met"] is True
     assert len(attempted) == 5
+
+
+def test_a_repo_walk_does_not_lead_with_topics_that_barely_exist():
+    """Order is supply, not only label precision, and getting it backwards costs a whole batch.
+
+    `Chain` is deliberately depth-first: the first topic is spent before the second is touched, so a
+    budget is consumed in list order. An earlier version led with the most precisely-labelled
+    topics -- jq, yq, csvkit, pandoc -- which is right about the labels and wrong about the outcome,
+    because outside Python those topics hold a handful of repositories each. A real Rust batch
+    refused 13 candidates and every one was a jq clone; with `attempt_limit = 30` it could never
+    reach `parser` (304 Rust repositories) or `compiler` (425), which sat at positions 16 and 17.
+    """
+    from frf.automation import TRANSFORMER_TOPICS, _SCARCE_TOPICS
+
+    leading = TRANSFORMER_TOPICS[:6]
+    assert not _SCARCE_TOPICS & set(leading), (
+        "a topic measured to hold almost nothing must not spend the budget first: %s" % (leading,))
+    # The plentiful transformers -- each reads a text and writes a determined text -- lead instead.
+    assert set(("parser", "compiler")) <= set(leading), leading
+    # And the topics measured to return TUIs stay last, where they cost little.
+    assert TRANSFORMER_TOPICS[-2:] == ("cli", "command-line"), TRANSFORMER_TOPICS[-2:]
+    # Every scarce topic is still walked; this is an ordering claim, not a filter.
+    assert _SCARCE_TOPICS <= set(TRANSFORMER_TOPICS)

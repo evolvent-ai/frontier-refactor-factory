@@ -76,15 +76,41 @@ _FORM_MAP = {
 
 # What a repo-scale corpus can actually grade: programs that READ something and WRITE a determined
 # result. A four-channel freeze needs stdout that repeats, which rules out anything that redraws a
-# screen or asks the network. These are the topics maintainers give such programs, in rough order
-# of how reliably the label holds.
+# screen or asks the network. These are the topics maintainers give such programs.
 #
 # MEASURED, NOT SUPPOSED: `topic:cli` returned dive and lazygit (TUIs) and httpx (a network
-# scanner), and all three produced zero liftable invocations.
-TRANSFORMER_TOPICS = ("jq", "yq", "csvkit", "pandoc", "file-converter", "json-parser", "csv-parser", "data-processing",
-                      "json", "csv", "xml", "etl", "data-science", "data-conversion",
-                      "text-processing", "parser", "compiler", "transpiler", "minifier",
-                      "formatter", "linter", "cli", "command-line")
+# scanner), and all three produced zero liftable invocations. So `cli` and `command-line` sit last.
+#
+# ORDER IS SUPPLY, NOT ONLY RELIABILITY, and getting that backwards cost a whole batch. `Chain` is
+# deliberately depth-first: the first link is spent before the second is touched, so a budget is
+# consumed in list order. An earlier version led with the most precisely-labelled topics -- jq, yq,
+# csvkit, pandoc -- which is correct about the labels and wrong about the outcome, because those
+# topics barely exist outside Python. Counted on GitHub with `archived:false mirror:false stars:>=10`:
+#
+#             jq   yq  csvkit  pandoc  file-converter | parser  compiler  formatter  linter
+#   rust      21    3      0       5         2        |    304       425         63      89
+#   go       ---- first six total 33 ----------------  |  ---- last four total 538 ----
+#   java     ---- first six total 12 ----------------  |  ---- last four total 324 ----
+#
+# A budget of 3 gets `attempt_limit = 30`; jq's 21 Rust repositories plus yq and pandoc exhaust it
+# before `parser` is ever queried. A real Rust batch refused 13 candidates that way and every one of
+# them was a jq clone -- several of them TUIs, which this list exists to avoid. The batch could not
+# have reached the topics most likely to work.
+#
+# So the plentiful transformers lead. `parser`, `compiler`, `transpiler`, `formatter`, `linter` and
+# `minifier` are transformers BY DEFINITION -- each reads a text and writes a determined text -- and
+# they are also where the supply is. The precise-but-tiny topics keep their place afterwards: they
+# cost little to walk once the batch has already had its best chance.
+TRANSFORMER_TOPICS = ("parser", "compiler", "transpiler", "formatter", "linter", "minifier",
+                      "text-processing", "data-processing", "json", "csv", "xml", "etl",
+                      "json-parser", "csv-parser", "data-conversion", "data-science",
+                      "jq", "yq", "csvkit", "pandoc", "file-converter",
+                      "cli", "command-line")
+
+# The topics whose supply was measured too small to lead a walk. Named so the ordering property can
+# be tested rather than trusted to survive the next edit.
+_SCARCE_TOPICS = frozenset(("jq", "yq", "csvkit", "pandoc", "file-converter",
+                            "csv-parser", "data-conversion"))
 
 
 def _chain_of_topics(cls, topics: tuple, language: str):
