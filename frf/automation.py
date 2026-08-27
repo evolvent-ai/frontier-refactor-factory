@@ -393,6 +393,9 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
                     stage=getattr(outcome, "stage", ""), reason=getattr(outcome, "reason", ""),
                     fault=getattr(getattr(outcome, "fault", None), "value", ""),
                     path=getattr(outcome, "path", ""),
+                    # The particular failure, not just its category. `reason` says
+                    # `could-not-specify`; this says what could not be specified.
+                    detail=str(getattr(outcome, "detail", "") or ""),
                     seconds=round(elapsed_so_far / max(1, summary.get("attempted", 0)), 3)))
         coverage = getattr(idx, "last_coverage", None)
         if coverage is not None:

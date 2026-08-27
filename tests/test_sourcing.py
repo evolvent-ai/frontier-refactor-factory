@@ -75,6 +75,48 @@ def test_batch_ledger_is_append_only_and_jsonl(tmp_path):
     assert [row["identity"] for row in rows] == ["x", "y"]
 
 
+def test_a_refusal_records_what_actually_failed_not_only_its_category(tmp_path):
+    """`reason` is a category; `detail` is what to fix, and it used to be dropped on the floor.
+
+    A batch that refused thirteen candidates left thirteen rows saying only which stage said no.
+    Diagnosing it meant guessing from repository names -- which is how a sourcing bug stayed
+    invisible for two sessions: every row read as ordinary unusable material.
+    """
+    from frf.core.ledger import BatchLedger, LedgerRecord
+    path = str(tmp_path / "ledger.jsonl")
+    BatchLedger(path).append(LedgerRecord(
+        "nom", "repo", "refused", stage="specify", reason="could-not-specify",
+        detail="no runnable entry point: this crate is a library"))
+    row = json.loads(open(path).read())
+    assert "library" in row["detail"], "the particular failure has to survive the write"
+
+
+def test_one_pathological_detail_cannot_dominate_the_ledger(tmp_path):
+    """Bounded so a stack trace cannot bury every other row, and so a line stays atomic."""
+    from frf.core.ledger import BatchLedger, LedgerRecord, DETAIL_LIMIT
+    path = str(tmp_path / "ledger.jsonl")
+    BatchLedger(path).append(LedgerRecord("x", "repo", "refused", detail="!" * 50_000))
+    assert len(json.loads(open(path).read())["detail"]) == DETAIL_LIMIT
+
+
+def test_concurrent_candidates_do_not_interleave_their_rows(tmp_path):
+    """A batch runs candidates in parallel, and each row must land whole or not at all.
+
+    The previous writer copied the entire file and renamed it over the original for every row, which
+    is quadratic and also loses this property: two writers racing that way overwrite each other.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from frf.core.ledger import BatchLedger, LedgerRecord
+    path = str(tmp_path / "ledger.jsonl")
+    ledger = BatchLedger(path)
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        list(pool.map(lambda i: ledger.append(
+            LedgerRecord("cand-%03d" % i, "repo", "refused", detail="d" * 200)), range(200)))
+    rows = [json.loads(line) for line in open(path)]
+    assert len(rows) == 200, "every row survived"
+    assert len({r["identity"] for r in rows}) == 200, "and none was overwritten by another"
+
+
 def test_the_mechanical_filter_runs_before_anything_is_cloned():
     """`keep` is cheap and deterministic. Judgement about quality belongs to the gates, which
     answer with evidence rather than with a prediction."""
