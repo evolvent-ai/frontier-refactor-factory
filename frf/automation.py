@@ -113,7 +113,23 @@ _SCARCE_TOPICS = frozenset(("jq", "yq", "csvkit", "pandoc", "file-converter",
                             "csv-parser", "data-conversion"))
 
 
-def _chain_of_topics(cls, topics: tuple, language: str):
+# What a function-scale corpus (kernel/module/package) can freeze: single functions whose inputs
+# and outputs are JSON-serialisable. `topic:algorithms` alone was the whole supply for all three
+# scales, which concentrated output on algorithm-puzzle repositories -- the same supply is every
+# night's harvest, and a solver asked to "make it faster" on the twentieth LeetCode clone is
+# testing nothing the first nineteen didn't. A function corpus wants diversity for the same
+# reason a repo corpus does, so several TOPICS are chained. Order is by measured supply: the
+# algorithmic topics hold most of what the call seam can serve, and each later topic widens the
+# corpus toward a different family of code -- strings, numbers, dates, structures, geometry,
+# text processing.
+#
+# Measured with archived:false mirror:false stars:>=10 per language (2026-08-27):
+#   python 2054, cpp 1649, javascript 1255, java 963, typescript 756, rust 117, ruby 67.
+FUNCTION_TOPICS = ("algorithms", "data-structures", "string", "math", "matrix",
+                   "graph", "text-processing", "datetime", "geometry")
+
+
+def _chain_of_topics(cls, topics: tuple, language: str, *, scale: str = "repo"):
     """One index per topic, walked end to end.
 
     GitHub answers 422 to `topic:a OR topic:b`, so several topics is several searches. Chaining
@@ -122,7 +138,7 @@ def _chain_of_topics(cls, topics: tuple, language: str):
     """
     from .source.chain import Chain
 
-    return Chain([cls(language=language, query="topic:%s" % topic, scale="repo")
+    return Chain([cls(language=language, query="topic:%s" % topic, scale=scale)
                   for topic in topics],
                  name="github(%s)" % "|".join(topics))
 
@@ -426,8 +442,9 @@ def _index(name: str, *, subset: str, scale: str = ""):
 
     if name == "github-functions":
         # GitHubFunctions wraps a GitHub index — construct the inner one first.
-        # Use topic:algorithms which is a valid single-qualifier GitHub search term.
-        query = "topic:algorithms"
+        # A function corpus is served by several topics chained, so one batch draws from
+        # algorithms, data structures, strings, maths, dates and more rather than from a single
+        # `topic:algorithms` search.
         # A REQUESTED LANGUAGE MUST NOT BE WIDENED BACK TO PYTHON. `GitHub` appends its own
         # `language:` from the keyword argument, so naming one here too sends two of them -- and
         # GitHub reads repeated qualifiers as OR, not AND. `--scale kernel --source rust` was
@@ -436,19 +453,23 @@ def _index(name: str, *, subset: str, scale: str = ""):
         # default only when nothing was requested, which is where kernel evidence exists today.
         if scale == "kernel" and not language:
             language = "python"
-        github = source.GitHub(language=language, query=query, scale="module")
+        github = _chain_of_topics(source.GitHub, FUNCTION_TOPICS, language, scale="module")
         return cls(github, scale=scale, log=lambda message: print("[source] " + message, flush=True))
 
     if name == "github-packages":
         if language:
-            return cls(source.GitHub(language=language, query="topic:algorithms", scale="package"))
+            # One language, several topics chained: a package corpus is the same kind of
+            # concentration problem a repo corpus is, and `topic:algorithms` alone would draw
+            # every night from the same puzzle-library family.
+            return cls(_chain_of_topics(source.GitHub, FUNCTION_TOPICS, language, scale="package"),
+                       scale="package", log=lambda message: print("[source] " + message, flush=True))
         # Open-world default: enumerate multiple language sources instead of silently restricting
         # package discovery to Python. Unsupported adapters remain explicit source rejections.
         package_languages = ("python", "javascript", "typescript", "rust", "go", "ruby", "java")
         return cls(source.Chain(
-            [source.GitHub(language=item, query="topic:algorithms", scale="package")
+            [_chain_of_topics(source.GitHub, FUNCTION_TOPICS, item, scale="package")
              for item in package_languages],
-            name="github-packages(" + "|".join(package_languages) + ")"))
+            name="github-packages(%s)" % "|".join(package_languages)))
 
     if name == "github":
         if scale in ("repo",):

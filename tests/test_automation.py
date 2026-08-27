@@ -154,7 +154,9 @@ def test_a_requested_language_is_never_widened_back_to_python():
     """
     def query_of(scale, subset):
         index = _index("github-functions", subset=subset, scale=scale)
-        return index._index._query_for(None)
+        # The inner index is now a Chain over topics; its first link carries the language qualifier
+        # that the test checks.
+        return index._index._links[0]._query_for(None)
 
     rust = query_of("kernel", "rust")
     assert "language:rust" in rust
@@ -165,3 +167,45 @@ def test_a_requested_language_is_never_widened_back_to_python():
     assert "language:python" in query_of("kernel", "")
     # Module asks for no language of its own, so an unconstrained walk stays open-world.
     assert "language:" not in query_of("module", "")
+
+
+def test_function_scale_sourcing_chains_topics_rather_than_one_algorithms_search():
+    """Diversity is not a quality improvement; it is what a yield measures.
+
+    `topic:algorithms` alone was the whole supply for kernel/module/package, so every batch drew
+    from the same puzzle-library family and a "make it faster" task on the twentieth LeetCode
+    clone measured nothing the first nineteen didn't. Several topics chained -- algorithms,
+    data-structures, string, math, matrix, graph, text-processing, datetime, geometry --
+    spread a batch over distinct families of code.
+    """
+    from frf.automation import FUNCTION_TOPICS, _chain_of_topics
+    class _Index:
+        def __init__(self, *, language="", query="", scale=""):
+            self.language, self.query, self.scale = language, query, scale
+        def name(self):
+            return self.query
+    assert len(FUNCTION_TOPICS) >= 8, "a single-topic supply is the concentration this exists to avoid"
+    assert "algorithms" in FUNCTION_TOPICS    # it still leads; it is no longer alone
+    assert len(set(FUNCTION_TOPICS)) == len(FUNCTION_TOPICS), "duplicate topics waste a search"
+
+    chain = _chain_of_topics(_Index, ("a", "b"), "rust", scale="module")
+    # The chain name names every topic, so the coverage log says what was actually searched.
+    assert "a|b" in chain.name
+
+
+def test_every_scale_walks_more_than_one_topic_by_default():
+    """The four scales are not four consumers of one search.
+
+    Repo and function scales walk their own topic lists; the open-world package chain enumerates
+    several language chains. None may fall back to a single search, because that is how the
+    corpus stops being a corpus.
+    """
+    from frf.automation import _chain_of_topics, FUNCTION_TOPICS, TRANSFORMER_TOPICS
+    class _Index:
+        def __init__(self, *, language="", query="", scale=""):
+            self.language, self.query, self.scale = language, query, scale
+        def name(self):
+            return self.query
+    repo = _chain_of_topics(_Index, TRANSFORMER_TOPICS, "go", scale="repo")
+    funcs = _chain_of_topics(_Index, FUNCTION_TOPICS, "typescript", scale="module")
+    assert "|" in repo.name and "|" in funcs.name
