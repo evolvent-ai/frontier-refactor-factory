@@ -134,6 +134,7 @@ def _run_command(args) -> int:
     """Run jobs from a YAML config or inline flags, with checkpointing and live progress."""
     from .config import RunConfig, JobConfig
     from .core.checkpoint import make_checkpoint_path
+    from .core.ledger import make_ledger_path
 
     # Build config from YAML file or inline flags.
     if args.config:
@@ -162,12 +163,20 @@ def _run_command(args) -> int:
     checkpoint_file = (getattr(args, "resume", None) or cfg.checkpoint_file
                        or make_checkpoint_path())
 
+    # A BATCH THAT KEEPS NO RECORD CANNOT BE AUDITED AFTERWARDS. This used to default to empty, and
+    # the writer downstream is guarded by `if ledger_file:` -- so every batch this factory ever ran
+    # took the silent branch and there is not one ledger on disk. The per-language yield evidence the
+    # handoff notes keep asking for is precisely what that missing file would have held.
+    if not cfg.ledger_file:
+        cfg.ledger_file = make_ledger_path()
+
     if getattr(args, "dry_run", False):
         print("dry-run: config loaded, %d job(s)" % len(cfg.jobs))
         for job in cfg.jobs:
             print("  %s/%s lang=%s budget=%d" % (
                 job.scale, job.form, job.source_language or "*", job.budget))
         print("checkpoint: %s" % checkpoint_file)
+        print("ledger: %s" % cfg.ledger_file)
         return 0
 
     _sweep_scratch()

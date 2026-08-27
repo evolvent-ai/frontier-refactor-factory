@@ -36,6 +36,43 @@ def test_the_verifier_directory_is_never_readable_by_the_submission():
     assert "replaying" in text or "answer key" in text
 
 
+def test_an_upstream_test_suite_is_not_mistaken_for_the_answer_key():
+    """The false positive that was refusing real material at emit.
+
+    `environment/` is required to be a complete checkout at a fixed revision, and most real projects
+    ship a `tests/` directory. The preflight used to reject any `environment/tests` by name, so every
+    candidate whose upstream had one was refused -- and charged to us as a FACTORY fault, which is the
+    attribution that decides whether a low yield reads as bad material or as our bug. Nineteen of the
+    hundred-and-five already-emitted tasks failed exactly this, carrying `basic_example.py` and
+    `test_array.py`: the project's own tests, which belong in a faithful checkout.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        upstream = os.path.join(root, "environment", "tests")
+        os.makedirs(upstream)
+        for name in ("basic_example.py", "test_array.py", "__init__.py"):
+            open(os.path.join(upstream, name), "w").close()
+        assert harbor.answer_key_leaks(os.path.join(root, "environment")) == []
+
+
+def test_the_factory_answer_key_is_caught_wherever_it_is():
+    """What matters is whether the graded answers are reachable from the submission.
+
+    Checked by content rather than by directory name, and at any depth: a copy nested three levels
+    down is exactly as readable to a submission as one at the top, and a submission that can read the
+    expectations can replay them for full marks.
+    """
+    for relative in ("tests/expectations.json", "deep/nested/verify.py",
+                     "scenarios.jsonl", "reference/subject.py"):
+        with tempfile.TemporaryDirectory() as root:
+            environment = os.path.join(root, "environment")
+            planted = os.path.join(environment, relative)
+            os.makedirs(os.path.dirname(planted), exist_ok=True)
+            open(planted, "w").close()
+            leaks = harbor.answer_key_leaks(environment)
+            assert leaks, "a submission could read %s and replay the answers" % relative
+            assert "answer key" in leaks[0]
+
+
 def test_a_gpu_field_exists_before_any_gpu_task_does():
     """CPU tasks write gpus = 0 rather than omitting the key.
 

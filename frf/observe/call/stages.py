@@ -70,6 +70,19 @@ class Corpus:
         return len(self.expectations)
 
     @property
+    def runs(self) -> int:
+        """How many repeats this was actually distilled from, as the process seam also reports.
+
+        DERIVED RATHER THAN STORED, because on this seam it is a fact about the expectations: a
+        freeze that was cut short leaves probes that saw fewer runs, and the configured number would
+        be claiming evidence nobody collected. Exposed under the same name the other seam uses so a
+        reader of a corpus does not have to know which seam produced it -- quoting the configured
+        count once already shipped a task whose provenance said "0 runs" beside a statement that
+        correctly said five.
+        """
+        return max((e.runs for e in self.expectations), default=0)
+
+    @property
     def graded_points(self) -> int:
         # One point per graded probe. A call returns one value, so there is nothing to subdivide --
         # unlike the process seam, where one step is worth four.
@@ -257,7 +270,7 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
         name=spec.name, scale=spec.scale, description=spec.description,
         source_language=spec.language, target_language=spec.target_language,
         probes=corpus.probes, graded_points=corpus.graded_points,
-        freeze_runs=max((e.runs for e in corpus.expectations), default=0),
+        freeze_runs=corpus.runs,
         channels=("the value the call returned",), timed_workloads=len(corpus.timed),
         forbidden=tuple(spec.environment.get("forbidden", ())))
 
@@ -278,6 +291,10 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
     path = os.path.join(destination, spec.name)
     harbor.write(path, package)
     write_tests(path, corpus)
+    # E9 READS WHAT WAS WRITTEN, so it cannot run with the rest of the battery: the file does not
+    # exist until this function has. It lives here rather than in the pipeline because WHICH file
+    # carries the schema is a fact about this layout, and a scale is free to emit another one.
+    checks.record(evidence.harbor_schema_valid(os.path.join(path, "task.toml")))
     return path
 
 

@@ -31,7 +31,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
 
-from . import evidence, harbor
+from . import attestation, evidence, harbor
+from .capabilities import capability
 from .scale import Candidate, Scale, Spec
 
 # How many times the reference is run before anything it did is believed. Measured rather than
@@ -309,7 +310,19 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
                     "; ".join(v.detail for v in failures))
     log("evidence: %d check(s) held" % len(battery.verdicts))
 
+    emitted_before = len(battery.verdicts)
     path = hooks.emit(spec, report, battery)
+
+    # A SEAM MAY ADD VERDICTS WHILE EMITTING, and they have to be consulted or they are decoration.
+    # Some checks cannot run before this point because they read what was written -- the file does
+    # not exist until emit has run. The pipeline stays ignorant of WHICH those are: it re-reads the
+    # battery rather than naming a check, so a seam can add one without touching this module.
+    #
+    # THE FAULT IS OURS. Everything established here is about output this factory produced in a
+    # format the candidate did not choose, so a failure is never the material's.
+    for late in battery.verdicts[emitted_before:]:
+        if not late.ok:
+            raise Stage("emit", "emitted-task-failed-%s" % late.check, Fault.FACTORY, late.detail)
 
     quality_errors = harbor.deterministic_quality(path)
     if quality_errors:
@@ -331,10 +344,41 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     if not verdict.ok:
         raise Stage("emit", "package-does-not-reproduce-itself", Fault.FACTORY, verdict.detail)
 
+
     # Purge bytecode left by replay. The E7 step executes the reference Python implementation
     # directly, which causes Python to compile and cache .pyc files into tests/reference/.
     # Those files must not ship: they reveal the Python version used and are not needed for grading.
     _purge_task_bytecode(path)
+
+    # WRITE DOWN WHAT WAS ESTABLISHED, or it did not happen. Every verdict above was computed on
+    # every task this factory ever emitted and then dropped: the writer rendered five provenance
+    # keys into a sentence and discarded the rest, so a task that survived the whole battery was
+    # indistinguishable on disk from one nobody examined. That is why each audit had to start over
+    # by hand. The record is deliberately dull -- what ran, where, what each check concluded, when.
+    record = attestation.build(
+        name=spec.name, scale=spec.scale, source_language=spec.language,
+        target_language=spec.target_language,
+        # The field that decides what the rest is worth: expectations frozen in this process
+        # describe this host. Recorded as found, including empty -- guessing "local" here would be
+        # the one lie that matters.
+        backend=str(getattr(getattr(scale, "_backend", None), "name", "") or ""),
+        verdicts=battery.to_json(), probes=report.probes,
+        graded_points=report.graded_points,
+        # THE CORPUS CONTRACT IS FOUR ATTRIBUTES, and these two are not among them: how many repeats
+        # a freeze distilled from, and what a coverage audit found, are facts a seam may or may not
+        # carry. Read defensively so that recording evidence never becomes a fifth thing every new
+        # scale has to implement -- and so an absent number is absent rather than a fabricated zero.
+        freeze_runs=getattr(report, "runs", None),
+        discard_rate=report.discard_rate, adequacy=getattr(report, "adequacy", None) or None,
+        capability=capability(spec.language, scale=spec.scale).__dict__,
+        origin=str(spec.environment.get("origin") or ""))
+    try:
+        attestation.write(os.path.dirname(os.path.abspath(path)), record)
+        harbor.stamp_attestation(path, attestation.summary(record))
+    except OSError as why:
+        # An unwritable sidecar must not discard a task that passed every gate. It does mean the
+        # task ships unattested, so it is logged rather than swallowed.
+        log("attestation could not be recorded: %s" % why)
 
     log("emitted %s" % path)
 

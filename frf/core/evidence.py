@@ -333,15 +333,26 @@ def _schema_version_from(toml_text: str) -> str:
 
 
 def harbor_check_valid(task_dir: str) -> Verdict:
-    """E10 -- the emitted task directory must pass `harbor check`.
+    """E10 -- an OPTIONAL agent review of the emitted task. Not a default gate, by design.
 
-    `harbor check` validates more than the toml schema: it also checks that instruction.md exists,
-    tests/test.sh is executable, the directory structure is complete, and that the task is
-    runnable in principle. A task that passes E9 (schema) but fails E10 (structure) has a file
-    missing or a permission wrong -- always our fault, always Fault.FACTORY.
+    WHAT `harbor check` ACTUALLY IS, because this docstring used to say otherwise and the error was
+    load-bearing. It is not a structural validation of the directory: it runs a rubric-driven LLM
+    agent (default `claude-code`) inside a container (default Docker) with configurable attempts and
+    concurrency. On a small emitted task here it did not finish inside five minutes.
 
-    Falls back to INCONCLUSIVE if harbor is not installed rather than failing: the schema check
-    (E9) already ran, and missing harbor tooling is an environment issue, not a task defect.
+    THAT IS WHY IT IS NOT WIRED INTO THE BATTERY. `battery.ok` requires every verdict to hold, and
+    the 30-second timeout this function once carried guaranteed INCONCLUSIVE -- so wiring it in
+    would have refused every task the factory produced. Raising the timeout instead would put a
+    container and an LLM call on the emit path of every candidate, which contradicts the design's
+    own position that Harbor review is an optional release-quality gate and duplicates the existing
+    opt-in route (`harbor_check=True`, which drives `scripts/harbor_check_e2b.py`).
+
+    So this remains a utility for that opt-in path rather than a production check. The structural
+    half of what the old docstring claimed is covered elsewhere and cheaply: E9 validates the
+    schema, and `harbor.deterministic_quality` checks the layout without an agent.
+
+    INCONCLUSIVE when harbor is absent rather than FAILS: missing tooling is an environment fact,
+    not a defect in the task.
     """
     import subprocess
     import shutil

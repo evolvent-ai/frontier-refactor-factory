@@ -269,6 +269,10 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
     path = os.path.join(destination, spec.name)
     harbor.write(path, package)
     write_tests(path, corpus)
+    # E9 READS WHAT WAS WRITTEN, so it cannot run with the rest of the battery: the file does not
+    # exist until this function has. It lives here rather than in the pipeline because WHICH file
+    # carries the schema is a fact about this layout, and a scale is free to emit another one.
+    checks.record(evidence.harbor_schema_valid(os.path.join(path, "task.toml")))
     return path
 
 

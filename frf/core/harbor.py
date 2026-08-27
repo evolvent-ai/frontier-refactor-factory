@@ -51,6 +51,7 @@ ARTIFACTS = ["/app"]
 # string it receives, which keeps the "no language-specific branches" invariant intact.
 from frf.core.shims.dockerfiles import _LANGUAGE_SETUP  # noqa: E402
 from frf.core.scale import TaskForm  # noqa: E402
+from frf.core import attestation  # noqa: E402
 
 
 def dockerfile_for(source_language: str, target_language: str,
@@ -394,13 +395,69 @@ def deterministic_quality(path: str) -> list[str]:
     for required in ("instruction.md", "environment", "tests/verify.py", "tests/test.sh"):
         if not os.path.exists(os.path.join(root, required)):
             errors.append("missing %s" % required)
-    environment = os.path.join(root, "environment")
-    if os.path.exists(os.path.join(environment, "tests")):
-        errors.append("runtime environment contains tests")
-    if os.path.exists(os.path.join(environment, "reference")):
-        errors.append("runtime environment contains reference")
+    errors.extend(answer_key_leaks(os.path.join(root, "environment")))
     return errors
 
+
+# What the factory writes as its answer key, relative to the task root's `tests/`. A copy of any of
+# these inside the solver's tree is a leak; the names are listed once so the check and the writer
+# cannot drift apart.
+_ANSWER_KEY = ("expectations.json", "verify.py", "scenarios.jsonl", "reference")
+
+
+def answer_key_leaks(environment: str) -> list[str]:
+    """Whether the solver's tree contains the graded answers. -> reasons, empty when clean.
+
+    THE TEST IS WHAT A DIRECTORY CONTAINS, NOT WHAT IT IS CALLED, and the difference was refusing
+    real material. This used to reject any `environment/tests` outright. But `environment/` is
+    required to be a complete checkout at a fixed revision, and most real projects ship a `tests/`
+    directory -- so every candidate whose upstream has one was refused at emit and charged to us as a
+    factory fault. The subjects that failed this were carrying `basic_example.py` and `test_array.py`:
+    the project's own tests, which belong in a faithful checkout.
+
+    What actually matters is whether the FACTORY's answer key is reachable from the submission: the
+    frozen expectations, the verifier, the scenario list, and the runnable reference copy. Those live
+    at the task root under `tests/` and are readable only by the verifier; a copy of one inside
+    `environment/` would let a submission read the answers and replay them for full marks. So they
+    are searched for by name at any depth, and an upstream test suite is left alone.
+    """
+    if not os.path.isdir(environment):
+        return []
+    found = []
+    for dirpath, dirnames, filenames in os.walk(environment):
+        dirnames[:] = [d for d in dirnames if d not in ("__pycache__", ".git")]
+        for name in _ANSWER_KEY:
+            if name in filenames or name in dirnames:
+                relative = os.path.relpath(os.path.join(dirpath, name), environment)
+                found.append("runtime environment contains the answer key: %s" % relative)
+    return found
+
+
+
+def stamp_attestation(task_path: str, summary: dict) -> None:
+    """Add the evidence summary to an already-written task.toml.
+
+    WHY THIS IS A SECOND PASS RATHER THAN A FIELD ON `Package`. Two of the checks worth recording do
+    not exist yet when the file is first written: E7 drives the EMITTED package, and a schema check
+    reads the emitted task.toml. Writing the summary during `write()` would therefore either omit
+    the two most decisive verdicts or claim them before they were established.
+
+    The rewrite goes through Harbor's own model rather than editing the text, so the result is
+    schema-valid by construction and a drifting schema fails here instead of shipping. Only keys
+    this module recognises are accepted; a caller cannot use it to introduce arbitrary metadata.
+    """
+    accepted = {k: v for k, v in (summary or {}).items() if k in attestation.SUMMARY_KEYS}
+    if not accepted:
+        return
+    path = os.path.join(task_path, "task.toml")
+    with open(path, "rb") as handle:
+        parsed = tomllib.load(handle)
+    metadata = dict(parsed.get("metadata") or {})
+    metadata.update(accepted)
+    parsed["metadata"] = metadata
+
+    from harbor.models.task.config import TaskConfig
+    _write(path, TaskConfig(**parsed).model_dump_toml())
 
 
 def _safe_task_name(name: str) -> str:
