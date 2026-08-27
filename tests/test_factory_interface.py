@@ -174,6 +174,54 @@ def test_a_package_that_cannot_reproduce_itself_is_OUR_fault_not_the_material_s(
     assert not result.batch.trustworthy, "a batch dominated by our own faults is not a yield"
 
 
+def test_an_unexpected_exception_refuses_one_candidate_rather_than_ending_the_batch():
+    """The contract build_one's docstring states, which its own code did not keep.
+
+    The handler for this was unreachable. The clause above it ended in `raise`, and a `raise` inside
+    an except block leaves the WHOLE try statement rather than falling through to the sibling
+    `except BaseException` that followed -- so every unanticipated exception escaped and killed the
+    job. A real Rust batch died exactly that way on an E2B transport timeout, after other candidates
+    had already passed every gate, and reported nothing about any of them.
+    """
+    class Scale(_ToyScale):
+        name = "surprising"
+
+        def probes(self, spec):
+            # Neither Stage nor SubjectFailed: the kind of failure nobody wrote a branch for.
+            if spec.name == "1":
+                raise TimeoutError("the wire went away")
+            return object()
+
+    result = Factory().register(Scale()).install_stages(**_stages()).build("surprising", budget=3)
+
+    assert len(result) == 2, "the other two candidates still produced tasks"
+    refusal = result.batch.refused[0]
+    assert refusal.stage == "unclassified"
+    assert refusal.reason == "TimeoutError"
+    # Ours until shown otherwise: an exception nobody anticipated is a gap in this code.
+    assert refusal.fault is pipeline.Fault.FACTORY, refusal.to_json()
+
+
+def test_a_transport_timeout_during_replay_is_not_charged_to_the_material():
+    """The wire is not the material, and `TimeoutError` is an OSError rather than a RuntimeError.
+
+    The replay guard caught only RuntimeError, so an E2B transport timeout was not caught at all.
+    Charging it to the candidate would be worse than the crash it caused: a network that timed out
+    says nothing about whether the repository makes a good task, and counting it as material quietly
+    deflates the yield of whichever language happened to be running.
+    """
+    def timeout(_path):
+        raise TimeoutError("Error reading content: operation timed out")
+
+    stages = _stages()
+    stages["replay"] = timeout
+    result = Factory().register(_ToyScale()).install_stages(**stages).build("toy", budget=1)
+
+    refusal = result.batch.refused[0]
+    assert refusal.fault is pipeline.Fault.FACTORY, refusal.to_json()
+    assert refusal.reason == "replay-transport-failed", refusal.to_json()
+
+
 def test_a_batch_says_whether_its_yield_means_anything():
     """A yield measures the material only if the factory was mostly not the problem."""
     honest = _factory().build("toy", budget=10)

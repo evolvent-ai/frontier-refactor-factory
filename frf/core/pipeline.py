@@ -180,16 +180,19 @@ def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
         # An operator stopping a batch is not a candidate failing. Re-raised so that Ctrl-C is not
         # silently recorded as twenty unsuitable packages.
         raise
-    except Exception as unexpected:
+    except Exception as unexpected:                           # noqa: BLE001 -- see the docstring
+        detail = "%s: %s" % (type(unexpected).__name__, unexpected)
         # Call/process subjects that fail to answer are material or adapter failures. Keep the
         # full diagnostic and do not poison a multilingual batch's factory trust signal.
         if type(unexpected).__name__ == "SubjectFailed":
-            detail = "%s: %s" % (type(unexpected).__name__, unexpected)
             log("refused at subject: %s (material)" % detail.splitlines()[0][:160])
             return Refused("subject", "subject-failed", Fault.MATERIAL, detail[:2000], candidate.identity)
-        raise
-    except BaseException as unexpected:                        # noqa: BLE001 -- see the docstring
-        detail = "%s: %s" % (type(unexpected).__name__, unexpected)
+        # ONE CANDIDATE MAY NEVER END A BATCH -- and this used to be unreachable code. The clause
+        # above ended in `raise`, which leaves the WHOLE try statement rather than falling through
+        # to the sibling `except BaseException` that followed it, so every unexpected exception
+        # escaped and killed the job. A real Rust batch died precisely here, on an E2B transport
+        # timeout during E7, after other candidates had already passed every gate. The refusal is
+        # recorded as OURS because an exception nobody anticipated is our bug until shown otherwise.
         log("refused at unclassified: %s (factory)" % detail.splitlines()[0][:160])
         return Refused("unclassified", type(unexpected).__name__, Fault.FACTORY, detail[:2000], candidate.identity)
 
@@ -336,6 +339,13 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     # packages failed exactly this after passing everything else.
     try:
         verdict = evidence.package_reproduces_itself(lambda: hooks.replay(path))
+    except OSError as why:
+        # THE WIRE IS NOT THE MATERIAL. An E2B transport timeout arrives as TimeoutError, which is an
+        # OSError and NOT a RuntimeError -- so the clause below never saw it and it escaped instead,
+        # taking the whole job with it. Charging it to the candidate would be worse than the crash:
+        # a network that timed out says nothing about whether this repository makes a good task, and
+        # counting it as material would quietly deflate the yield of whatever language was running.
+        raise Stage("emit", "replay-transport-failed", Fault.FACTORY, str(why)[:2000])
     except RuntimeError as why:
         # A shipped reference that disagrees with its frozen corpus is a material nondeterminism
         # or dependency problem. Keep factory trust intact and let sourcing move on.
