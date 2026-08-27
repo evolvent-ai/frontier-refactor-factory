@@ -23,7 +23,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import tempfile
+
+from ...core import scratch
 
 # How long a generator may run inside the container. Generous, because building two hundred inputs
 # for a wide surface can be real work; bounded, because a generator that loops must not hold a batch.
@@ -68,7 +69,7 @@ def run_in(backend, source: str, count: int, *, room: str = "/tmp/frf-generator"
     thing this module exists to discourage -- so the caller has to name it, and a reviewer can see
     that it was named.
     """
-    staging = tempfile.mkdtemp(prefix="frf-generator-")
+    staging = scratch.mkdtemp(prefix="frf-generator-")
     try:
         with open(os.path.join(staging, "generator.py"), "w", encoding="utf-8") as handle:
             handle.write(source)

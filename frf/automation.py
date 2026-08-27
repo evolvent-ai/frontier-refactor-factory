@@ -6,7 +6,6 @@ need a generator/entry-point proposal because a registry does not publish a call
 """
 from __future__ import annotations
 
-import tempfile
 import os
 import time
 import hashlib
@@ -23,6 +22,7 @@ from .observe.call import stages as call_stages
 from .observe.probes.generator import run_in as run_generator_in
 from .observe.process import stages as process_stages
 from .observe import checkout_task
+from .core import scratch
 from .core.contract import CheckoutContract
 from .core.ledger import BatchLedger, LedgerRecord
 from .core.diversity import DiversityPolicy
@@ -195,7 +195,7 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         target = budget
         attempt_limit = max_attempts or max(target, target * 10)
         source_index = _index(index_name, subset=subset, scale=name)
-        source_scale = _scale(name, source_index, backend=None, workspace=tempfile.mkdtemp(prefix="frf-source-%s-" % name))
+        source_scale = _scale(name, source_index, backend=None, workspace=scratch.mkdtemp(prefix="frf-source-%s-" % name))
         diversity = DiversityPolicy(max_per_repository=4)
         started = time.perf_counter()
         reports = []
@@ -259,7 +259,7 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
     # the scale first silently made automatic runs use local execution even when Settings required
     # remote E2B.
     idx = _index(index_name, subset=subset, scale=name)
-    workspace = tempfile.mkdtemp(prefix="frf-%s-" % name)
+    workspace = scratch.mkdtemp(prefix="frf-%s-" % name)
     implementation = _scale(name, idx, backend=factory.backend(), workspace=workspace)
     # Store task_form on the instance so pipeline._specify() can pick it up without a
     # factory-level API change. The attribute is advisory: scales whose specify() accepts

@@ -254,9 +254,10 @@ class RemoteSubject:
         if not requests:
             return {}
         import os
-        import tempfile
 
-        staging = tempfile.mkdtemp(prefix="frf-requests-")
+        from ...core import scratch
+
+        staging = scratch.mkdtemp(prefix="frf-requests-")
         try:
             with open(os.path.join(staging, "requests.jsonl"), "w", encoding="utf-8") as handle:
                 for request in requests:

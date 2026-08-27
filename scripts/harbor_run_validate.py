@@ -31,7 +31,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -93,7 +92,9 @@ def harbor_run(task_dir: Path, harbor_bin: str, backend: str,
     staging = None
     run_task = task_dir
     if submission is not None:
-        staging = Path(tempfile.mkdtemp(prefix="frf-harbor-task-"))
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from frf.core import scratch
+        staging = Path(scratch.mkdtemp(prefix="frf-harbor-task-"))
         shutil.copytree(task_dir, staging / task_dir.name, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("solution"))
         run_task = staging / task_dir.name

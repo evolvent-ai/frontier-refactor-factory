@@ -26,11 +26,10 @@ import os
 import json
 import shutil
 import subprocess
-import tempfile
 import uuid
 from dataclasses import dataclass, field
 
-from ..core import integrity
+from ..core import integrity, scratch
 from ..core.scale import Candidate, Spec, TaskForm
 from ..observe import coverage
 from ..observe.process.runner import Scenario, run_scenario
@@ -519,7 +518,7 @@ class Observer:
                 staged = submission
                 program = self._staged(staged)
             else:
-                staged = tempfile.mkdtemp(prefix="frf-trivial-")
+                staged = scratch.mkdtemp(prefix="frf-trivial-")
                 wrapper = os.path.join(staged, ".frf-trivial-run.sh")
                 with open(wrapper, "w", encoding="utf-8") as handle:
                     handle.write(submission)
@@ -550,7 +549,7 @@ class Observer:
 
     def _mutant(self, channel: str = "stdout") -> str:
         """Copy the reference and deterministically perturb one process channel."""
-        room = tempfile.mkdtemp(prefix="frf-repo-mutant-")
+        room = scratch.mkdtemp(prefix="frf-repo-mutant-")
         shutil.copytree(self.material.root, room, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns(".git", "target", "build", "node_modules"))
         wrapper = os.path.join(room, ".frf-mutant-run.sh")
@@ -775,7 +774,6 @@ for name, target in scripts.items():
         Uses the reference shipped inside the task as the submission, so the verifier
         proves the reference can reproduce its own expectations.
         """
-        import tempfile
         path = os.path.abspath(path)
         reference_dir = os.path.join(path, "tests", "reference")
         observer = self._built
@@ -823,7 +821,7 @@ for name, target in scripts.items():
                 report = json.load(handle)
             return int(report.get("correctness_passed", 0)), int(report.get("correctness_total", 0))
             # unreachable: the local packaged replay above is authoritative
-        with tempfile.TemporaryDirectory() as logs:
+        with scratch.temporary_directory() as logs:
             reward = os.path.join(logs, "reward.json")
             remote_built = False
             observer = self._built
@@ -1047,7 +1045,7 @@ for name, target in scripts.items():
                 material.fixtures = fixture_dir
                 remote_observer._remote_fixtures = remote_root + "/fixtures"
                 self._backend.push(fixture_dir, remote_observer._remote_fixtures)
-            stdin_stage = tempfile.mkdtemp(prefix="frf-stdin-stage-")
+            stdin_stage = scratch.mkdtemp(prefix="frf-stdin-stage-")
             for relative in _repo_workload_files(material.root)[:20]:
                 source = os.path.join(material.root, relative)
                 target = os.path.join(stdin_stage, relative)
@@ -1126,7 +1124,7 @@ for name, target in scripts.items():
                 "candidate %s has neither a local root nor a repository URL; nothing to discover "
                 "an entry point from" % candidate.identity)
 
-        root = tempfile.mkdtemp(prefix="frf-repo-")
+        root = scratch.mkdtemp(prefix="frf-repo-")
         try:
             if self._backend is not None and getattr(self._backend, "name", "") in ("docker", "remote"):
                 # Clone inside the sandbox, then pull the tree back for local inspection.

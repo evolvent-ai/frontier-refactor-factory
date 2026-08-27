@@ -19,10 +19,10 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import tempfile
 import uuid
 from dataclasses import dataclass, field
 
+from ...core import scratch
 from .observation import Observation, Stream
 
 # What the workspace path becomes in a recorded observation. Anything a program prints that contains
@@ -119,7 +119,7 @@ def run_scenario(scenario: Scenario, program: list, *, fixtures_dir: str | None 
                                     remote_program=remote_program or program,
                                     remote_fixtures=remote_fixtures,
                                     exclude=exclude, timeout=timeout)
-    root = tempfile.mkdtemp(prefix="frf-scenario-")
+    root = scratch.mkdtemp(prefix="frf-scenario-")
     workspace = os.path.join(root, "workspace")
     os.makedirs(workspace, exist_ok=True)
     # READABLE BY THE ACCOUNT THE SUBJECT RUNS AS. `mkdtemp` creates 0700, which is right for a
@@ -221,7 +221,7 @@ def run_remote_many(scenarios: list[Scenario], *, backend, remote_program: list,
         return merged
 
     remote_root = "/tmp/frf-corpus-%s" % uuid.uuid4().hex[:12]
-    local = tempfile.mkdtemp(prefix="frf-remote-corpus-")
+    local = scratch.mkdtemp(prefix="frf-remote-corpus-")
     results = remote_root + "/results"
     try:
         script = ["set +e", "mkdir -p %s" % _shell_quote(results)]
@@ -289,7 +289,7 @@ def _run_remote_scenario(scenario: Scenario, program: list, *, backend,
     """
     remote_root = "/tmp/frf-scenario-%s" % uuid.uuid4().hex[:12]
     workspace = remote_root + "/workspace"
-    local_snapshot = tempfile.mkdtemp(prefix="frf-remote-snapshot-")
+    local_snapshot = scratch.mkdtemp(prefix="frf-remote-snapshot-")
     try:
         made = backend.run(["mkdir", "-p", workspace], timeout=60)
         if not made.ok:
@@ -331,7 +331,7 @@ def _run_remote_scenario(scenario: Scenario, program: list, *, backend,
                            env=environment, timeout=timeout * max(1, len(scenario.steps)))
         if not done.ok:
             raise RuntimeError("remote scenario failed: %s" % done.tail())
-        pulled = tempfile.mkdtemp(prefix="frf-remote-results-")
+        pulled = scratch.mkdtemp(prefix="frf-remote-results-")
         backend.pull(results, pulled)
         observations = []
         for index in range(len(scenario.steps)):

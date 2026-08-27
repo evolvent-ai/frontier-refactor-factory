@@ -156,8 +156,8 @@ def _build(name: str) -> Backend:
     from . import containers
 
     if name == "local-process":
-        import tempfile
-        return LocalProcess(root=tempfile.mkdtemp(prefix="frf-local-"))
+        from . import scratch
+        return LocalProcess(root=scratch.mkdtemp(prefix="frf-local-"))
     if name == "docker":
         return containers.Docker()
     if name == "remote":

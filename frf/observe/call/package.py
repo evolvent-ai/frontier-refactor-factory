@@ -177,7 +177,8 @@ def drive(path: str, *, backend=None) -> tuple:
     earlier factory, 14 of 78 emitted packages failed exactly this having passed everything else.
     """
     import subprocess
-    import tempfile
+
+    from ...core import scratch
 
     if backend is not None and getattr(backend, "name", "") == "remote":
         import uuid
@@ -224,7 +225,7 @@ def drive(path: str, *, backend=None) -> tuple:
         return passed, total
 
     tests = os.path.join(path, "tests")
-    with tempfile.TemporaryDirectory() as logs:
+    with scratch.temporary_directory() as logs:
         reward = os.path.join(logs, "reward.json")
         done = subprocess.run(
             [sys.executable, os.path.join(tests, VERIFIER),

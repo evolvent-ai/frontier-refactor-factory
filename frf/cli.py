@@ -30,7 +30,7 @@ import sys
 import traceback
 
 from . import __version__
-from .core import credentials, sandbox
+from .core import credentials, sandbox, scratch
 from .core.scale import SCALES
 from . import source as indexes
 from .observe import coverage
@@ -38,6 +38,24 @@ from .observe import coverage
 
 def _log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+
+
+def _sweep_scratch() -> None:
+    """Reclaim what abandoned runs left behind, before this one starts staging its own.
+
+    A batch that is killed, or that dies when the filesystem fills, does not get to clean up after
+    itself, so its checkout and build directories stay until something removes them. Sweeping at the
+    start of a batch rather than the end is deliberate: the run that needs the space is the one
+    asking for it, and a run that crashed is exactly the run whose own teardown did not happen.
+    """
+    try:
+        gone = scratch.sweep()
+    except OSError as exc:                       # an unwritable scratch dir is the run's problem
+        _log("[scratch] could not sweep %s: %s" % (scratch.ENV_VAR, exc))
+        return
+    if gone:
+        _log("[scratch] removed %d abandoned working director%s from %s"
+             % (gone, "y" if gone == 1 else "ies", scratch.base()))
 
 
 def _scales_command(_args) -> int:
@@ -105,6 +123,7 @@ def _build_command(args) -> int:
     if args.scale == "all":
         _log("build all is intentionally explicit: choose a scale so its registry query is visible")
         return 2
+    _sweep_scratch()
     report = run(args.scale, budget=args.budget, index=args.index,
                  output_dir=args.output, backend=args.backend)
     print(json.dumps(report.to_json(), sort_keys=True))
@@ -150,6 +169,8 @@ def _run_command(args) -> int:
                 job.scale, job.form, job.source_language or "*", job.budget))
         print("checkpoint: %s" % checkpoint_file)
         return 0
+
+    _sweep_scratch()
 
     from .core.rate_limiter import configure as configure_limiter
     configure_limiter(

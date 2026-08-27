@@ -10,9 +10,8 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
 
-from ..core import harbor
+from ..core import harbor, scratch
 from ..core.contract import CheckoutContract
 
 _IGNORE = shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "target", "build",
@@ -49,7 +48,7 @@ def drive(path: str) -> tuple[int, int]:
     require the speed target: an unmodified reference is expected to be about 1x.
     """
     tests = os.path.join(path, "tests")
-    with tempfile.TemporaryDirectory() as logs:
+    with scratch.temporary_directory() as logs:
         reward = os.path.join(logs, "reward.json")
         done = subprocess.run(["python3", os.path.join(tests, "verify.py"),
                                "--task-root", tests,

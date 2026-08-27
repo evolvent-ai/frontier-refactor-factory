@@ -20,8 +20,8 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 
+from ...core import scratch
 from ...core.adequacy import Reach
 
 # How many dark regions to name. Enough to aim a repair at, few enough that a provenance file stays
@@ -159,7 +159,7 @@ class PythonTrace:
         if not target or not os.path.exists(target):
             return Reach(backend=self.name)
 
-        with tempfile.TemporaryDirectory() as work:
+        with scratch.temporary_directory() as work:
             harness = os.path.join(work, "measure_coverage.py")
             probes_path = os.path.join(work, "probes.json")
             out_path = os.path.join(work, "reached.json")

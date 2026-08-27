@@ -26,12 +26,12 @@ import os
 import shutil
 import subprocess
 import tarfile
-import tempfile
 import time
 import re
 import uuid
 
 from . import credentials
+from . import scratch as _scratch
 from .sandbox import Result, SandboxError
 
 # What a sandbox starts from when nothing else is asked for. A slim image with a real package
@@ -365,4 +365,4 @@ def docker_available() -> bool:
 
 def scratch() -> str:
     """A temporary directory for staging pushes and pulls."""
-    return tempfile.mkdtemp(prefix="frf-stage-")
+    return _scratch.mkdtemp(prefix="frf-stage-")

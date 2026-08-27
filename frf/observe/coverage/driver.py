@@ -15,7 +15,8 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
+
+from ...core import scratch
 
 # Longest the instrumented subject may take over the whole corpus. Instrumentation makes everything
 # slower -- a tracer can be an order of magnitude -- so this is far more generous than a timing run.
@@ -64,7 +65,7 @@ class Run:
         self.source = ""
 
     def __enter__(self) -> "Run":
-        self.work = tempfile.mkdtemp(prefix="frf-coverage-")
+        self.work = scratch.mkdtemp(prefix="frf-coverage-")
         self.ok = self._drive()
         return self
 
