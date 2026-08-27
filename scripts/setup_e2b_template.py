@@ -128,6 +128,11 @@ DOCKER_INSTALL_CMDS = [
     "ln -sf /usr/local/go/bin/go /usr/local/bin/go && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt",
     "curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal",
     "ln -sf /root/.cargo/bin/cargo /usr/local/bin/cargo && ln -sf /root/.cargo/bin/rustc /usr/local/bin/rustc",
+    # Java and Ruby build tools. apt is the most reliable source here: the repo scale's pom.xml /
+    # gemspec entry point discovery returns `mvn package` and `bundle install`, and without these
+    # every Java and Ruby candidate was refused as `reference-will-not-build (material)` while the
+    # actual fault was a missing toolchain in this template.
+    "apt-get install -y --no-install-recommends openjdk-21-jdk maven ruby ruby-dev ruby-bundler",
     "rm -rf /var/lib/apt/lists/*",
 ]
 
