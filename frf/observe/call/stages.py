@@ -295,7 +295,23 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
     # exist until this function has. It lives here rather than in the pipeline because WHICH file
     # carries the schema is a fact about this layout, and a scale is free to emit another one.
     checks.record(evidence.harbor_schema_valid(os.path.join(path, "task.toml")))
+    # E4 READS WHAT WAS WRITTEN -- same reason as E9. Checks both directories: the solver's tree
+    # for answer-key artefacts (the original implementation is expected and allowed; the factory's
+    # frozen expectations, verifier, or reference copy are not), and the verifier's directory for
+    # whether the one setting that seals it is actually present in the emitted file.
+    checks.record(evidence.no_runnable_reference(
+        _reference_reachable_from(path),
+        {"solver tree": os.path.join(path, "environment"), "verifier": path}))
     return path
+
+
+def _reference_reachable_from(task_root: str):
+    """Bind E4's per-directory probe to this layout. -> the callable E4 takes."""
+    def find(directory: str) -> list[str]:
+        if directory == task_root:
+            return harbor.verifier_directory_is_unreachable(task_root)
+        return harbor.runnable_reference_in(directory)
+    return find
 
 
 def replay(path: str, *, drive: Callable[[str], tuple[int, int]]) -> tuple[int, int]:

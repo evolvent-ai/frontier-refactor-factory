@@ -34,7 +34,6 @@ Harbor treats as a free-form dict[str, Any] and does not validate.
 """
 from __future__ import annotations
 
-import json
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -432,6 +431,47 @@ def answer_key_leaks(environment: str) -> list[str]:
                 found.append("runtime environment contains the answer key: %s" % relative)
     return found
 
+
+
+def runnable_reference_in(directory: str) -> list[str]:
+    """What E4 asks of one directory: does a runnable answer live here that must not? -> reasons.
+
+    THE TWO DIRECTORIES FAIL DIFFERENTLY, so the same question is not asked of both.
+
+    For the solver's tree the answer is `answer_key_leaks`: a copy of the factory's answer key at
+    any depth. The subtlety is that `environment/` is REQUIRED to hold a runnable copy of the
+    original implementation -- the task is to make that code faster, so withholding it would leave
+    nothing to work on. The original is the thing under repair, not the answer to it, and a check
+    that cannot tell those apart refuses every real task. What is forbidden is a SECOND copy that
+    came from us: the frozen expectations, the verifier, the scenario list, or the reference tree.
+
+    For the verifier's own directory the answer is not about contents at all -- `tests/` is SUPPOSED
+    to hold a runnable reference. What decides whether that is a leak is one setting: with
+    `environment_mode = "separate"` the directory is unreadable from inside the submission, and
+    without it every expectation and the reference itself are one `open()` away.
+    """
+    return answer_key_leaks(directory)
+
+
+def verifier_directory_is_unreachable(task_root: str) -> list[str]:
+    """Whether `tests/` is sealed against the submission. -> reasons, empty when sealed.
+
+    Read back from the EMITTED task.toml rather than trusted from the writer, because the value that
+    protects the answer key is only worth as much as what actually shipped.
+    """
+    task_file = os.path.join(task_root, "task.toml")
+    if not os.path.isfile(task_file):
+        return ["no task.toml, so verifier isolation cannot be established"]
+    try:
+        with open(task_file, "rb") as handle:
+            parsed = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as why:
+        return ["task.toml could not be read: %s" % why]
+    mode = parsed.get("verifier", {}).get("environment_mode")
+    if mode != "separate":
+        return ["verifier environment_mode is %r, so tests/ (the answer key) is readable by the "
+                "submission" % (mode,)]
+    return []
 
 
 def stamp_attestation(task_path: str, summary: dict) -> None:

@@ -19,14 +19,12 @@ and identical because it is the same code in `core` reached through the same int
 from __future__ import annotations
 
 import os
-from ...core.capabilities import capability
 import time
-
-import os
 from dataclasses import dataclass, field
 from typing import Callable
 
 from ...core import adequacy, evidence, harbor, statement
+from ...core.capabilities import capability
 from ...core.scale import Spec
 from . import observation as obs
 
@@ -273,7 +271,22 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
     # exist until this function has. It lives here rather than in the pipeline because WHICH file
     # carries the schema is a fact about this layout, and a scale is free to emit another one.
     checks.record(evidence.harbor_schema_valid(os.path.join(path, "task.toml")))
+    # E4 READS WHAT WAS WRITTEN, for the same reason E9 does: both directories it asks about exist
+    # only once this function has run. Both halves are checked -- the solver's tree for a copy of
+    # the answer key, and the verifier's own directory for whether one setting still seals it.
+    checks.record(evidence.no_runnable_reference(
+        _reference_reachable_from(path),
+        {"solver tree": os.path.join(path, "environment"), "verifier": path}))
     return path
+
+
+def _reference_reachable_from(task_root: str):
+    """Bind E4's per-directory probe to this layout. -> the callable E4 takes."""
+    def find(directory: str) -> list[str]:
+        if directory == task_root:
+            return harbor.verifier_directory_is_unreachable(task_root)
+        return harbor.runnable_reference_in(directory)
+    return find
 
 
 class Seam:
