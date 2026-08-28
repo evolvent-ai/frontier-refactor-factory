@@ -118,7 +118,15 @@ def source(language: str, dispatch: dict, *, mutant: int | None = None) -> str:
     if mutant is not None:
         column = 1 if language in ("javascript", "typescript") else 0
         wrong = _WRONG[mutant % len(_WRONG)][column]
-    return generator(dispatch, wrong)
+    output = generator(dispatch, wrong)
+    if language == "typescript":
+        # The dispatcher is GENERATED COMMONJS (exports/require). When it is written to a .ts file
+        # and passed to tsc, the compiler refuses `exports` and `require` as undeclared names --
+        # no @types/node in the offline sandbox. The declarations below are stripped by tsc and
+        # cost nothing at runtime, but they let the compiler see what this generated module means.
+        output = ("declare var exports: any;\n"
+                  "declare function require(mod: string): any;\n" + output)
+    return output
 
 
 def supported(language: str) -> bool:

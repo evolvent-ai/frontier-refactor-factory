@@ -65,12 +65,29 @@ def test_the_javascript_dispatcher_and_its_mutants_are_valid_javascript(language
     """The bug this pins: appended Python source made every JS mutant unparseable.
 
     Skipped rather than assumed when node is absent, because the structural
-    checks in this file are meant to run on a bare host.
+    checks in this file are meant to run on a bare host. TypeScript is verified
+    with tsc --noEmit because `node --check` demands plain JS and the generated
+    TS carries declarations.
     """
     if not shutil.which("node"):
         pytest.skip("node is not installed; cannot check generated JavaScript")
+    if language == "typescript" and not shutil.which("tsc"):
+        pytest.skip("tsc is not installed; cannot check generated TypeScript")
     for mutant in (None,) + ATTEMPTS:
         source = dispatch.source(language, DISPATCH, mutant=mutant)
+        if language == "typescript":
+            with tempfile.TemporaryDirectory() as directory:
+                path = os.path.join(directory, "subject.ts")
+                with open(path, "w") as handle:
+                    handle.write(source)
+                done = subprocess.run(["tsc", "--target", "ES2022",
+                                       "--module", "commonjs", "--skipLibCheck",
+                                       "--noEmit", path],
+                                      capture_output=True, text=True)
+                assert done.returncode == 0, (
+                    "%s mutant=%r does not type-check as TypeScript: %s"
+                    % (language, mutant, done.stderr.strip()[:200]))
+            continue
         handle = tempfile.NamedTemporaryFile("w", suffix=".js", delete=False)
         try:
             handle.write(source)
