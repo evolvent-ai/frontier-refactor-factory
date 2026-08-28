@@ -470,8 +470,7 @@ def _index(name: str, *, subset: str, scale: str = ""):
             # One language, several topics chained: a package corpus is the same kind of
             # concentration problem a repo corpus is, and `topic:algorithms` alone would draw
             # every night from the same puzzle-library family.
-            return cls(_chain_of_topics(source.GitHub, FUNCTION_TOPICS, language, scale="package", quota=2),
-                       scale="package", log=lambda message: print("[source] " + message, flush=True))
+            return cls(_chain_of_topics(source.GitHub, FUNCTION_TOPICS, language, scale="package", quota=2))
         # Open-world default: enumerate multiple language sources instead of silently restricting
         # package discovery to Python. Unsupported adapters remain explicit source rejections.
         package_languages = ("python", "javascript", "typescript", "rust", "go", "ruby", "java")
