@@ -106,7 +106,15 @@ _LANGUAGE_SETUP: dict[str, dict] = {
     "javascript": {
         "base_image": "node:22-bookworm-slim",
         "apt_packages": [],
-        "install_cmds": [],
+        # node slim ships npm but NOT the other package managers, and a JS/TS monorepo usually
+        # declares one: `pnpm install` failed with `pnpm: not found` on a real repo/ts batch, and
+        # since install never ran, every project-local devDependency was missing too -- so the same
+        # batch also reported vitest, ts-node, nyc and wireit as not found. All of it arrived as
+        # `reference-will-not-build (material)`, blaming repositories whose own code was fine.
+        # Installing the MANAGERS is the fix; the downstream tools come from the repo's own lockfile.
+        "install_cmds": [
+            "npm install -g pnpm@9.12.3 yarn@1.22.22",
+        ],
         "copy_from_image": "node:22-bookworm-slim",
         "copy_from_paths": [
             ("/usr/local/bin/node", "/usr/local/bin/node"),
@@ -120,8 +128,11 @@ _LANGUAGE_SETUP: dict[str, dict] = {
     "typescript": {
         "base_image": "node:22-bookworm-slim",
         "apt_packages": [],
+        # Same as javascript above: a TS monorepo declares a package manager, and node slim carries
+        # only npm. `pnpm: not found` and `bun: not found` accounted for most of one repo/ts batch's
+        # refusals, all charged to the material.
         "install_cmds": [
-            "npm install -g typescript@5.6.3",
+            "npm install -g typescript@5.6.3 pnpm@9.12.3 yarn@1.22.22",
         ],
         "copy_from_image": "node:22-bookworm-slim",
         "copy_from_paths": [
