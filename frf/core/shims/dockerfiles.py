@@ -66,7 +66,10 @@ _LANGUAGE_SETUP: dict[str, dict] = {
     },
     "c": {
         "base_image": "debian:bookworm-slim",
-        "apt_packages": ["gcc", "libc6-dev", "make"],
+        # CMake is the build system the repo scale's discovery now finds in subdirectories; without
+        # it, a library with a CLI in examples/ refused as "reference-will-not-build" with
+        # `cmake: command not found` -- the discovery worked and the TOOLCHAIN was absent.
+        "apt_packages": ["gcc", "libc6-dev", "make", "cmake"],
         "install_cmds": [],
         "copy_from_image": None,
         "copy_from_paths": [],
@@ -75,7 +78,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
     },
     "cpp": {
         "base_image": "debian:bookworm-slim",
-        "apt_packages": ["g++", "libc6-dev", "make"],
+        "apt_packages": ["g++", "libc6-dev", "make", "cmake"],
         "install_cmds": [],
         "copy_from_image": None,
         "copy_from_paths": [],
