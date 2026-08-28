@@ -33,7 +33,7 @@ from .protocol import Request, Response
 DEFAULT_CALL_TIMEOUT = float(__import__("os").environ.get("FRF_CALL_TIMEOUT", "10"))
 
 
-def _last_error(text: str, limit: int = 400) -> str:
+def _last_error(text: str, limit: int = 800) -> str:
     """The line that says what went wrong, out of whatever the subject printed.
 
     NEITHER THE HEAD NOR A FIXED TAIL. Taking the head reported a `dpkg` warning from the image as
@@ -58,7 +58,7 @@ def _last_error(text: str, limit: int = 400) -> str:
         or "SyntaxError" in line or "is not a function" in line)), "")
     if message_line:
         # The finding is the END of this line -- the module path the runtime could not find.
-        context = message_line[-380:]
+        context = message_line[-760:]
     elif not any(line.startswith("File ") for line in lines[:-1]):
         tail_start = max(0, len(lines) - 4)
         tail = lines[tail_start:]
