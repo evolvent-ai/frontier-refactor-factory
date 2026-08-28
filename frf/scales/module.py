@@ -681,7 +681,18 @@ def _window_of(source: str, symbol: str) -> tuple:
         return (0, len(source))
     for marker in ("def %s(" % symbol, "func %s(" % symbol, "fn %s(" % symbol,
                    "function %s(" % symbol, "%s(" % symbol,
-                   "%s = (" % symbol, "%s = async (" % symbol):
+                   "%s = (" % symbol, "%s = async (" % symbol,
+                   # The package dispatcher is `exports.entry = async function(...)` or
+                   # `module.exports.entry = ...`, which none of the above markers match -- so a
+                   # package candidate fell back to the WHOLE FILE and the mutation table could
+                   # write into `const DISPATCH` at the top level, producing a syntax error that
+                   # killed the subject in E3.
+                   "exports.%s = (" % symbol, "exports.%s = async (" % symbol,
+                   "exports.%s = function(" % symbol, "exports.%s = async function(" % symbol,
+                   "module.exports.%s = (" % symbol, "module.exports.%s = async (" % symbol,
+                   "module.exports.%s = function(" % symbol,
+                   "module.exports.%s = async function(" % symbol,
+                   "%s = async (" % symbol):
         opened = source.find(marker)
         if opened == -1:
             continue

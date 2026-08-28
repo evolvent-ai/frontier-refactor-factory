@@ -182,3 +182,40 @@ def test_go_mutants_use_only_go_builtins():
                 "Go mutant %d introduced %r, which is not Go" % (attempt, spelling))
         # `i++` must survive: the bare `+` entry used to turn it into `i+-`.
         assert "i++" in mutated, "Go mutant %d damaged the `i++` increment" % attempt
+
+
+def test_the_package_dispatcher_is_mutated_only_inside_entry():
+    """The regression that took a whole TS batch down.
+
+    A package subject is a generated dispatcher: `const DISPATCH = {...}` at top level, then
+    `exports.entry = async function(op, ...args) { ... }`. `_window_of` could not find `entry`
+    -- `exports.entry = async function(` matched no marker -- so it fell back to the WHOLE FILE,
+    and the mutation table wrote into the top-level `const DISPATCH`, producing
+    `const DISPATCH = { throw new Error('frf mutant'); ...` -- a syntax error. The subject then
+    died when the shim tried to load it, surfaced as the one-line `Node.js v22.23.2`, and every
+    candidate in the batch was refused at evidence as material.
+
+    The window must find `exports.entry` (and `module.exports.entry`), so the top level is never
+    a mutation site.
+    """
+    from frf.scales import module
+    dispatcher = (
+        'const DISPATCH = {"a": ["./mod", "a"], "b": ["./mod", "b"]};\n'
+        'exports.entry = async function(op, ...args) {\n'
+        '  if (!DISPATCH[op]) throw new Error("unknown operation: " + op);\n'
+        '  const [mod, symbol] = DISPATCH[op];\n'
+        '  let loaded;\n'
+        '  try { loaded = await import(mod); } catch (e) { loaded = require(mod); }\n'
+        '  const fn = loaded[symbol] || loaded.default;\n'
+        '  if (typeof fn !== "function") throw new Error("not callable: " + symbol);\n'
+        '  return fn(...args);\n'
+        '};\n'
+    )
+    start, end = module._window_of(dispatcher, "entry")
+    assert start != 0 or "DISPATCH" not in dispatcher[:start], (
+        "window %r begins at the file start; the top-level DISPATCH is inside it" % (start,))
+    # The DISPATCH line must never change under any mutation attempt.
+    for attempt in range(module.MUTATION_ATTEMPTS):
+        out = module.mutate(dispatcher, "typescript", "entry", attempt)
+        assert out.splitlines()[0] == dispatcher.splitlines()[0], (
+            "attempt %d mutated the top-level DISPATCH line" % attempt)
