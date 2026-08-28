@@ -45,19 +45,25 @@ DEFAULT_IMAGE = "python:3.11-slim-bookworm"
 EXCLUDED = {".git", ".hg", "__pycache__", ".pytest_cache", ".venv", "node_modules", "target"}
 
 
-def _tar_bytes(local_dir: str) -> bytes:
+def _tar_bytes(local_dir: str, exclude: set | None = None) -> bytes:
     """A directory as a tar stream, with the host left out of it.
 
     Names are stored relative to the directory root so that unpacking cannot depend on where the
     directory happened to live, and mtimes are flattened so that pushing the same tree twice
     produces the same bytes -- which is what makes a cached layer or a diff meaningful.
+
+    `exclude` defaults to the global EXCLUDED (host repositories never need node_modules/.git),
+    but a package subject's direct dependencies are part of the CONTRACT -- a monorepo refactor
+    task imports its own npm deps, and without them the sandbox cannot resolve the package.
+    Callers that need them pass a narrower set.
     """
+    excluded = EXCLUDED if exclude is None else exclude
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as archive:
         for root, dirs, files in os.walk(local_dir):
-            dirs[:] = [d for d in dirs if d not in EXCLUDED]
+            dirs[:] = [d for d in dirs if d not in excluded]
             for name in files:
-                if name in EXCLUDED:
+                if name in excluded:
                     continue
                 full = os.path.join(root, name)
                 info = archive.gettarinfo(full, arcname=os.path.relpath(full, local_dir))
@@ -162,11 +168,12 @@ class Docker:
         self.close()
 
     # ---------------------------------------------------------------- the interface
-    def push(self, local_dir: str, remote_dir: str) -> None:
+    def push(self, local_dir: str, remote_dir: str, *, exclude: set | None = None) -> None:
         self.start()
         self.run(["mkdir", "-p", remote_dir], timeout=60)
         done = subprocess.run(["docker", "cp", "-", "%s:%s" % (self._id, remote_dir)],
-                              input=_tar_bytes(local_dir), capture_output=True, timeout=900)
+                              input=_tar_bytes(local_dir, exclude=exclude),
+                              capture_output=True, timeout=900)
         if done.returncode != 0:
             raise SandboxError("could not copy into the container: %s"
                                % done.stderr.decode("utf-8", "replace")[-500:])
@@ -266,14 +273,18 @@ class Remote:
     def __exit__(self, *_) -> None:
         self.close()
 
-    def push(self, local_dir: str, remote_dir: str) -> None:
+    def push(self, local_dir: str, remote_dir: str, *, exclude: set | None = None) -> None:
         """Upload as one tar and unpack there.
 
         File by file would be one network round trip per file, and a repository is thousands. The
         remote end is asked to unpack with its own tar rather than by the SDK, because the SDK's
         write API takes bytes and has no opinion about archives.
+
+        `exclude` narrows what gets packed. The default excludes node_modules/.git etc (repo
+        checkouts); subject workspaces may pass a narrower set because their dependencies are part
+        of the contract.
         """
-        blob = _tar_bytes(local_dir)
+        blob = _tar_bytes(local_dir, exclude=exclude)
         staged = "/tmp/frf-push-%s.tar" % uuid.uuid4().hex[:8]
         # A READ TIMEOUT HERE IS NOTHING ABOUT THE SUBJECT. `files.write` has no retry of its own
         # and no exit code to report, so a transient transport failure -- an E2B SDK read timeout,

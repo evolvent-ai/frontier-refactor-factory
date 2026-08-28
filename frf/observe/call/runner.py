@@ -247,7 +247,11 @@ class RemoteSubject:
             import uuid
             self._remote = "/tmp/frf-subject-%s" % uuid.uuid4().hex[:12]
         try:
-            self._backend.push(self.workspace, self._remote)
+            # A call-seam subject's workspace is a package checkout, and its node_modules
+            # and target/ are the dependency tree the package imports at runtime -- excluded
+            # by the repo-scale default, where huge trees are not part of the contract.
+            self._backend.push(self.workspace, self._remote,
+                               exclude={'.git', '.hg', '__pycache__', '.pytest_cache', '.venv'})
         except Exception as exc:                       # noqa: BLE001 -- transport, not the subject
             raise SubjectFailed("could not stage the subject: %s" % exc) from exc
         return self
