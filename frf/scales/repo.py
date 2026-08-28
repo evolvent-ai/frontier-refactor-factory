@@ -615,14 +615,33 @@ def _discover_entrypoint(root: str) -> tuple:
             # and refuse material that a self-contained script would have passed.
             return [], ["ruby", "{ROOT}/" + executable]
 
-    # 10. A CMake executable target, for C and C++.
-    cmake_file = os.path.join(root, "CMakeLists.txt")
-    if os.path.isfile(cmake_file):
-        target = _cmake_executable(cmake_file)
-        if target:
+    # 10. A CMake executable target, for C and C++. The ROOT file first is the common case, but a
+    # library's CLI program usually lives in a subdirectory -- csv-parser has programs/CMakeLists.txt,
+    # toml11 has examples/parse_file/CMakeLists.txt, and a build directory that holds add_executable
+    # is exactly the program a task can grade. Restricting the search to the root turned those
+    # libraries into "no discoverable entry point", which is a gap in this table rather than a fact
+    # about the material.
+    found_cmake = None
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in {".git", "build", "out", "node_modules",
+                                                        "cmake-build-debug"}]
+        if "CMakeLists.txt" not in filenames:
+            continue
+        candidate = os.path.join(dirpath, "CMakeLists.txt")
+        if _cmake_executable(candidate):
+            found_cmake = candidate
+            break
+    if found_cmake is not None:
+        target = _cmake_executable(found_cmake)
+        rel = os.path.relpath(found_cmake, root).replace(os.sep, "/")
+        if rel == "CMakeLists.txt":
             return ([["cmake", "-S", "{ROOT}", "-B", "{ROOT}/build"],
                      ["cmake", "--build", "{ROOT}/build", "--target", target]],
                     ["{ROOT}/build/" + target])
+        sub_root = os.path.dirname(rel)
+        return ([["cmake", "-S", "{ROOT}/" + sub_root, "-B", "{ROOT}/build"],
+                 ["cmake", "--build", "{ROOT}/build", "--target", target]],
+                ["{ROOT}/build/" + target])
 
     # 11. LANGUAGE-AGNOSTIC DECLARATIONS. None of these name a language: a CI workflow, a Justfile,
     # a Taskfile and a devcontainer are all the maintainer saying how the project is built and run.
