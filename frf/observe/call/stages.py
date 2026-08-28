@@ -30,7 +30,7 @@ from ...core import adequacy, evidence, harbor, statement
 from ...core.capabilities import capability
 from ...core.scale import Spec
 from . import observation as obs
-from .runner import SubjectFailed
+from .runner import SubjectFailed, SubjectUnreachable
 
 
 # How many DIFFERENT perturbations E3 may try before concluding that a subject cannot be
@@ -61,6 +61,11 @@ class Corpus:
     # at this stage reads "the reference did not reproduce its probes", which is a specific and
     # wrong diagnosis for a subject that never started at all.
     unusable_reason: str = ""
+    # Whether that reason is OURS rather than the material's. A mute subject is ordinarily the
+    # candidate's doing, so freeze charges it to the material -- but a sandbox that vanished
+    # mid-push taught us nothing about the candidate, and filing it as bad material inflates the
+    # refusal record with our own outages.
+    unusable_is_ours: bool = False
     adequacy_note: str = ""
     adequacy: dict = field(default_factory=dict)
     timed: list = field(default_factory=list)
@@ -131,7 +136,13 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
         # not beside a shim, which is an ordinary fact about real source rather than a defect in
         # this factory. Left uncaught it arrives at `build_one` as an unclassified failure counted
         # as OURS, and a batch of twenty then computes a yield against a denominator of our own bugs.
+        #
+        # EXCEPT WHEN WE NEVER REACHED IT. `SubjectUnreachable` means the sandbox died or the upload
+        # failed, so nothing was learned about this candidate; charging that to the material inflates
+        # the refusal record with our own outages, which is the one direction the record must not
+        # err in -- a padded refusal log reads as converged.
         return Corpus(inputs=inputs, discard_rate=1.0, usable=False,
+                      unusable_is_ours=isinstance(failure, SubjectUnreachable),
                       unusable_reason="the subject never answered: %s" % str(failure)[:600])
 
     report = obs.freeze_corpus(observed)

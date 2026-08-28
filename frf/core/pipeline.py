@@ -480,6 +480,14 @@ def _check_corpus(report) -> None:
         # reference did not reproduce its probes" -- a specific diagnosis, and the wrong one for a
         # subject that never started, which is the commonest outcome on real mined material.
         given = getattr(report, "unusable_reason", "")
+        # THE WIRE IS NOT THE MATERIAL, here as at emit. A seam that never reached the subject at
+        # all -- a sandbox that vanished mid-push, an upload that failed -- learned nothing about
+        # this candidate, so charging it to the material pads the refusal record with our own
+        # outages. That is the one direction this record must not err in: a padded refusal log
+        # reads as a converged grid, and the missing coverage stops being visible.
+        if getattr(report, "unusable_is_ours", False):
+            raise Stage("freeze", "subject-unreachable", Fault.FACTORY,
+                        given or "the subject could not be staged in a sandbox")
         raise Stage("freeze", "will-not-repeat-itself", Fault.MATERIAL,
                     given or
                     "%.0f%% of probes were discarded because the reference did not reproduce them; "

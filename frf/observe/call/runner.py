@@ -82,6 +82,18 @@ class SubjectFailed(RuntimeError):
     """
 
 
+class SubjectUnreachable(SubjectFailed):
+    """We never got as far as running the subject: the sandbox died, the upload failed, the wire.
+
+    THE WIRE IS NOT THE MATERIAL. A mute subject is ordinarily the candidate's doing -- a mined
+    function whose file imports its own package cannot start beside a shim -- so freeze charges an
+    unusable corpus to the material. A sandbox that vanished mid-push is the opposite: nothing was
+    learned about the candidate at all, and filing it as bad material inflates the refusal record
+    with our own outages. Since it is a subclass, existing `except SubjectFailed` handlers keep
+    working; only the fault attribution differs.
+    """
+
+
 @dataclass
 class Subject:
     """A live subject, held open across a corpus."""
@@ -253,7 +265,7 @@ class RemoteSubject:
             self._backend.push(self.workspace, self._remote,
                                exclude={'.git', '.hg', '__pycache__', '.pytest_cache', '.venv'})
         except Exception as exc:                       # noqa: BLE001 -- transport, not the subject
-            raise SubjectFailed("could not stage the subject: %s" % exc) from exc
+            raise SubjectUnreachable("could not stage the subject: %s" % exc) from exc
         return self
 
     def __exit__(self, *_) -> None:

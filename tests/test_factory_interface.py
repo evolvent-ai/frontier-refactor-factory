@@ -21,10 +21,18 @@ from frf.core.scale import Candidate, Spec                             # noqa: E
 class _Corpus:
     """What a freeze produces, in the shape the pipeline's gates read."""
 
-    def __init__(self, probes: int, points: int, discard_rate: float = 0.0) -> None:
+    def __init__(self, probes: int, points: int, discard_rate: float = 0.0,
+                 unreachable: bool = False) -> None:
         self.probes, self.graded_points = probes, points
         self.discard_rate, self.usable = discard_rate, discard_rate <= 0.25
         self.adequacy_note = "reaches the subject"
+        # A seam that never reached the subject at all: the sandbox died, the upload failed.
+        self.unusable_is_ours = unreachable
+        self.unusable_reason = ""
+        if unreachable:
+            self.usable = False
+            self.unusable_reason = ("could not stage the subject: "
+                                    "The sandbox was not found")
 
 
 class _ToyScale:
@@ -143,6 +151,28 @@ def test_a_subject_that_will_not_repeat_itself_is_refused_before_anything_else_r
     refusal = result.batch.refused[0]
     assert refusal.reason == "will-not-repeat-itself"
     assert "selected by luck" in refusal.detail
+
+
+def test_a_sandbox_that_vanished_is_not_charged_to_the_material():
+    """The freeze-stage counterpart of the replay-timeout rule below: the wire is not the material.
+
+    A mute subject IS ordinarily the candidate's doing -- a mined function whose file imports its own
+    package cannot start beside a shim -- so an unusable corpus is charged to the material. But when
+    the sandbox died or the upload failed we never reached the subject, so nothing was learned about
+    this candidate. Filing that as bad material inflates the evidenced-refusal record in the one
+    direction that must not err: a padded refusal log reads as a converged grid, and the coverage
+    that is actually missing stops being visible.
+
+    Seen on a real batch: `could not push into the sandbox after retries: The sandbox was not found`
+    was recorded as `will-not-repeat-itself (material)`.
+    """
+    result = _factory(corpus=_Corpus(8, 40, unreachable=True)).build("toy", budget=1)
+
+    refusal = result.batch.refused[0]
+    assert refusal.fault is pipeline.Fault.FACTORY, (
+        "a vanished sandbox was charged to %s, padding the refusal record with our own outage"
+        % refusal.fault)
+    assert refusal.reason == "subject-unreachable"
 
 
 def test_model_gateway_failure_is_attributed_to_factory():
