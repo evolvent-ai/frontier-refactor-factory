@@ -52,9 +52,29 @@ func main() {
 		// Unmarshalling null into a struct succeeds and leaves every field at its zero value, which
 		// would be answered as though it were a call and put an unmatched extra line on the wire;
 		// into a pointer it sets nil instead, and any other non-object still fails outright.
+		// Decoded in two steps, because "this line is not a call" and "this call's fields are the
+		// wrong shape" are different facts and only the first may be answered with silence.
+		//
+		// A single strict decode conflated them. `args` arriving as a string rather than an array
+		// fails to unmarshal into the struct, so a line that carried an id -- a real call, from the
+		// factory, waiting for a reply -- was skipped without a word, and the factory then blocked
+		// on that id until PROBE_TIMEOUT, which defaults to two minutes. Python and JavaScript both
+		// answer the same line with a refusal. `write` below already states the rule this restores:
+		// writing nothing leaves the factory blocked on a line that never arrives.
+		var loose map[string]json.RawMessage
+		if err := json.Unmarshal(scanner.Bytes(), &loose); err != nil || loose == nil {
+			continue // not a JSON object, so not a call: nothing is owed
+		}
 		var req *request
 		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil || req == nil {
-			continue // an unreadable line is not a call
+			// An object, so a call -- one this shim cannot make sense of. The id is echoed from the
+			// raw bytes so that a reply can still be matched to its request.
+			write(map[string]interface{}{
+				"id":    loose["id"],
+				"ok":    false,
+				"error": fmt.Sprintf("the arguments must be a JSON array: %v", err),
+			})
+			continue
 		}
 		write(serve(*req))
 	}

@@ -27,6 +27,17 @@ end
 
 def handle(request)
   id = request['id']
+  # AN ARGS FIELD OF THE WRONG SHAPE IS A REFUSAL, NOT AN EMPTY CALL. Treating both as `[]` is the
+  # most expensive kind of wrong: `{"args": "not-a-list"}` was quietly rewritten into a call with no
+  # arguments, the subject answered whatever a no-argument call returns, and the reply said ok:true.
+  # A false SUCCESS enters grading as though it were a real answer.
+  #
+  # A MISSING field keeps the empty default: the factory always sends `args`, so its absence is a
+  # hand-written line rather than a malformed call.
+  if request.key?('args') && !request['args'].is_a?(Array)
+    return { 'id' => id, 'ok' => false, 'error' => 'the arguments must be a JSON array' }
+  end
+
   args = request['args'].is_a?(Array) ? request['args'] : []
 
   if request.fetch('op', 'run') == 'time'

@@ -84,6 +84,17 @@ public final class Serve {
         Object id = request.get("id");
         Object op = request.get("op");
         Object rawArgs = request.get("args");
+        // AN ARGS FIELD OF THE WRONG SHAPE IS A REFUSAL, NOT AN EMPTY CALL. Collapsing both into an
+        // empty list is the most expensive kind of wrong: {"args": "not-a-list"} was quietly
+        // rewritten into a call with no arguments, the subject answered whatever a no-argument call
+        // returns, and the reply said ok:true. A false SUCCESS enters grading as though it were a
+        // real answer.
+        //
+        // A MISSING field keeps the empty default: the factory always sends "args", so its absence is
+        // a hand-written line rather than a malformed call.
+        if (rawArgs != null && !(rawArgs instanceof List)) {
+            return reply(id, false, "error", "the arguments must be a JSON array");
+        }
         List<Object> args = (rawArgs instanceof List) ? asArray(rawArgs) : new ArrayList<Object>();
         // `call` names the entry point. A single-function subject has exactly one, so it is read and
         // ignored; the field exists for a subject that later has more than one.

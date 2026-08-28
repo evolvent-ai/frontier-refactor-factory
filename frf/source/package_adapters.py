@@ -86,7 +86,7 @@ def _javascript(root, package_name, package_root):
                 names.extend(re.findall(r"\b([A-Za-z_$][\w$]*)\b", block))
             for symbol in names:
                 if symbol and not symbol.startswith("_"):
-                    result.append(Operation(symbol, module, symbol, language="javascript").to_json())
+                    result.append(Operation(symbol, module, symbol, _js_signature(text, symbol), "javascript").to_json())
     return _unique(result)
 
 
@@ -99,8 +99,12 @@ def _rust(root, package_name, package_root):
                 continue
             text = open(os.path.join(directory, filename), encoding="utf-8", errors="replace").read()
             module = package_name + "." + os.path.relpath(os.path.join(directory, filename), root)[:-3].replace(os.sep, ".")
-            for symbol in re.findall(r"\bpub\s+(?:async\s+)?fn\s+([A-Za-z_]\w*)\s*\(", text):
-                result.append(Operation(symbol, module, symbol, language="rust").to_json())
+            for match in re.finditer(r"\bpub\s+(?:async\s+)?fn\s+([A-Za-z_]\w*)\s*\(", text):
+                signature = _call_signature(text, match.end() - 1, returns=True)
+                if signature is None:
+                    continue
+                symbol = match.group(1)
+                result.append(Operation(symbol, module, symbol, signature, "rust").to_json())
     return _unique(result)
 
 
@@ -113,8 +117,12 @@ def _go(root, package_name, package_root):
                 continue
             text = open(os.path.join(directory, filename), encoding="utf-8", errors="replace").read()
             module = package_name + "." + os.path.relpath(directory, root).replace(os.sep, ".")
-            for symbol in re.findall(r"\bfunc\s+([A-Z]\w*)\s*\(", text):
-                result.append(Operation(symbol, module, symbol, language="go").to_json())
+            for match in re.finditer(r"\bfunc\s+([A-Z]\w*)\s*\(", text):
+                signature = _call_signature(text, match.end() - 1, returns=True)
+                if signature is None:
+                    continue
+                symbol = match.group(1)
+                result.append(Operation(symbol, module, symbol, signature, "go").to_json())
     return _unique(result)
 
 
@@ -126,9 +134,20 @@ def _ruby(root, package_name, package_root):
             if filename.endswith(".rb"):
                 text = open(os.path.join(directory, filename), encoding="utf-8", errors="replace").read()
                 module = package_name + "." + os.path.relpath(os.path.join(directory, filename), root)[:-3].replace(os.sep, ".")
-                for symbol in re.findall(r"^\s*def\s+([a-zA-Z_]\w*[!?=]?)", text, re.M):
-                    if not symbol.startswith("_"):
-                        result.append(Operation(symbol, module, symbol, language="ruby").to_json())
+                for match in re.finditer(r"^[ \t]*def\s+([a-zA-Z_]\w*[!?=]?)", text, re.M):
+                    symbol = match.group(1)
+                    if symbol.startswith("_"):
+                        continue
+                    rest = text[match.end():]
+                    if rest[:1] == "(":
+                        signature = _call_signature(text, match.end())
+                    elif rest.split("\n", 1)[0].strip():
+                        continue  # parenless arguments; the name alone would misstate the arity
+                    else:
+                        signature = "()"
+                    if signature is None:
+                        continue
+                    result.append(Operation(symbol, module, symbol, signature, "ruby").to_json())
     return _unique(result)
 
 
@@ -140,8 +159,12 @@ def _java(root, package_name, package_root):
             if filename.endswith(".java"):
                 text = open(os.path.join(directory, filename), encoding="utf-8", errors="replace").read()
                 module = package_name + "." + os.path.relpath(os.path.join(directory, filename), root)[:-5].replace(os.sep, ".")
-                for symbol in re.findall(r"\bpublic\s+(?:static\s+)?[\w<>\[\]]+\s+([A-Za-z_]\w*)\s*\(", text):
-                    result.append(Operation(symbol, module, symbol, language="java").to_json())
+                for match in re.finditer(r"\bpublic\s+(?:static\s+)?([\w<>\[\], ]+?)\s+([A-Za-z_]\w*)\s*\(", text):
+                    params = _call_signature(text, match.end() - 1)
+                    if params is None:
+                        continue
+                    returns, symbol = " ".join(match.group(1).split()), match.group(2)
+                    result.append(Operation(symbol, module, symbol, params + " -> " + returns, "java").to_json())
     return _unique(result)
 
 
@@ -153,8 +176,13 @@ def _c_cpp(root, package_name, package_root):
             if filename.endswith((".h", ".hpp")):
                 text = open(os.path.join(directory, filename), encoding="utf-8", errors="replace").read()
                 module = package_name + "." + os.path.relpath(os.path.join(directory, filename), root)
-                for symbol in re.findall(r"\b(?:[A-Za-z_]\w*[\s*&]+)+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*;", text):
-                    result.append(Operation(symbol, module, symbol, language="cpp").to_json())
+                for match in re.finditer(r"\b((?:[A-Za-z_]\w*[\s*&]+)+)([A-Za-z_]\w*)\s*(?=\()", text):
+                    close_index = _close_paren(text, match.end())
+                    if close_index is None or text[close_index + 1:].lstrip()[:1] != ";":
+                        continue  # a definition or macro body, not a declared entry point
+                    params = " ".join(text[match.end():close_index + 1].split())
+                    returns, symbol = " ".join(match.group(1).split()), match.group(2)
+                    result.append(Operation(symbol, module, symbol, params + " -> " + returns, "cpp").to_json())
     return _unique(result)
 
 
@@ -165,6 +193,63 @@ def _unique(items):
 
 def _signature(node):
     return "(" + ", ".join(arg.arg for arg in list(node.args.posonlyargs) + list(node.args.args)) + ")"
+
+
+def _call_signature(text, open_index, returns=False, limit=800):
+    """The signature source beginning at the '(' at open_index, whitespace collapsed.
+
+    Parameter lists never contain unbalanced parentheses, so plain paren counting
+    survives generics (Map<String, List<Integer>>) and signatures broken across
+    lines alike. With returns=True the type written after the closing paren is
+    appended, which is where Rust (-> T) and Go (T, or (T, error)) record it.
+    Returns None when the list is unterminated inside the scan window, so a
+    caller can decline the symbol rather than invent a signature for it.
+    """
+    close_index = _close_paren(text, open_index, limit)
+    if close_index is None:
+        return None
+    params = " ".join(text[open_index:close_index + 1].split())
+    if not returns:
+        return params
+    tail = text[close_index + 1:close_index + 121]
+    cut = min((at for at in (tail.find("{"), tail.find(";"), tail.find("\n")) if at != -1), default=len(tail))
+    return (params + " " + " ".join(tail[:cut].split())).strip()
+
+
+def _js_signature(text, symbol):
+    """The parameter list declared for symbol in JavaScript or TypeScript source, or "".
+
+    Only two of the four export forms carry parens at the export site, so the
+    declaration is located by name instead. An empty string keeps the behaviour
+    these adapters had before signatures were recorded: the name still names a
+    real export, the model simply reads the source to learn its arguments.
+    """
+    name = re.escape(symbol)
+    for pattern in (r"\bfunction\s*\*?\s*" + name + r"\s*(?=\()",
+                    r"\b" + name + r"\s*[:=]\s*(?:async\s+)?function\s*\*?\s*(?=\()",
+                    r"\b" + name + r"\s*[:=]\s*(?:async\s+)?(?=\()",
+                    r"^[ \t]*(?:async\s+)?" + name + r"\s*(?=\()"):
+        match = re.search(pattern, text, re.M)
+        if match:
+            signature = _call_signature(text, match.end())
+            if signature is not None:
+                return signature
+    return ""
+
+
+def _close_paren(text, open_index, limit=800):
+    """The index of the ')' closing the '(' at open_index, or None if unterminated."""
+    if open_index >= len(text) or text[open_index] != "(":
+        return None
+    depth = 0
+    for position in range(open_index, min(len(text), open_index + limit)):
+        if text[position] == "(":
+            depth += 1
+        elif text[position] == ")":
+            depth -= 1
+            if depth == 0:
+                return position
+    return None
 
 
 def _skip(name):

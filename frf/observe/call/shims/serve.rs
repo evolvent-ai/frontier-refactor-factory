@@ -385,10 +385,18 @@ fn reply_err(id: &Json, message: &str) -> String {
 
 fn handle(request: &Json) -> String {
     let id = request.get("id").cloned().unwrap_or(Json::Null);
+    // AN ARGS FIELD OF THE WRONG SHAPE IS A REFUSAL, NOT AN EMPTY CALL. Falling through to `[]` for
+    // both cases is the most expensive kind of wrong: `{"args": "not-a-list"}` was quietly rewritten
+    // into a call with no arguments, the subject answered whatever a no-argument call returns, and
+    // the reply said ok:true. A false SUCCESS enters grading as though it were a real answer.
+    //
+    // A MISSING field keeps the empty default: the factory always sends `args`, so its absence is a
+    // hand-written line rather than a malformed call.
     let empty = Json::Array(Vec::new());
     let args = match request.get("args") {
         Some(value @ Json::Array(_)) => value,
-        _ => &empty,
+        None => &empty,
+        Some(_) => return reply_err(&id, "the arguments must be a JSON array"),
     };
     let op = request.get("op").and_then(Json::as_str).unwrap_or("run");
 

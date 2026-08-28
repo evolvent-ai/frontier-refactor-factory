@@ -1,0 +1,138 @@
+"""The package scale's dispatcher generator: what it writes, and what it refuses to write.
+
+Three things used to be decided by one boolean in the scale
+(`native = language in ("javascript", "typescript")`), and all three were wrong
+for the six languages that fell down the else-branch:
+
+  * the dispatcher source itself -- a Rust task was handed PYTHON source,
+  * the filename it was written to -- a second copy of what the shim already
+    declares, which already disagreed with the TypeScript shim's `subject.ts`,
+  * the mutant, built by APPENDING Python source to whatever the subject was.
+
+The third is the one worth a test the most. A mutation gate exists to ask "would
+the probe notice a subtly wrong implementation?" -- and appended Python is a
+syntax error in every language but Python, so the mutant never loaded and the
+probe "caught" it by not being able to parse it. That is a gate that passes
+itself. The checks below pin the mutant to being a LOADABLE program that returns
+a WRONG ANSWER, which is the only version of the mutant that says anything about
+the probe.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from frf.observe.call import dispatch                                       # noqa: E402
+from frf.observe.call import shims                                          # noqa: E402
+
+DISPATCH = {"stem": ("mypkg.stem", "stem"), "parse": ("mypkg.parse", "parse")}
+
+# Both mutant attempts the gate uses. Kept explicit rather than derived so that
+# adding a third wrong answer has to come here and be argued for.
+ATTEMPTS = (0, 1)
+
+
+def test_every_servable_language_has_a_shim_to_serve_it():
+    """A dispatcher for a language with no shim cannot reach a subject at all.
+
+    The scale asks the shim for the subject's filename, so a language supported
+    here but absent from TEMPLATES would raise KeyError deep inside `build()`,
+    in the sandbox, after the candidate was paid for.
+    """
+    for language in sorted(dispatch.DYNAMIC):
+        assert language in shims.TEMPLATES, (
+            "%s can be dispatched but has no shim to serve it" % language)
+        assert dispatch.supported(language), (
+            "%s is listed as dynamic but has no generator" % language)
+
+
+def test_the_python_dispatcher_and_its_mutants_are_valid_python():
+    """Source that does not compile is caught by the parser, not by the probe."""
+    for mutant in (None,) + ATTEMPTS:
+        source = dispatch.source("python", DISPATCH, mutant=mutant)
+        compile(source, "<dispatcher>", "exec")
+
+
+@pytest.mark.parametrize("language", ["javascript", "typescript"])
+def test_the_javascript_dispatcher_and_its_mutants_are_valid_javascript(language):
+    """The bug this pins: appended Python source made every JS mutant unparseable.
+
+    Skipped rather than assumed when node is absent, because the structural
+    checks in this file are meant to run on a bare host.
+    """
+    if not shutil.which("node"):
+        pytest.skip("node is not installed; cannot check generated JavaScript")
+    for mutant in (None,) + ATTEMPTS:
+        source = dispatch.source(language, DISPATCH, mutant=mutant)
+        handle = tempfile.NamedTemporaryFile("w", suffix=".js", delete=False)
+        try:
+            handle.write(source)
+            handle.close()
+            done = subprocess.run(["node", "--check", handle.name],
+                                  capture_output=True, text=True)
+            assert done.returncode == 0, (
+                "%s mutant=%r does not parse as JavaScript: %s"
+                % (language, mutant, done.stderr.strip()[:200]))
+        finally:
+            os.unlink(handle.name)
+
+
+def test_a_mutant_answers_wrongly_rather_than_refusing():
+    """The whole point of the gate: a mutant that raises is detected by the wire.
+
+    If the mutant crashes, the probe is credited with catching something it never
+    had to reason about, and the gate scores far too generously. So the mutant
+    must answer every operation the real dispatcher answers -- with a wrong
+    value.
+    """
+    real = dispatch.source("python", DISPATCH)
+    assert "importlib" in real, "the real dispatcher should resolve modules"
+
+    for attempt in ATTEMPTS:
+        namespace: dict = {}
+        exec(dispatch.source("python", DISPATCH, mutant=attempt), namespace)
+        for operation in DISPATCH:
+            answer = namespace["entry"](operation, "running")
+            assert answer in (None, 0), (
+                "mutant %d answered %r, which is not a recognisably wrong value"
+                % (attempt, answer))
+
+
+def test_the_mutants_differ_from_each_other():
+    """Two attempts that produce the same subject test the probe once, not twice."""
+    sources = {dispatch.source("python", DISPATCH, mutant=attempt)
+               for attempt in ATTEMPTS}
+    assert len(sources) == len(ATTEMPTS), "the mutation attempts are not distinct"
+
+
+@pytest.mark.parametrize("language", ["go", "rust", "c", "cpp", "java"])
+def test_a_language_without_a_dispatcher_refuses_loudly(language):
+    """Silence here is what produced Python source in a file named `subject.rs`.
+
+    These five have no runtime module-by-name lookup, so a package dispatcher for
+    them is generated static imports plus a switch, with a concrete type per
+    argument. That is real work; until it exists the honest answer is a refusal
+    that names itself, which is the only kind of gap that can be argued with.
+    """
+    assert not dispatch.supported(language)
+    with pytest.raises(dispatch.Unsupported) as raised:
+        dispatch.source(language, DISPATCH)
+    assert language in str(raised.value)
+
+
+def test_the_dispatcher_covers_every_operation_it_was_given():
+    """A dispatcher missing an entry point fails the contract, not the candidate."""
+    for language in sorted(dispatch.DYNAMIC):
+        source = dispatch.source(language, DISPATCH)
+        for operation, (module, symbol) in DISPATCH.items():
+            assert operation in source, (
+                "%s dispatcher omits operation %s" % (language, operation))
+            assert module in source, (
+                "%s dispatcher omits module %s" % (language, module))

@@ -83,6 +83,17 @@ async function handle(line) {
   }
 
   const id = request.id;
+  // AN ARGS FIELD OF THE WRONG SHAPE IS A REFUSAL, NOT AN EMPTY CALL. Collapsing both into `[]` is
+  // the most expensive kind of wrong: `{"args": "not-a-list"}` was quietly rewritten into a call
+  // with no arguments, the subject answered whatever a no-argument call returns, and the reply said
+  // ok:true. A false SUCCESS enters grading as though it were a real answer.
+  //
+  // A MISSING field keeps the empty default: the factory always sends `args`, so its absence is a
+  // hand-written line rather than a malformed call.
+  if ('args' in request && !Array.isArray(request.args)) {
+    emit({ id: id, ok: false, error: 'the arguments must be a JSON array' });
+    return;
+  }
   const args = Array.isArray(request.args) ? request.args : [];
   const op = request.op === undefined ? 'run' : request.op;
   const subject = await subjectReady;

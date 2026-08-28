@@ -32,6 +32,7 @@ from ..core import integrity
 from ..core.contract import PackageContract, PackageOperation, Provenance
 from ..core.scale import Candidate, Spec
 from ..observe import coverage
+from ..observe.call import dispatch as call_dispatch
 from ..observe.call import shims
 from ..observe.call.runner import Subject, RemoteSubject
 from .module import PROBE_TIMEOUT
@@ -86,6 +87,9 @@ class Observer:
         self._backend = backend
         self._argv: list = []
         self._isolated = False
+        # The surface the dispatcher fans out to, kept because a mutant is
+        # REGENERATED from it rather than patched onto the real subject's source.
+        self._dispatch: dict = {}
 
     def build(self, spec: Spec) -> None:
         """Copy the pinned package, create a dispatch adapter, and serve it over JSON."""
@@ -97,10 +101,10 @@ class Observer:
                         ignore=shutil.ignore_patterns("__pycache__", ".git"))
         dispatch = {entry["name"]: (entry["module"], entry["symbol"])
                     for entry in self.material.dispatch}
-        native = spec.language in ("javascript", "typescript")
-        adapter = os.path.join(self.workspace, "subject.js" if native else "subject.py")
+        self._dispatch = dispatch
+        adapter = os.path.join(self.workspace, _subject_name(spec.language))
         with open(adapter, "w", encoding="utf-8") as handle:
-            handle.write(_native_adapter_source(dispatch) if native else _adapter_source(dispatch))
+            handle.write(_dispatcher_source(spec.language, dispatch))
         _, self._argv = shims.materialise(self.workspace, spec.language, adapter, "entry")
 
     def subject(self, spec: Spec | None = None, *, mutated: bool = False,
@@ -111,14 +115,11 @@ class Observer:
             shutil.rmtree(room, ignore_errors=True)
             shutil.copytree(self.workspace, room, dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns(".mutant-*", "__pycache__"))
-            adapter = os.path.join(room, "subject.js" if spec.language in ("javascript", "typescript") else "subject.py")
-            original = open(adapter, encoding="utf-8").read()
-            if attempt == 0:
-                original += "\n_old_entry = entry\ndef entry(op, *args):\n    return None\n"
-            elif attempt == 1:
-                original += "\n_old_entry = entry\ndef entry(op, *args):\n    return 0\n"
+            adapter = os.path.join(room, _subject_name(spec.language))
+            wrong = _dispatcher_source(spec.language, self._dispatch,
+                                       mutant=attempt)
             with open(adapter, "w", encoding="utf-8") as handle:
-                handle.write(original)
+                handle.write(wrong)
             _, argv = shims.materialise(room, spec.language, adapter, "entry")
         if getattr(self._backend, "name", "") in ("docker", "remote"):
             return RemoteSubject(argv, workspace=room, backend=self._backend,
@@ -416,30 +417,24 @@ def _task_name(material: Material) -> str:
     stem = material.identity.rsplit("/", 1)[-1].replace("_", "-").lower()
     return "%s-rewrite" % stem if material.target_language else "%s-faster" % stem
 
+def _subject_name(language: str) -> str:
+    """What the subject file is called, asked of the shim that will serve it.
 
-def _adapter_source(dispatch: dict) -> str:
-    return """import importlib
-
-_DISPATCH = %r
-
-
-def entry(op, *args):
-    if op not in _DISPATCH:
-        raise ValueError("unknown operation: %%s" %% op)
-    module_name, symbol = _DISPATCH[op]
-    return getattr(importlib.import_module(module_name), symbol)(*args)
-""" % dispatch
+    The scale used to keep a second copy of this ("subject.js" if native else
+    "subject.py"), which is the kind of duplicated truth that goes stale the
+    moment a language is added -- and it already disagreed with the TypeScript
+    shim, which serves `subject.ts`.
+    """
+    return shims.TEMPLATES[language].subject
 
 
-def _native_adapter_source(dispatch: dict) -> str:
-    return """const DISPATCH = %s;
-exports.entry = async function(op, ...args) {
-  if (!DISPATCH[op]) throw new Error('unknown operation: ' + op);
-  const [mod, symbol] = DISPATCH[op];
-  let loaded;
-  try { loaded = await import(mod); } catch (e) { loaded = require(mod); }
-  const fn = loaded[symbol] || (loaded.default && loaded.default[symbol]) || loaded.default;
-  if (typeof fn !== 'function') throw new Error('export is not callable: ' + symbol);
-  return fn(...args);
-};
-""" % json.dumps(dispatch, sort_keys=True)
+def _dispatcher_source(language: str, dispatch: dict,
+                       *, mutant: int | None = None) -> str:
+    """The `entry` seam for `language`, real or deliberately wrong.
+
+    Generating the mutant rather than appending to the real source is what keeps
+    the mutation gate honest: appended Python source was a syntax error in every
+    language but Python, so the probe "caught" mutants it never had to reason
+    about.
+    """
+    return call_dispatch.source(language, dispatch, mutant=mutant)

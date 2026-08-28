@@ -708,8 +708,18 @@ static int handle(const Json *request)
     Buf out;
     int written;
 
-    if (args == NULL || args->kind != JSON_ARRAY) {
-        args = NULL;
+    /* AN ARGS FIELD OF THE WRONG SHAPE IS A REFUSAL, NOT AN EMPTY CALL. This used to fall into the
+     * `[]` default below, which is the most expensive kind of wrong: `{"args": "not-a-list"}` was
+     * quietly rewritten into a call with no arguments, the subject dutifully answered 0, and the
+     * reply said ok:true. A false SUCCESS enters grading as though it were a real answer, whereas
+     * Go's version of this bug -- staying silent -- at least announced itself as a timeout. Python
+     * and JavaScript both answer this line with a refusal.
+     *
+     * A MISSING args field keeps the `[]` default: the factory always sends the field, so its
+     * absence is a hand-written line rather than a malformed call, and an empty argument list is a
+     * reasonable reading of it. */
+    if (args != NULL && args->kind != JSON_ARRAY) {
+        return reply_error(id, "the arguments must be a JSON array");
     }
     buf_init(&args_text);
     if (args != NULL) {

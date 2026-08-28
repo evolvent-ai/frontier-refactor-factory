@@ -432,37 +432,118 @@ def _task_name(material: Material) -> str:
 # Applied to the source as text because a compiled subject has nothing else to perturb, and because
 # a factory that parsed each language in order to mutate it would have re-acquired exactly the
 # per-language knowledge the wire exists to avoid.
-_PERTURBATIONS = (
-    # Arithmetic first: it changes a returned value without changing control flow, so a subject
-    # that computes anything at all will diverge and still answer.
-    ("+", "-"),
-    ("*", "+"),
-    (">=", ">"),
-    ("<=", "<"),
-    ("==", "!="),
-    (" and ", " or "),
-    # THE BARE COMPARISONS, which is what a search or a selection is made of. Without them
-    # `find_min_max` -- whose entire logic is `element < minimum` and `element > maximum` -- offered
-    # exactly one mutable site, an initialiser that computes the same answer either way, so the
-    # subject was reported unperturbable when in fact every line of it was a comparison. Ordered
-    # after the two-character forms so that `>=` is matched as `>=` rather than as `>` followed by a
-    # stray `=`.
-    (" < ", " > "),
-    (" > ", " < "),
-    # INDEXING AND SLICING, which is what real code does when it does no arithmetic at all. The
-    # first four were enough for subjects written for this factory and left a great many mined
-    # functions unperturbable -- a routine that filters a list and returns `xs[-1]` contains not one
-    # of them, so its mutant was identical, E3 said INCONCLUSIVE, and the candidate was refused for
-    # a gap in this table rather than for anything true about the material.
-    ("[-1]", "[0]"),
-    ("[0]", "[-1]"),
-    ("[1:]", "[:-1]"),
-    (".sort()", ".reverse()"),
-    ("sorted(", "reversed("),
-    ("min(", "max("),
-    ("max(", "min("),
-    ("len(", "id("),
+# WHAT A PERTURBATION MAY BE, PER LANGUAGE. One shared table used to be applied to all eight, and it
+# was written in Python: `len(` -> `id(` names a Python BUILTIN, and `[-1]`, `[1:]`, `sorted(` and
+# ` and ` are Python syntax. Applied to Go or C those do not produce a subtly wrong function, they
+# produce a file that does not compile -- and a mutant that does not build is caught by the compiler
+# rather than by the probe, so the gate credits the probe with judgement it never exercised. Worse,
+# the broken build surfaces as an unclassified subject failure and is charged to the CANDIDATE as a
+# material fault, so a submission can be refused for a defect in this table.
+#
+# The arithmetic entries are SPACED (` + `, not `+`) for the same reason. A bare `+` lands inside
+# `i++` and a bare `*` lands inside a pointer declaration like `const char *items`, which turned
+# three of C's four attempts into syntax errors. Spacing costs a few sites and buys a mutant that
+# builds.
+#
+# Ordering within each table is deliberate: arithmetic first, because it changes a returned value
+# without changing control flow, so a subject that only checks "did it raise" cannot see it.
+
+# True in every language here: comparison operators mean the same thing and are spelled the same.
+_COMPARISON = (
+    (' + ', ' - '),
+    (' * ', ' + '),
+    ('>=', '>'),
+    ('<=', '<'),
+    ('==', '!='),
+    (' < ', ' > '),
+    (' > ', ' < '),
 )
+
+# C-family boolean and the library calls that survive a rename in each language.
+_C_FAMILY = _COMPARISON + (
+    (' && ', ' || '),
+)
+
+_PERTURBATIONS_BY_LANGUAGE = {
+    "python": _COMPARISON + (
+        (' and ', ' or '),
+        ('[-1]', '[0]'),
+        ('[0]', '[-1]'),
+        ('[1:]', '[:-1]'),
+        ('.sort()', '.reverse()'),
+        ('sorted(', 'reversed('),
+        ('min(', 'max('),
+        ('max(', 'min('),
+        ('len(', 'id('),          # `id` is a Python builtin, so this still runs
+    ),
+    "javascript": _C_FAMILY + (
+        ('[0]', '[1]'),
+        ('.sort(', '.reverse('),
+        ('Math.min(', 'Math.max('),
+        ('Math.max(', 'Math.min('),
+        ('.length', '.length - 1'),
+    ),
+    "go": _C_FAMILY + (
+        ('[0]', '[1]'),
+        ('len(', 'cap('),         # both are Go builtins on slices, so this compiles
+    ),
+    "rust": _C_FAMILY + (
+        ('.iter()', '.iter().rev()'),
+        ('.min()', '.max()'),
+        ('.max()', '.min()'),
+        # NOT `.len()` -> `.capacity()`: capacity is on Vec and String but not on a slice, so it
+        # fails to compile for exactly the inputs a refactor task is most likely to take.
+    ),
+    "c": _C_FAMILY,
+    "cpp": _C_FAMILY + (
+        ('.begin()', '.end()'),
+        ('std::min(', 'std::max('),
+        ('std::max(', 'std::min('),
+    ),
+    "java": _C_FAMILY + (
+        ('Math.min(', 'Math.max('),
+        ('Math.max(', 'Math.min('),
+        ('.size()', '.size() - 1'),
+    ),
+    "ruby": _COMPARISON + (
+        (' and ', ' or '),
+        (' && ', ' || '),
+        ('[-1]', '[0]'),
+        ('[0]', '[-1]'),
+        # Method swaps carry a trailing delimiter so they cannot land inside a LONGER name:
+        # bare `.sort` also matches `.sort_by`, and `.reverse_by` raises NoMethodError -- a mutant
+        # killed by the runtime rather than by the probe, which is what this table exists to avoid.
+        ('.sort!', '.reverse!'),
+        ('.sort(', '.reverse('),
+        ('.min(', '.max('),
+        ('.max(', '.min('),
+    ),
+}
+
+# Spellings the pipeline may hand us for the same language.
+_LANGUAGE_ALIASES = {
+    "py": "python", "js": "javascript", "ts": "javascript", "typescript": "javascript",
+    "c++": "cpp", "cc": "cpp", "golang": "go", "rs": "rust", "rb": "ruby",
+}
+
+
+def _perturbations_for(language: str) -> tuple:
+    """The substitutions that still COMPILE in `language`.
+
+    An unknown language falls back to the comparison operators, which are spelled the same in every
+    language this factory serves. That is a smaller set than a Python-specific one, and a small set
+    of valid mutants is worth more than a large set of broken ones: `channels_bite` already reports
+    INCONCLUSIVE when nothing can be perturbed, which is an honest answer, whereas a mutant that
+    does not build is charged to the candidate.
+    """
+    key = language.lower()
+    key = _LANGUAGE_ALIASES.get(key, key)
+    return _PERTURBATIONS_BY_LANGUAGE.get(key, _COMPARISON)
+
+
+# Kept as the Python table so that anything still reaching for the old name gets a working set
+# rather than silence. New code should call `_perturbations_for`.
+_PERTURBATIONS = _PERTURBATIONS_BY_LANGUAGE["python"]
 
 
 def mutate(source: str, language: str, symbol: str = "", attempt: int = 0) -> str:
@@ -543,7 +624,7 @@ def mutate(source: str, language: str, symbol: str = "", attempt: int = 0) -> st
         opening = source.find("{", start, end)
         if opening != -1:
             sites.append((opening + 1, "", " throw new Error('frf mutant'); "))
-    for original, replacement in _PERTURBATIONS:
+    for original, replacement in _perturbations_for(language):
         at = source.find(original, start, end)
         while at != -1:
             sites.append((at, original, replacement))

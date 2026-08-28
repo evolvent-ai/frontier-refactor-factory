@@ -32,8 +32,19 @@ def serve(entry, stdin=sys.stdin, stdout=sys.stdout):
         if not isinstance(request, dict):
             continue                                  # a bare value is not a request either
         rid, op, args = request.get("id"), request.get("op", "run"), request.get("args", [])
-
-        if op == "time":
+        # AN ARGS FIELD OF THE WRONG SHAPE IS A REFUSAL, AND IT IS OURS RATHER THAN THE SUBJECT'S.
+        # Passing it through unchecked does not merely fail, it MISATTRIBUTES: a string arrives as
+        # its characters, so `{"args": "not-a-list"}` was reported as "entry() takes 1 positional
+        # argument but 10 were given" -- a sentence about the subject's signature, describing a
+        # defect in the request. That message would be frozen into an expectation as though the
+        # subject had refused, which is the reading a candidate is then graded against.
+        #
+        # A MISSING field keeps the empty default: the factory always sends `args`, so its absence is
+        # a hand-written line rather than a malformed call.
+        if "args" in request and not isinstance(request["args"], list):
+            reply = {"id": rid, "ok": False,
+                     "error": "the arguments must be a JSON array"}
+        elif op == "time":
             # TIMED HERE, on this side of the pipe. Measuring from the factory would charge the
             # subject for process startup and JSON transport, which for a quick subject is most of
             # what the clock would see.
