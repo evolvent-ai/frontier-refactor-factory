@@ -35,8 +35,12 @@ _WRONG = (
     ("0", "0"),         # attempt 1: a falsy-but-present value
 )
 
-# Languages whose runtime can resolve a module by name, and so can carry the
-# table-driven dispatcher below. The rest need generated static dispatch.
+# Languages whose runtime can resolve a module by name, and so can carry the table-driven
+# dispatcher. The rest need generated static dispatch.
+#
+# One source of truth: the same entry drives `supported()`, so a newly added generator is
+# automatically a newly supported language. Do NOT maintain a separate tuple here -- a second list
+# of what is supported is a second place to forget one.
 DYNAMIC = ("python", "javascript", "typescript")
 
 
