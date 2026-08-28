@@ -57,7 +57,8 @@ def _last_error(text: str, limit: int = 400) -> str:
         "Cannot find module" in line or "not defined" in line
         or "SyntaxError" in line or "is not a function" in line)), "")
     if message_line:
-        context = message_line[-240:]
+        # The finding is the END of this line -- the module path the runtime could not find.
+        context = message_line[-380:]
     elif not any(line.startswith("File ") for line in lines[:-1]):
         tail_start = max(0, len(lines) - 4)
         tail = lines[tail_start:]

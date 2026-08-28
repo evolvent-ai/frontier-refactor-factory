@@ -92,4 +92,7 @@ def test_typescript_shim_uses_compiler_output_instead_of_node_strip_flag():
     shim = shims.load("typescript")
     assert shim.build and shim.build[0][0] == "tsc"
     assert "--experimental-strip-types" not in shim.run
-    assert "compiled/subject.js" in shim.run
+    # COMPILED IN PLACE, not into a compiled/ subdirectory, so a package dispatcher's relative
+    # imports resolve from the workspace root where the module tree lives. (The compiled/ form
+    # moved that root and every package/ts candidate died in E3 with ERR_MODULE_NOT_FOUND.)
+    assert "subject.js" in shim.run

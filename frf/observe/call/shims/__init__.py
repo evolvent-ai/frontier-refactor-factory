@@ -81,10 +81,16 @@ TEMPLATES = {
     "javascript": Shim("serve.js", "subject.js", ("node", "--experimental-specifier-resolution=node", "{entry}", "subject.js", "{symbol}"), tool="node"),
     # TypeScript is compiled inside the sandbox with the toolchain declared by the image. This is
     # stable across Node versions and does not depend on experimental runtime flags.
+    #
+    # COMPILED IN PLACE, not into a compiled/ subdirectory. A package subject's dispatcher imports
+    # its module tree with RELATIVE paths ("./tech-interview-handbook/..."), and those are resolved
+    # from the compiled file's directory. Compiling into a subdirectory moved the root away from the
+    # module tree, so every package candidate died in E3 with ERR_MODULE_NOT_FOUND -- the import
+    # resolved against compiled/ instead of the workspace root where the tree actually lives.
     "typescript": Shim("serve.js", "subject.ts",
-                       ("node", "--experimental-specifier-resolution=node", "{entry}", "compiled/subject.js", "{symbol}"),
+                       ("node", "--experimental-specifier-resolution=node", "{entry}", "subject.js", "{symbol}"),
                        build=(("tsc", "--target", "ES2022", "--module", "commonjs",
-                               "--skipLibCheck", "--outDir", "{workdir}/compiled", "{subject}"),),
+                               "--skipLibCheck", "--outDir", "{workdir}", "{subject}"),),
                        tool="tsc"),
     "ruby": Shim("serve.rb", "subject.rb", ("ruby", "{entry}"), tool="ruby"),
     "go": Shim("serve.go", "subject.go", ("{binary}",), tool="go",
