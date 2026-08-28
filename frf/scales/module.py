@@ -612,11 +612,35 @@ def mutate(source: str, language: str, symbol: str = "", attempt: int = 0) -> st
         # operator's body on its line; this preserves the declaration and produces a valid module
         # while changing the selected function's value. A block-bodied arrow is excluded because
         # its body is handled by the return/operator sites above.
+        #
+        # ONLY A TOP-LEVEL ARROW, not one inside a call's argument list. `items.reduce((a, b) =>
+        # a + b, 0)` contains `=> a + b`, but the `, 0)` that follows is reduce's SECOND argument and
+        # is not part of the arrow at all -- replacing the whole `=> a + b, 0)` swallowed it and
+        # left `reduce((a, b) => null /* mutant */;` unclosed, a syntax error that killed the
+        # subject in E3 and surfaced as `Node.js v22.23.2`. An arrow in an argument list is preceded
+        # by a closing paren (`(a, b) =>` ends with `)` before the `=>`); a top-level arrow is
+        # preceded by a parameter name or `)` of a DEFINING paren. Test the nearest non-space char:
+        # `)` preceded by a `(` that is itself the parameter close belongs to the argument.
         for match in re.finditer(r"=>\s*(?!\{)([^\n;]+)", source[start:end]):
             at = start + match.start()
-            body = match.group(1)
-            sites.append((at, "=>" + source[at + 2:at + 2 + len(match.group(0)) - 2],
-                          "=> null /* mutant */"))
+            # ONLY A TOP-LEVEL ARROW, not a call back-arrow. `items.reduce((a, b) => a + b, 0)`
+            # has a `=>` inside the argument list: replacing `=> a + b, 0)` would swallow reduce's
+            # second argument and leave the call unclosed (`(a, b) => null /* mutant */;`), a
+            # syntax error that killed the subject in E3 and surfaced as `Node.js v22.23.2`.
+            # An INSIDE arrow is preceded by an unmatched `(` (the parameter list of reduce); a
+            # top-level one is not. Scan back to the line start for paren balance.
+            depth = 0
+            for probe in range(at - 1, start - 1, -1):
+                char = source[probe]
+                if char == ")":
+                    depth += 1
+                elif char == "(":
+                    depth -= 1
+                    if depth < 0:
+                        break
+            if depth < 0:
+                break                               # inside an unclosed call: not a target
+            sites.append((at, match.group(0), "=> null /* mutant */"))
         # A branch-local return can be unreachable for the generated probes. For block-bodied
         # functions, an entry throw is a deterministic, always-observable fallback and remains
         # valid JavaScript/TypeScript. It is appended after semantic edits so ordinary mutations
