@@ -28,7 +28,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from frf.observe.call import shims                                          # noqa: E402
-from frf.scales import module                                              # noqa: E402
+from frf.observe.call import perturb                                       # noqa: E402
 
 # Spellings that belong to exactly one language, and the languages they would break. Each is a real
 # regression: every one of these was reachable from the shared table.
@@ -48,7 +48,7 @@ def test_no_language_table_borrows_another_language_syntax():
     """The exact regression: Go was handed `id(`, a Python builtin, and could not compile."""
     for spelling, broken_in in FOREIGN.items():
         for language in broken_in:
-            table = module._perturbations_for(language)
+            table = perturb._perturbations_for(language)
             for original, replacement in table:
                 assert spelling not in (original, replacement), (
                     "%s's mutation table contains %r, which does not exist in %s"
@@ -61,8 +61,8 @@ def test_arithmetic_substitutions_cannot_land_inside_an_operator_or_a_pointer():
     Requiring the spaced form costs a handful of mutation sites and buys a mutant that builds, which
     is the only kind the gate can learn anything from.
     """
-    for language in sorted(module._PERTURBATIONS_BY_LANGUAGE):
-        for original, replacement in module._perturbations_for(language):
+    for language in sorted(perturb._PERTURBATIONS_BY_LANGUAGE):
+        for original, replacement in perturb._perturbations_for(language):
             if original.strip() in ("+", "*", "-", "/"):
                 assert original.startswith(" ") and original.endswith(" "), (
                     "%s: %r is a bare arithmetic operator and will match inside `i++` or a "
@@ -72,7 +72,7 @@ def test_arithmetic_substitutions_cannot_land_inside_an_operator_or_a_pointer():
 def test_every_servable_language_has_perturbations():
     """A language with an empty table can never be perturbed, so E3 is permanently inconclusive."""
     for language in sorted(shims.TEMPLATES):
-        table = module._perturbations_for(language)
+        table = perturb._perturbations_for(language)
         assert len(table) >= 4, (
             "%s has only %d perturbations, which is too few to distinguish a subject"
             % (language, len(table)))
@@ -85,8 +85,8 @@ def test_an_unknown_language_falls_back_to_shared_comparisons():
     fallback is safe. `channels_bite` already reports INCONCLUSIVE when nothing can be perturbed,
     which is an honest answer -- unlike a mutant that fails to build and is billed to the candidate.
     """
-    table = module._perturbations_for("some-language-we-have-never-seen")
-    assert table == module._COMPARISON
+    table = perturb._perturbations_for("some-language-we-have-never-seen")
+    assert table == perturb._COMPARISON
     for original, replacement in table:
         for spelling in ("id(", "sorted(", " and ", "[-1]"):
             assert spelling not in (original, replacement)
@@ -98,7 +98,7 @@ def test_an_unknown_language_falls_back_to_shared_comparisons():
 ])
 def test_language_aliases_resolve_to_the_same_table(alias, canonical):
     """TypeScript reaching the fallback would silently weaken a language we actually serve."""
-    assert module._perturbations_for(alias) == module._perturbations_for(canonical)
+    assert perturb._perturbations_for(alias) == perturb._perturbations_for(canonical)
 
 
 def test_python_mutants_are_still_valid_python():
@@ -113,12 +113,12 @@ def test_python_mutants_are_still_valid_python():
               '        return sorted(items)\n'
               '    return items[-1]\n')
     mutants = 0
-    for attempt in range(module.MUTATION_ATTEMPTS):
-        mutated = module.mutate(source, "python", "shorten", attempt)
+    for attempt in range(perturb.MUTATION_ATTEMPTS):
+        mutated = perturb.mutate(source, "python", "shorten", attempt)
         compile(mutated, "<mutant>", "exec")
         mutants += mutated != source
-    assert mutants == module.MUTATION_ATTEMPTS, (
-        "only %d of %d attempts perturbed the source" % (mutants, module.MUTATION_ATTEMPTS))
+    assert mutants == perturb.MUTATION_ATTEMPTS, (
+        "only %d of %d attempts perturbed the source" % (mutants, perturb.MUTATION_ATTEMPTS))
 
 
 def test_c_mutants_compile():
@@ -138,8 +138,8 @@ def test_c_mutants_compile():
               '    return n;\n'
               '}\n')
     built = 0
-    for attempt in range(module.MUTATION_ATTEMPTS):
-        mutated = module.mutate(source, "c", "shorten", attempt)
+    for attempt in range(perturb.MUTATION_ATTEMPTS):
+        mutated = perturb.mutate(source, "c", "shorten", attempt)
         if mutated == source:
             continue
         handle = tempfile.NamedTemporaryFile("w", suffix=".c", delete=False)
@@ -173,8 +173,8 @@ def test_go_mutants_use_only_go_builtins():
               '\t}\n'
               '\treturn nil\n'
               '}\n')
-    for attempt in range(module.MUTATION_ATTEMPTS):
-        mutated = module.mutate(source, "go", "Shorten", attempt)
+    for attempt in range(perturb.MUTATION_ATTEMPTS):
+        mutated = perturb.mutate(source, "go", "Shorten", attempt)
         if mutated == source:
             continue
         for spelling in ("id(", "sorted(", " and ", "[-1]", ".sort()"):
@@ -198,7 +198,7 @@ def test_the_package_dispatcher_is_mutated_only_inside_entry():
     The window must find `exports.entry` (and `module.exports.entry`), so the top level is never
     a mutation site.
     """
-    from frf.scales import module
+    from frf.observe.call import perturb
     dispatcher = (
         'const DISPATCH = {"a": ["./mod", "a"], "b": ["./mod", "b"]};\n'
         'exports.entry = async function(op, ...args) {\n'
@@ -211,11 +211,11 @@ def test_the_package_dispatcher_is_mutated_only_inside_entry():
         '  return fn(...args);\n'
         '};\n'
     )
-    start, end = module._window_of(dispatcher, "entry")
+    start, end = perturb._window_of(dispatcher, "entry")
     assert start != 0 or "DISPATCH" not in dispatcher[:start], (
         "window %r begins at the file start; the top-level DISPATCH is inside it" % (start,))
     # The DISPATCH line must never change under any mutation attempt.
-    for attempt in range(module.MUTATION_ATTEMPTS):
-        out = module.mutate(dispatcher, "typescript", "entry", attempt)
+    for attempt in range(perturb.MUTATION_ATTEMPTS):
+        out = perturb.mutate(dispatcher, "typescript", "entry", attempt)
         assert out.splitlines()[0] == dispatcher.splitlines()[0], (
             "attempt %d mutated the top-level DISPATCH line" % attempt)
