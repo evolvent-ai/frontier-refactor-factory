@@ -30,9 +30,18 @@ import subprocess
 import time
 import ast
 from .javascript_functions import scan as scan_javascript
+from . import native_functions as scan_native
 
 from ..core.scale import Candidate
 from .functions import scan
+
+# What GitHub calls a language, spelled the way the grammar table does. GitHub reports
+# `C++` and some repositories say `golang`, and a spelling miss here is indistinguishable
+# from an unsupported language -- it would silently return the whole checkout to the repo
+# scale with no record of why.
+_NATIVE_ALIASES = {
+    "c++": "cpp", "cplusplus": "cpp", "golang": "go", "rustlang": "rust",
+}
 
 # How long a clone may take. Shallow and single-commit, so this is generous rather than tight.
 CLONE_TIMEOUT = 300.0
@@ -209,6 +218,20 @@ class GitHubFunctions:
             found = scan(root, stem, commit)
         elif language in {"javascript", "typescript"}:
             found = scan_javascript(root, stem, commit)
+        elif scan_native.supported(_NATIVE_ALIASES.get(language, language)):
+            # A statically typed checkout, read with its own tree-sitter grammar. Before this branch
+            # existed every one of these languages fell to the refusal below, so the three call
+            # scales could not produce a single Go, Rust, Java or C++ task -- not because the
+            # material was unsuitable but because nothing ever looked at it.
+            found = scan_native.scan(root, stem, commit,
+                                     language=_NATIVE_ALIASES.get(language, language))
+            if not found:
+                # The grammar read the checkout and found nothing it could type. That is a fact
+                # about this material, and it must not wear the same label as a language we cannot
+                # read at all -- otherwise a registered adapter looks like a missing one.
+                reason = "no-typeable-functions:%s" % language
+                self.rejection_counts[reason] = self.rejection_counts.get(reason, 0) + 1
+                return []
         else:
             reason = "call-adapter-not-registered:%s" % (language or "unknown")
             self.rejection_counts[reason] = self.rejection_counts.get(reason, 0) + 1

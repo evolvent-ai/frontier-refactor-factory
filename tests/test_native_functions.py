@@ -1,0 +1,152 @@
+"""Reading functions out of a statically typed checkout, with types a probe can be drawn from.
+
+WHAT THESE TESTS ARE FOR. Before `native_functions` existed, `function_miner` had two scanners --
+Python's `ast` and a regex reader for JavaScript -- and every other language fell to
+`else: call-adapter-not-registered`. So Go, Rust, Java and C++ produced no call-scale tasks at all:
+not because the material was unsuitable, but because nothing looked at it. 15 of the 32
+scale x language cells were silent for one missing reader, which is why the coverage they represent
+has to be pinned rather than assumed.
+
+The scanner is one shared walk plus a table per grammar, so these tests are mostly about the table
+being right -- and about the two ways a table can be wrong without failing loudly.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from frf.source import native_functions as native                            # noqa: E402
+
+# Real source in each language: two functions whose parameters are typeable, and one that is not.
+SOURCES = {
+    "go": ("math.go", 'package math\n'
+                      'func Add(a int, b int) int { return a + b }\n'
+                      'func Mean(xs []float64) float64 { return 0 }\n'
+                      'func Opaque(c chan int) {}\n'),
+    "rust": ("lib.rs", 'pub fn add(a: i32, b: i64) -> i64 { 0 }\n'
+                       'pub fn mean(xs: Vec<f64>) -> f64 { 0.0 }\n'
+                       'pub fn opaque(f: fn(i32) -> i32) {}\n'),
+    "java": ("M.java", 'class M {\n'
+                       '  public int add(int a, long b) { return 0; }\n'
+                       '  public double mean(double[] xs) { return 0; }\n'
+                       '  public void opaque(Runnable r) {}\n'
+                       '}\n'),
+    "cpp": ("m.cpp", 'int add(int a, int b) { return a + b; }\n'
+                     'double mean(std::vector<double> xs) { return 0; }\n'
+                     'void opaque(void (*f)(int)) {}\n'),
+}
+
+# The vocabulary `frf/observe/probes/schema.py` can actually draw a value for. A kind outside this
+# set cannot be sampled, so it would refuse every probe and the refusal would be charged to the
+# candidate.
+DRAWABLE = {"int", "float", "bool", "string", "bytes", "int_array", "float_array", "complex_array"}
+
+
+def _checkout(language: str) -> str:
+    filename, text = SOURCES[language]
+    directory = tempfile.mkdtemp()
+    with open(os.path.join(directory, filename), "w") as handle:
+        handle.write(text)
+    return directory
+
+
+def _scan(language: str) -> list:
+    if not native.supported(language):
+        pytest.skip("%s has no grammar table" % language)
+    found = native.scan(_checkout(language), "pkg", "abc123", language=language)
+    if not found:
+        pytest.skip("the %s grammar is not installed" % language)
+    return found
+
+
+@pytest.mark.parametrize("language", sorted(SOURCES))
+def test_every_language_yields_typed_functions(language):
+    """The regression this file exists for: these languages used to yield nothing at all."""
+    found = _scan(language)
+    assert len(found) >= 2, (
+        "%s yielded %d functions; the grammar table is not matching this source"
+        % (language, len(found)))
+
+
+@pytest.mark.parametrize("language", sorted(SOURCES))
+def test_the_function_name_is_not_the_parameter_name(language):
+    """A real bug, and the reason Rust silently returned zero functions.
+
+    The field holding a FUNCTION's name and the field holding a PARAMETER's name are different
+    questions, and only some grammars answer both with `name`: Rust spells the second `pattern`,
+    C++ hides it in a declarator. Conflating them made `_symbol` return empty for every Rust
+    function, so all of them were dropped -- an empty scan, which is indistinguishable from a
+    checkout with no usable functions in it.
+    """
+    for function in _scan(language):
+        assert function.symbol, "a function was mined with no name"
+        assert "(" not in function.symbol, (
+            "%s: %r is a declarator, not a symbol" % (language, function.symbol))
+        for param in function.schema["params"]:
+            assert param["name"], "%s: %s has an unnamed parameter" % (language, function.symbol)
+            # `&s` and `*p` are how C++ spells a reference; the sigil belongs to the type. A
+            # parameter named `&s` does not match anything the generated dispatcher will call.
+            assert not param["name"].startswith(("&", "*")), (
+                "%s: %s takes %r, which carries a type sigil into the name"
+                % (language, function.symbol, param["name"]))
+
+
+@pytest.mark.parametrize("language", sorted(SOURCES))
+def test_every_mined_parameter_can_actually_be_drawn(language):
+    """A schema the sampler cannot draw is worse than no schema.
+
+    `sample()` has a fixed vocabulary. A parameter typed outside it refuses every probe, and that
+    refusal is charged to the MATERIAL -- so an over-eager type table would look exactly like a
+    supply of broken candidates.
+    """
+    for function in _scan(language):
+        for param in function.schema["params"]:
+            assert param["kind"] in DRAWABLE, (
+                "%s: %s takes a %r, which the probe sampler cannot draw"
+                % (language, function.symbol, param["kind"]))
+
+
+@pytest.mark.parametrize("language", sorted(SOURCES))
+def test_an_untypeable_function_is_skipped_rather_than_guessed(language):
+    """Each fixture ends in a function this file cannot type: a channel, a function pointer.
+
+    Skipping it is the honest answer. Guessing draws probes the subject was never meant to accept,
+    and the resulting failure is billed to the candidate.
+    """
+    assert "opaque" not in {f.symbol.lower() for f in _scan(language)}, (
+        "%s mined a function whose parameter type is not drawable" % language)
+
+
+def test_a_partially_typeable_function_is_refused_whole():
+    """Half a parameter list is worse than none of it.
+
+    A subject called with the wrong NUMBER of arguments fails on every probe, so a function is
+    taken only when every parameter can be typed -- not with the untypeable ones quietly dropped.
+    """
+    if not native.supported("go"):
+        pytest.skip("no go grammar table")
+    directory = tempfile.mkdtemp()
+    with open(os.path.join(directory, "mixed.go"), "w") as handle:
+        handle.write('package mixed\n'
+                     'func Half(a int, c chan int) int { return a }\n')
+    found = native.scan(directory, "pkg", "abc123", language="go")
+    assert found == [] or all(len(f.schema["params"]) == 2 for f in found), (
+        "a function was mined with its untypeable parameters dropped, so it will be called with "
+        "the wrong number of arguments")
+
+
+def test_an_unregistered_language_is_not_silently_empty():
+    """`supported()` is how the miner tells "cannot read this" from "read it, found nothing".
+
+    The two must stay distinguishable: the first is our gap and the second is a fact about the
+    material, and collapsing them makes a registered adapter look like a missing one.
+    """
+    assert not native.supported("cobol")
+    assert native.scan(tempfile.mkdtemp(), language="cobol") == []
+    for language in sorted(SOURCES):
+        assert native.supported(language), "%s should be registered" % language

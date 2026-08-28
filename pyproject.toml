@@ -23,7 +23,19 @@ frf = "frf.cli:main"
 [project.optional-dependencies]
 # Sourcing and drafting reach the network; nothing else does. Kept optional so that reading a task,
 # replaying one, or running the test suite needs none of it.
-sourcing = ["requests>=2.31"]
+# The grammars are what let the miner read a statically typed checkout at all. Pinned to the
+# versions the scanner's tests were written against: a grammar can rename a node between releases,
+# and `native_functions._GRAMMARS` keys on those names. A MISSING grammar is silent rather than
+# loud -- `_parser` returns None and the scan yields nothing -- so an undeclared one would look
+# exactly like a supply with no usable functions in it.
+sourcing = [
+    "requests>=2.31",
+    "tree_sitter>=0.25,<0.27",
+    "tree_sitter_go>=0.25,<0.26",
+    "tree_sitter_rust>=0.24,<0.25",
+    "tree_sitter_java>=0.23,<0.24",
+    "tree_sitter_cpp>=0.23,<0.24",
+]
 sandbox = ["e2b>=1.0"]
 dev = ["pytest>=8", "pyflakes>=3"]
 
