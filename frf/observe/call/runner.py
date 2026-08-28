@@ -48,8 +48,26 @@ def _last_error(text: str, limit: int = 400) -> str:
     if not lines:
         return "(empty)"
     culprit = lines[-1]
-    context = next((line.strip() for line in reversed(lines[:-1])
-                    if line.strip().startswith("File ")), "")
+    # A crash dump does not always look like a Python traceback. Node's fatal error prints its
+    # internal frames, then "Node.js v22.23.2" last -- so the last line says only which runtime and
+    # the real cause sits a few lines up. The most actable line of a Node error is usually the
+    # exception MESSAGE ("Cannot find module '...'"), not a stack frame, so search for it first.
+    context = ""
+    message_line = next((line.strip() for line in lines if (
+        "Cannot find module" in line or "not defined" in line
+        or "SyntaxError" in line or "is not a function" in line)), "")
+    if message_line:
+        context = message_line[-240:]
+    elif not any(line.startswith("File ") for line in lines[:-1]):
+        tail_start = max(0, len(lines) - 4)
+        tail = lines[tail_start:]
+        if len(tail) >= 2 or culprit.startswith("Node.js"):
+            context = " | ".join(line for line in tail[:-1])[-240:]
+            for line in reversed(tail[:-1]):
+                if "url:" in line:
+                    context = line[-200:]
+                    break
+
     joined = ("%s  [%s]" % (culprit, context)) if context else culprit
     return joined[:limit]
 
