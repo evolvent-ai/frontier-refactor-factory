@@ -120,9 +120,12 @@ def _serve_package_here(room: str, shim, material, *, language: str = "python") 
     # Now a language with no dispatcher raises Unsupported here, loudly, as it does everywhere else.
     from . import dispatch as call_dispatch
 
-    table = {entry["name"]: ((entry["module"], entry["symbol"])
-                             if not (entry.get("klass") or "")
-                             else (entry["module"], entry["symbol"], entry["klass"]))
+    # ONE TUPLE SHAPE FOR EVERY LANGUAGE: (module, symbol, klass, typed). Dynamic languages leave
+    # klass and typed empty; ruby carries klass; static languages carry klass-empty and typed
+    # (params + result) for the dispatcher's converter. A single shape means the generators unpack
+    # the same way and a new language cannot fall through a missing field.
+    table = {entry["name"]: ((entry["module"], entry["symbol"], entry.get("klass") or "",
+                              entry.get("params") or (), entry.get("result") or {}))
              for entry in material.dispatch}
     adapter = os.path.join(room, shims.TEMPLATES[language].subject)
     with open(adapter, "w", encoding="utf-8") as handle:

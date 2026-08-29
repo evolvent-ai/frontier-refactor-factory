@@ -9,7 +9,7 @@ import ast
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -24,11 +24,17 @@ class Operation:
     # surface is class methods, and a Ruby dispatcher has to instantiate the class before it can
     # reach one. Empty for a top-level `def` and for every language without this notion.
     klass: str = ""
+    # TYPED ARGUMENTS for a static-language operation, as `native_functions` reads them: kind +
+    # native spelling per parameter, and what the function returns. A generated static dispatcher
+    # declares these; the regex `signature` string tells a generator but cannot be compiled from.
+    params: tuple = ()
+    result: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return {"name": self.name, "module": self.module, "symbol": self.symbol,
                 "signature": self.signature, "language": self.language,
-                "json_safe": self.json_safe, "klass": self.klass}
+                "json_safe": self.json_safe, "klass": self.klass,
+                "params": list(self.params), "result": dict(self.result)}
 
 
 def operations(root: str, language: str, package_name: str, package_root: str) -> list[dict]:
@@ -127,20 +133,28 @@ def _rust(root, package_name, package_root):
 
 
 def _go(root, package_name, package_root):
+    """Go package operations, typed by `native_functions` instead of a regex string.
+
+    A static package dispatcher has to declare the real type for each argument -- `[]int`, `string`
+    -- and `_call_signature` returns a STRING a dispatcher cannot generate from. `native_functions.
+    scan` reads the same source with tree-sitter and emits `schema.params` (kind + native spelling),
+    so the operation carries those beside the signature. The signature stays for the generator's
+    benefit; `params`/`result` are what the dispatcher generator builds from.
+    """
+    from . import native_functions as native
+
     result = []
-    for directory, dirs, files in os.walk(package_root):
-        dirs[:] = [d for d in dirs if not _skip(d)]
-        for filename in files:
-            if not filename.endswith(".go") or filename.endswith("_test.go"):
-                continue
-            text = open(os.path.join(directory, filename), encoding="utf-8", errors="replace").read()
-            module = package_name + "." + os.path.relpath(directory, root).replace(os.sep, ".")
-            for match in re.finditer(r"\bfunc\s+([A-Z]\w*)\s*\(", text):
-                signature = _call_signature(text, match.end() - 1, returns=True)
-                if signature is None:
-                    continue
-                symbol = match.group(1)
-                result.append(Operation(symbol, module, symbol, signature, "go").to_json())
+    found = native.scan(root, package_name, "1.0", language="go")
+    seen = set()
+    for fn in found:
+        if fn.symbol in seen:
+            continue
+        seen.add(fn.symbol)
+        module = package_name + "." + os.path.relpath(os.path.dirname(fn.path), root).replace(os.sep, ".")
+        signature = "(%s)" % ", ".join(str(p["native"]) for p in fn.schema["params"])
+        result.append(Operation(fn.symbol, module, fn.symbol, signature, "go",
+                                params=tuple(dict(p) for p in fn.schema["params"]),
+                                result=dict(fn.result or {})).to_json())
     return _unique(result)
 
 
@@ -207,7 +221,8 @@ def _ruby(root, package_name, package_root):
                     # self.greater_than_aliases`, which human_time's real surface is full of -- has
                     # none, so it returns None and the method is dropped. No parens means no
                     # parameters, which `"()"` says plainly.
-                    signature = _call_signature(raw, span) or "()"
+                    open_paren = raw.find("(", span)
+                    signature = (_call_signature(raw, open_paren) if open_paren != -1 else "()") or "()"
                     if klass:
                         # A STATIC method needs no instance -- `Klass.method(*args)` -- so it never
                         # requires `new`-ability. Only an INSTANCE method does, and only a class with

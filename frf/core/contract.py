@@ -50,6 +50,13 @@ class PackageOperation:
     # call `method` on what it built. Empty for a static method or a language with no such notion,
     # which is why it is optional and why every other generator ignores it.
     klass: str = ""
+    # TYPED ARGUMENTS for a static-language operation. A generated static dispatcher declares the
+    # concrete type of each parameter, which the regex-captured `signature` string cannot provide:
+    # `[]int` vs `[]int32` are both "array" to a reader but need different declarations in Go. These
+    # come from `native_functions`, which reads types off the grammar. Empty for dynamic languages,
+    # whose dispatchers index by name and need no type information.
+    params: tuple = ()
+    result: dict = field(default_factory=dict)
 
     def validate(self) -> None:
         if not self.name or not self.module or not self.symbol:
@@ -79,7 +86,9 @@ class PackageContract:
         self.validate()
         return {"subject_source": self.subject_source, "package_name": self.package_name,
                 "operations": [{"name": o.name, "module": o.module, "symbol": o.symbol,
-                                "signature": o.signature, "json_safe": o.json_safe}
+                                "signature": o.signature, "json_safe": o.json_safe,
+                                "klass": o.klass, "params": list(o.params),
+                                "result": dict(o.result)}
                                for o in self.operations],
                 "dependencies": list(self.dependencies), "provenance": self.provenance.to_json()}
 

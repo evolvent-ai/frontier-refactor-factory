@@ -41,6 +41,7 @@ _WRONG = {
     "javascript": ("null", "0"),
     "typescript": ("null", "0"),
     "ruby": ("nil", "0"),
+    "go": ("nil", "0"),
 }
 
 def languages() -> tuple:
@@ -104,6 +105,93 @@ def _javascript(dispatch: dict, wrong: str | None) -> str:
         "  return fn(...args);\n"
         "};\n" % json.dumps(dispatch)
     )
+
+
+def _static_go(dispatch: dict, wrong: str | None) -> str:
+    """A Go package dispatcher: switch over operations, each with typed argument conversion.
+
+    The probe sends `[op_name, ...args]`; `entry` dispatches on that name. Each operation's `params`
+    (kind + native spelling from `native_functions`) drive a converter per argument, exactly as the
+    single-function bridge does -- the difference is only that several operations share one process
+    and one `entry`. `bridge._GO_CONVERTERS` is reused instead of restated, so a change to how Go
+    values are decoded changes bridges and package dispatchers together.
+
+    A wrong mutant returns the wrong value for every operation, as the dynamic generators do.
+    """
+    if wrong is not None:
+        return ("package main\n\n"
+                "import \"fmt\"\n\n"
+                "func Entry(args []interface{}) (interface{}, error) {\n"
+                "    return %s, nil\n"
+                "}\n" % wrong)
+    from ..call import bridge
+
+    lines = ["package main", "", 'import "fmt"', ""]
+    used: list = []
+    for symbol, (_module, _symbol, _klass, params, _result) in sorted(dispatch.items()):
+        for param in list(params or ()):
+            kind = str(param.get("kind", ""))
+            if kind in bridge._GO_CONVERTERS and kind not in used:
+                used.append(kind)
+    for kind in used:
+        lines.append(bridge._GO_CONVERTERS[kind][1].strip("\n"))
+        lines.append("")
+    for kind, dependency in (("int_array", "int"), ("float_array", "float")):
+        if kind in used and dependency not in used:
+            lines.append(bridge._GO_CONVERTERS[dependency][1].strip("\n"))
+            lines.append("")
+    # THE SHIM CALLS `Entry(args []interface{})`, ONE argument -- the whole probe list. The
+    # operation NAME is args[0], and the remaining items are the call's arguments. The MUTANT and
+    # dynamic generators above take `op` separately, but Go's single-function entry point cannot:
+    # serve.go reads JSON into one slice and calls `Entry(args)`.
+    lines.append("// Entry is what serve.go calls; dispatch on args[0].")
+    lines.append("func Entry(args []interface{}) (interface{}, error) {")
+    lines.append("\tif len(args) < 1 {")
+    lines.append('\t\treturn nil, fmt.Errorf("expected an operation name")')
+    lines.append("\t}")
+    lines.append("\top, ok := args[0].(string)")
+    lines.append("\tif !ok { return nil, fmt.Errorf(\"operation name must be a string\") }")
+    lines.append("\targs = args[1:]")
+    lines.append("\tswitch op {")
+    for symbol, (_module, _symbol, _klass, params, _result) in sorted(dispatch.items()):
+        params = list(params or ())
+        lines.append("\tcase %s:" % json.dumps(symbol))
+        lines.append("\t\tif len(args) != %d {" % len(params))
+        lines.append('\t\t\treturn nil, fmt.Errorf("expected %d argument(s), got %%d", len(args))' % len(params))
+        lines.append("\t\t}")
+        call_args = []
+        for index, param in enumerate(params):
+            kind = str(param.get("kind", ""))
+            if kind not in bridge._GO_CONVERTERS:
+                return _unsupported("no Go conversion for a %r argument" % kind)
+            converter = bridge._GO_CONVERTERS[kind][0]
+            native = " ".join(str(param.get("native", "")).split()) or bridge._GO_NATIVE_OF_KIND[kind]
+            name = "arg%d" % index
+            lines.append("\t\t%s, ok%d := %s(args[%d])" % (name, index, converter, index))
+            lines.append("\t\tif !ok%d { return nil, fmt.Errorf(\"argument %d is not a %s\") }" % (index, index, kind))
+            if native != bridge._GO_NATIVE_OF_KIND[kind]:
+                if kind.endswith("_array"):
+                    element = native.removeprefix("[]")
+                    lines.append("\t\tconverted%d := make(%s, len(%s))" % (index, native, name))
+                    lines.append("\t\tfor i, item := range %s { converted%d[i] = %s(item) }" % (name, index, element))
+                    call_args.append("converted%d" % index)
+                else:
+                    lines.append("\t\tconverted%d := %s(%s)" % (index, native, name))
+                    call_args.append("converted%d" % index)
+            else:
+                call_args.append(name)
+        # A PACKAGE SUBJECT COMPILES INTO THE SAME PACKAGE as the dispatcher (all files in one
+        # directory), so the symbol is called unqualified -- no module prefix. Go has no per-file
+        # namespace; that is the module import's job, and it is not one here.
+        lines.append("\t\treturn %s(%s), nil" % (symbol, ", ".join(call_args)))
+    lines.append("\t}")
+    lines.append('\treturn nil, fmt.Errorf("unknown operation: %s", op)')
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def _unsupported(message: str):
+    raise Unsupported(message)
 
 
 def _ruby(dispatch: dict, wrong: str | None) -> str:
@@ -181,6 +269,10 @@ _GENERATORS = {
     # per argument, and `source/package_adapters.py` emits a signature as a regex-captured STRING
     # rather than typed parameters, so there is nothing yet to generate from.
     "ruby": _ruby,
+    # Static languages need generated static dispatch: a switch over operations, each with a typed
+    # conversion of the probe's argument list. `params`/`result` per operation now come from
+    # `native_functions` (see package_adapters), which reads types off the grammar.
+    "go": _static_go,
 }
 
 
@@ -205,6 +297,26 @@ def source(language: str, dispatch: dict, *, mutant: int | None = None) -> str:
         # count of languages and using it here would cycle through attempts that do not exist.
         attempts = _WRONG[language]
         wrong = attempts[mutant % len(attempts)]
+    # DYNAMIC GENERATORS CALL A VALUE, NOT A DECLARATED SYMBOL, so the dispatcher they emit only
+    # carries (module, symbol) -- python indexes a module and splats, js reaches an export. RUBY
+    # CARRIES (module, symbol, klass), its reflection needs the class and nothing more. The five-
+    # element table above (_klass, params, result) is for the static generators, which declare typed
+    # arguments; feeding it to a dynamic runtime would make `module_name, symbol = _DISPATCH[op]` a
+    # ValueError. Normalised here, in the one place every generator is reached, rather than in each.
+    if language in ("python", "javascript", "typescript"):
+        dispatch = {name: (pair[0], pair[1]) for name, pair in dispatch.items()}
+    elif language == "ruby":
+        dispatch = {name: (pair[0], pair[1], pair[2]) if len(pair) >= 3
+                    else (pair[0], pair[1], "")
+                    for name, pair in dispatch.items()}
+    else:
+        # A STATIC GENERATOR declares typed arguments, so it needs the whole tuple. A fixture passing
+        # (module, symbol) is padded to the full shape: empty klass and typed -- a no-arity operation.
+        dispatch = {name: (pair[0], pair[1],
+                           pair[2] if len(pair) > 2 else "",
+                           pair[3] if len(pair) > 3 else (),
+                           pair[4] if len(pair) > 4 else {})
+                    for name, pair in dispatch.items()}
     output = generator(dispatch, wrong)
     if language == "typescript":
         # The dispatcher is GENERATED COMMONJS (exports/require). When it is written to a .ts file
