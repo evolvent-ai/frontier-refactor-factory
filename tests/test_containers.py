@@ -138,3 +138,46 @@ def test_a_remote_sandbox_without_a_key_says_which_key():
         containers.Remote()
     message = str(caught.value)
     assert "E2B_API_KEY" in message or "e2b" in message
+
+
+def test_every_call_to_the_remote_api_is_bounded_on_the_wire():
+    """An unbounded remote call does not fail -- it waits, which is worse than failing.
+
+    THE E2B SDK TAKES TWO TIMEOUTS AND THEY ARE EASY TO CONFLATE. `timeout` bounds the process inside
+    the sandbox; `request_timeout` bounds the HTTP call carrying it, and defaults to None, meaning wait
+    forever. We passed only the first.
+
+    A kernel/java batch paid for that: 28 minutes with its main thread in futex_wait and an ESTAB
+    socket to the API, having widened its candidates and never reached a build. It also made the retry
+    logic in `run` unreachable for the failure it was written for -- a call that never returns never
+    raises, so the `timed out` match below it never had anything to match.
+
+    CHECKED AT SOURCE LEVEL, deliberately. This file's preamble says a mocked container tests the mock,
+    and there is nothing to assert at runtime: the bug's whole signature is a call that does not come
+    back. Reading the call sites is what actually catches the omission, and it catches it for a call
+    site added later, which is the case that matters.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(containers))
+    remote = next(node for node in ast.walk(tree)
+                  if isinstance(node, ast.ClassDef) and node.name == "Remote")
+
+    # The SDK entry points that cross the network. `Sandbox.create` is spelled as an attribute call on
+    # a name, the rest hang off `self._sandbox`.
+    wanted = {"create", "run", "write", "read"}
+    unbounded = []
+    for node in ast.walk(remote):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in wanted:
+            continue
+        source = ast.unparse(node.func)
+        if "Sandbox" not in source and "_sandbox" not in source:
+            continue                                    # a local helper of the same name
+        if not any(keyword.arg == "request_timeout" for keyword in node.keywords):
+            unbounded.append(ast.unparse(node)[:70])
+    assert not unbounded, (
+        "these remote calls can wait forever, which stalls a batch instead of failing it: %s"
+        % unbounded)

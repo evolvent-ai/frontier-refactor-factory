@@ -44,6 +44,28 @@ DEFAULT_IMAGE = "python:3.11-slim-bookworm"
 # of host detail that must not end up frozen into an expectation.
 EXCLUDED = {".git", ".hg", "__pycache__", ".pytest_cache", ".venv", "node_modules", "target"}
 
+# HOW LONG TO WAIT ON THE WIRE, which is a DIFFERENT question from how long to let a command run.
+# The E2B SDK takes both and they are easy to conflate: `timeout` bounds the process inside the
+# sandbox, `request_timeout` bounds the HTTP call that carries it. Passing only the first leaves the
+# second at None, which means wait forever.
+#
+# THAT COST A BATCH. A kernel/java run sat for 28 minutes with its main thread in futex_wait and an
+# ESTAB socket to the API, having widened its candidates and never reached a build. Worse, it made the
+# retry logic below unreachable for the failure it was written for: a call that never returns never
+# raises, so `re.search("timed out", ...)` never sees anything to match.
+#
+# OPEN_TIMEOUT covers creating and connecting a sandbox -- an operation with a bounded amount of work
+# to do, however busy the service is.
+OPEN_TIMEOUT = 120
+
+# TRANSFER_TIMEOUT covers moving a file, which is a tar of a whole checkout in the worst case.
+TRANSFER_TIMEOUT = 300
+
+# And for running a command the transport limit has to EXCEED the command's own, or a legitimate long
+# build would be cut off mid-flight by the wire that was carrying it -- reported as a transport fault
+# for what is really a slow compile. This adds headroom rather than replacing the caller's figure.
+TRANSPORT_HEADROOM = 120
+
 
 def _tar_bytes(local_dir: str, exclude: set | None = None) -> bytes:
     """A directory as a tar stream, with the host left out of it.
@@ -244,9 +266,10 @@ class Remote:
             try:
                 if self._template:
                     self._sandbox = Sandbox.create(template=self._template, timeout=int(timeout),
-                                                   api_key=key)
+                                                   api_key=key, request_timeout=OPEN_TIMEOUT)
                 else:
-                    self._sandbox = Sandbox.create(timeout=int(timeout), api_key=key)
+                    self._sandbox = Sandbox.create(timeout=int(timeout), api_key=key,
+                                                   request_timeout=OPEN_TIMEOUT)
                 break
             except Exception as exc:                          # noqa: BLE001 -- SDK transport/errors
                 message = str(exc)
@@ -293,7 +316,7 @@ class Remote:
         # below retries the same way; the file path now does too.
         for attempt in range(3):
             try:
-                self._sandbox.files.write(staged, blob)
+                self._sandbox.files.write(staged, blob, request_timeout=TRANSFER_TIMEOUT)
                 break
             except Exception as exc:                          # noqa: BLE001 -- the SDK's own errors
                 message = str(exc)
@@ -330,7 +353,10 @@ class Remote:
             try:
                 handle = self._sandbox.commands.run(
                     command, cwd=workdir or "/home/user", envs=dict(env or {}),
-                    timeout=int(timeout))
+                    timeout=int(timeout),
+                    # Headroom over the command's own limit, so a slow build is cut off by the
+                    # limit it was given and not by the wire carrying it. See TRANSPORT_HEADROOM.
+                    request_timeout=int(timeout) + TRANSPORT_HEADROOM)
                 break
             except Exception as exc:                          # noqa: BLE001 -- the SDK's own errors
                 code = getattr(exc, "exit_code", None)
@@ -360,7 +386,8 @@ class Remote:
         blob = b""
         for attempt in range(3):
             try:
-                blob = bytes(self._sandbox.files.read(staged, format="bytes"))
+                blob = bytes(self._sandbox.files.read(staged, format="bytes",
+                                                     request_timeout=TRANSFER_TIMEOUT))
                 break
             except Exception as exc:                          # noqa: BLE001 -- the SDK's own errors
                 message = str(exc)
