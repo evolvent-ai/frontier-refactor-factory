@@ -50,6 +50,26 @@ class Shim:
     run: tuple                     # argv that starts the server
     build: tuple = ()              # argv lists run once, in the workspace, before serving
     tool: str = ""                 # the executable that must exist for any of this to work
+    # WHETHER THIS SHIM CAN BIND A MINED FUNCTION BY ITSELF. The third thing a call seam needs, and
+    # the one that is easy to miss because two of them are so visible.
+    #
+    # A dynamic runtime closes the last gap at run time: `serve.py` does
+    # `getattr(import_module(mod), symbol)` and then `_entry(*args)`, `serve.js` does
+    # `subject[symbol](...args)`, `serve.rb` splats `entry(*args)`. Handed any function the miner
+    # found, under its own name, with its own arity, they serve it.
+    #
+    # A static shim cannot. `serve.go` requires `func Entry(args []interface{}) (interface{}, error)`
+    # in `package main`; `serve.rs` requires `pub fn entry(args: &crate::Json) -> Result<Json,String>`
+    # in `mod subject`; Serve.java reflects for `Subject.entry(List)`. Real mined material looks
+    # nothing like that -- `func CoinChange(coins []int, amount int) int` in `package dynamic` -- so
+    # serving it needs a per-candidate GENERATED BRIDGE that declares the expected package and entry,
+    # unpacks the JSON arguments into concrete types, and calls the real symbol.
+    #
+    # Recorded here because it is a property of the template, and because leaving it implicit already
+    # cost a batch: with a miner and a shim both present, go/rust/java/cpp were declared call-capable,
+    # and every candidate died at build with `found packages main (serve.go) and dynamic (subject.go)`
+    # -- and, once the package name was fixed by hand, `undefined: Entry` underneath it.
+    binds_symbol: bool = False
 
     def commands(self, workdir: str, symbol: str = "entry") -> tuple:
         """-> (build argv lists, run argv), resolved against a real directory.
@@ -77,8 +97,9 @@ class Shim:
 # a missing symbol rather than as a statement about file naming.
 TEMPLATES = {
     "python": Shim("serve.py", "subject.py", ("python3", "{entry}", "{module}", "{symbol}"),
-                   tool="python3"),
-    "javascript": Shim("serve.js", "subject.js", ("node", "--experimental-specifier-resolution=node", "{entry}", "subject.js", "{symbol}"), tool="node"),
+                   tool="python3", binds_symbol=True),
+    "javascript": Shim("serve.js", "subject.js", ("node", "--experimental-specifier-resolution=node", "{entry}", "subject.js", "{symbol}"), tool="node",
+                       binds_symbol=True),
     # TypeScript is compiled inside the sandbox with the toolchain declared by the image. This is
     # stable across Node versions and does not depend on experimental runtime flags.
     #
@@ -91,7 +112,12 @@ TEMPLATES = {
                        ("node", "--experimental-specifier-resolution=node", "{entry}", "subject.js", "{symbol}"),
                        build=(("tsc", "--target", "ES2022", "--module", "commonjs",
                                "--skipLibCheck", "--outDir", "{workdir}", "{subject}"),),
-                       tool="tsc"),
+                       tool="tsc", binds_symbol=True),
+    # RUBY IS DYNAMIC AND STILL DOES NOT BIND, which is why this flag is not just "is the language
+    # dynamic". `serve.rb` splats -- `entry(*args)` takes any arity -- but the NAME is hard-coded and
+    # `run` passes no `{symbol}`, so a mined `coin_change` raises NameError. Its bridge is cheap
+    # (alias one name; no types are needed) where a static language's is not, but it is still a
+    # bridge, and until one exists ruby cannot serve mined material either.
     "ruby": Shim("serve.rb", "subject.rb", ("ruby", "{entry}"), tool="ruby"),
     "go": Shim("serve.go", "subject.go", ("{binary}",), tool="go",
                build=(("go", "build", "-o", "{binary}", "{entry}", "{subject}"),)),

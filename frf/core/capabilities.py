@@ -56,18 +56,30 @@ _REGISTRY: dict[str, LanguageCapability] = {
                                      ("kernel", "module", "package", "repo")),
     "typescript": LanguageCapability("typescript", "call-capable", "typescript",
                                      ("kernel", "module", "package", "repo")),
-    # Both halves of the call seam now exist for these four: a tree-sitter miner that reads their
-    # functions WITH argument types, and a shim that serves one. `package` is deliberately absent --
-    # it needs a generated static dispatcher, which `observe/call/dispatch.py` does not have for
-    # them yet and refuses loudly rather than guessing.
-    "go": LanguageCapability("go", "call-capable", "go", ("kernel", "module", "repo")),
-    "rust": LanguageCapability("rust", "call-capable", "rust", ("kernel", "module", "repo")),
-    "java": LanguageCapability("java", "call-capable", "java", ("kernel", "module", "repo")),
-    "cpp": LanguageCapability("cpp", "call-capable", "cpp", ("kernel", "module", "repo")),
-    # Ruby has a shim and a package surface adapter but NO miner: `native_functions._GRAMMARS` has
-    # no ruby entry, so its call scales cannot be sourced at all. The process seam needs no miner --
-    # any program is served by running it -- and repo/ruby is where ruby produces today.
-    "ruby": LanguageCapability("ruby", "repo-capable", "ruby", ("repo",)),
+    # TWO OF THE THREE PARTS, which is not enough and was briefly recorded as though it were. The
+    # tree-sitter miner reads these four WITH argument types, and a shim ships for each -- so by the
+    # count of two they look ready. They are not: a static shim cannot bind a mined symbol. serve.go
+    # demands `func Entry(args []interface{}) (interface{}, error)` in `package main`, and the
+    # material is `func CoinChange(coins []int, amount int) int` in `package dynamic`. The first Go
+    # kernel batch refused all four candidates at build -- `found packages main (serve.go) and
+    # dynamic (subject.go)`, and `undefined: Entry` once that was fixed by hand.
+    #
+    # What is missing is a per-candidate GENERATED BRIDGE: declare the package and entry the shim
+    # expects, unpack the JSON arguments into concrete types, call the real symbol. Until it exists
+    # these stay repo-capable, where the process seam needs no bridge because it runs a whole program.
+    "go": LanguageCapability("go", "repo-capable", "go", ("repo",),
+                             reason="mined symbols need a generated call bridge"),
+    "rust": LanguageCapability("rust", "repo-capable", "rust", ("repo",),
+                               reason="mined symbols need a generated call bridge"),
+    "java": LanguageCapability("java", "repo-capable", "java", ("repo",),
+                               reason="mined symbols need a generated call bridge"),
+    "cpp": LanguageCapability("cpp", "repo-capable", "cpp", ("repo",),
+                              reason="mined symbols need a generated call bridge"),
+    # Ruby is missing TWO of the three: no miner (`native_functions._GRAMMARS` has no ruby entry) and
+    # no binding (serve.rb splats any arity but hard-codes the name `entry`, and is passed no symbol,
+    # so a mined `coin_change` raises NameError). Being dynamic is not the same as binding.
+    "ruby": LanguageCapability("ruby", "repo-capable", "ruby", ("repo",),
+                               reason="no miner, and serve.rb binds no symbol"),
 }
 
 

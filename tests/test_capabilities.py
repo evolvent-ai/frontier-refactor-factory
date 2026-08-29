@@ -31,17 +31,37 @@ from frf.source.function_miner import supported as minable
 CALL_SCALES = ("kernel", "module", "package")
 
 
-def test_every_declared_call_scale_has_both_halves_of_the_seam():
-    """A declared call scale means a miner AND a shim -- the failure that overpromised."""
+def test_every_declared_call_scale_has_all_three_parts_of_the_seam():
+    """A declared call scale means a miner, a shim, AND something that binds one to the other.
+
+    THE THIRD PART IS THE ONE THAT GETS FORGOTTEN, twice now and in the same direction. Counting two
+    parts, go/rust/java/cpp look ready: the tree-sitter miner reads them and a shim ships for each.
+    They are not. A dynamic shim closes the last gap at run time -- `serve.py` resolves the symbol by
+    name and splats, `serve.js` indexes `subject[symbol]` -- so it serves whatever the miner found.
+    A static shim cannot: `serve.go` demands `func Entry(args []interface{}) (interface{}, error)` in
+    `package main`, and mined material is `func CoinChange(coins []int, amount int) int` in
+    `package dynamic`. Every candidate in the first Go kernel batch died at build with
+    `found packages main (serve.go) and dynamic (subject.go)`, and with the package renamed by hand,
+    `undefined: Entry` underneath it.
+
+    So `binds_symbol` is checked here rather than inferred. Ruby is the case that proves the flag is
+    not a synonym for "dynamic": `serve.rb` splats any arity but hard-codes the NAME `entry` and is
+    passed no symbol, so a mined `coin_change` raises NameError just the same.
+    """
     missing = []
     for name, item in sorted(_REGISTRY.items()):
-        if not set(item.scales) & set(CALL_SCALES):
+        declared = sorted(set(item.scales) & set(CALL_SCALES))
+        if not declared:
             continue
         if not minable(name):
-            missing.append("%s declares %s but no reader can mine it"
-                           % (name, sorted(set(item.scales) & set(CALL_SCALES))))
-        if name not in shims.TEMPLATES:
-            missing.append("%s declares a call scale but ships no shim" % name)
+            missing.append("%s declares %s but no reader can mine it" % (name, declared))
+        shim = shims.TEMPLATES.get(name)
+        if shim is None:
+            missing.append("%s declares %s but ships no shim" % (name, declared))
+        elif not shim.binds_symbol:
+            missing.append(
+                "%s declares %s but %s cannot bind a mined symbol: it needs a generated bridge"
+                % (name, declared, shim.template))
     assert not missing, missing
 
 
@@ -58,19 +78,28 @@ def test_every_language_declaring_package_has_a_dispatcher():
     assert not liars, ["%s declares the package scale with no dispatcher" % n for n in liars]
 
 
-def test_a_language_with_both_halves_is_not_declared_repository_only():
+def test_a_language_the_seam_can_actually_serve_is_not_declared_repository_only():
     """The understating failure, pinned: a working seam reported as if it were not there.
 
-    This is the check that would have caught the stale table after the tree-sitter miner landed. It
-    deliberately says nothing about `repo` or `package` -- only that a language the factory CAN mine
-    and CAN serve must not be recorded as reaching the process seam alone.
+    COUNTING THREE PARTS, NOT TWO -- and the first version of this test counted two, which is how it
+    passed while asserting something false. A language that can be mined and has a shim looks servable
+    and is not, unless that shim can bind the mined symbol; go/rust/java/cpp are exactly that case,
+    and declaring them on kernel and module made the registry promise a batch that refused every
+    candidate at build.
+
+    So the condition here is the full one. When a generated bridge lands for a language, its
+    `binds_symbol` becomes true and this test starts demanding the registry say so -- which is the
+    intended pressure, in the direction of recording what the factory can do.
     """
-    understated = [name for name, item in sorted(_REGISTRY.items())
-                   if minable(name) and name in shims.TEMPLATES
-                   and not set(item.scales) & set(CALL_SCALES)]
-    assert not understated, [
-        "%s can be mined and served but declares only %s"
-        % (n, sorted(_REGISTRY[n].scales)) for n in understated]
+    understated = []
+    for name, item in sorted(_REGISTRY.items()):
+        shim = shims.TEMPLATES.get(name)
+        if not (minable(name) and shim is not None and shim.binds_symbol):
+            continue
+        if not set(item.scales) & set(CALL_SCALES):
+            understated.append("%s can be mined, served and bound but declares only %s"
+                               % (name, sorted(item.scales)))
+    assert not understated, understated
 
 
 def test_a_language_without_a_miner_declares_no_call_scale():
