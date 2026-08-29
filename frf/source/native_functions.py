@@ -263,12 +263,24 @@ def _parameters(function, spec: dict, source: bytes) -> list | None:
         described = _param_schema(spelling, spec["types"])
         if described is None:
             return None
-        name_node = param.child_by_field_name(spec["param_name_field"])
-        # A C++ declarator is `&s` or `*p`; the sigil belongs to the type, not the name.
-        described["name"] = (_text(source, name_node).lstrip("&*").strip()
+        # ONE DECLARATION CAN NAME SEVERAL PARAMETERS. Go writes
+        # `func K(maxWeight int, weights, values []int)` -- three parameters in two declarations,
+        # because `weights, values []int` shares one type between two names. Reading only the first
+        # name produced a schema of two for a function of three, so the generated bridge called it
+        # with the wrong arity: `not enough arguments in call to Knapsack, have (int, []int)`. That
+        # build failure was then charged to the MATERIAL, which is precisely the outcome the
+        # whole-function refusal above exists to prevent, reached by another route.
+        #
+        # `children_by_field_name` rather than the singular form, which returns only the first. The
+        # other grammars repeat the type per parameter and so return a list of one.
+        names = list(param.children_by_field_name(spec["param_name_field"])) or [None]
+        for name_node in names:
+            entry = dict(described)
+            # A C++ declarator is `&s` or `*p`; the sigil belongs to the type, not the name.
+            entry["name"] = (_text(source, name_node).lstrip("&*").strip()
                              if name_node is not None else "") or "arg%d" % len(schema)
-        described["native"] = " ".join(spelling.split())
-        schema.append(described)
+            entry["native"] = " ".join(spelling.split())
+            schema.append(entry)
     return schema
 
 

@@ -140,6 +140,109 @@ def test_a_partially_typeable_function_is_refused_whole():
         "the wrong number of arguments")
 
 
+def test_one_declaration_naming_several_parameters_yields_several():
+    """Go shares one type between names, and reading only the first shortens the arity.
+
+    A REAL FAILURE, from a real batch. `func Knapsack(maxWeight int, weights, values []int) int` is
+    three parameters in two declarations. Mined as two, the generated bridge called it with two
+    arguments and the build failed with `not enough arguments in call to Knapsack, have (int, []int)`
+    -- charged to the MATERIAL, which is exactly what `test_a_partially_typeable_function_is_refused
+    _whole` exists to prevent, arrived at by another route.
+
+    The fix is `children_by_field_name`, plural; the singular form returns the first name only. The
+    other grammars repeat the type per parameter, so they are unaffected -- which the parametrised
+    tests above confirm still hold.
+    """
+    if not native.supported("go"):
+        pytest.skip("no go grammar table")
+    directory = tempfile.mkdtemp()
+    with open(os.path.join(directory, "knap.go"), "w") as handle:
+        handle.write('package dynamic\n'
+                     'func Knapsack(maxWeight int, weights, values []int) int { return 0 }\n')
+    found = native.scan(directory, "pkg", "abc123", language="go")
+    if not found:
+        pytest.skip("the go grammar is not installed")
+    names = [param["name"] for param in found[0].schema["params"]]
+    assert names == ["maxWeight", "weights", "values"], names
+
+
+def test_a_void_function_is_kept_only_when_something_can_carry_the_mutation():
+    """Void is a third of the Go supply, and an in-place sort is ideal kernel material.
+
+    So it is not refused for being void -- it is refused when no argument can show what happened.
+    A void function of scalars has copied its arguments and left no evidence, so every probe returns
+    the same nothing and no corpus distinguishes an implementation from a stub.
+    """
+    if not native.supported("go"):
+        pytest.skip("no go grammar table")
+    directory = tempfile.mkdtemp()
+    with open(os.path.join(directory, "v.go"), "w") as handle:
+        handle.write('package v\n'
+                     'func SortInPlace(xs []int) {}\n'
+                     'func LogIt(n int) {}\n')
+    found = native.scan(directory, "pkg", "abc123", language="go")
+    if not found:
+        pytest.skip("the go grammar is not installed")
+    mined = {f.symbol: f for f in found}
+    assert "SortInPlace" in mined, "an in-place sort over a drawable array is usable material"
+    assert mined["SortInPlace"].result == {}, "void is recorded as {}, not as a type"
+    assert "LogIt" not in mined, "a void function of scalars leaves nothing to observe"
+
+
+def test_a_result_the_wire_cannot_carry_refuses_the_function():
+    """A builder or a generic handle cannot be encoded, and the failure would look like material.
+
+    Measured on a real checkout: refusing these took one Rust tree from 56 mined functions to 5.
+    What left was never servable -- an `AppxDbscanParams<F, CommonNearestNeighbour>` cannot cross a
+    JSON wire, so every probe against it would have been charged to the candidate.
+    """
+    if not native.supported("rust"):
+        pytest.skip("no rust grammar table")
+    directory = tempfile.mkdtemp()
+    with open(os.path.join(directory, "lib.rs"), "w") as handle:
+        handle.write('pub fn ok(a: i64) -> i64 { a }\n'
+                     'pub fn opaque(a: usize) -> Params<F, Nearest> { todo!() }\n')
+    found = native.scan(directory, "pkg", "abc123", language="rust")
+    if not found:
+        pytest.skip("the rust grammar is not installed")
+    assert {f.symbol for f in found} == {"ok"}
+
+
+def test_the_declared_package_is_reported_so_a_bridge_can_agree_with_it():
+    """The first Go batch refused every candidate over exactly this.
+
+    `found packages main (serve.go) and sort (subject.go)`: the shim is `package main` and the
+    material declared its own, and nothing had read the second name in order to reconcile them.
+    """
+    if not native.supported("go"):
+        pytest.skip("no go grammar table")
+    directory = tempfile.mkdtemp()
+    with open(os.path.join(directory, "s.go"), "w") as handle:
+        handle.write('package sort\nfunc Bubble(xs []int) []int { return xs }\n')
+    found = native.scan(directory, "pkg", "abc123", language="go")
+    if not found:
+        pytest.skip("the go grammar is not installed")
+    assert found[0].declared_package == "sort"
+
+
+def test_a_method_is_refused_because_nothing_can_build_its_receiver():
+    """Rust hides this worst: `self_parameter` is not in `param_nodes`.
+
+    So `fn add(&mut self, cost: f64)` was mined as a free function of ONE argument, and a bridge
+    generated from that cannot compile. Go marks the same thing with a `receiver` field.
+    """
+    if not native.supported("rust"):
+        pytest.skip("no rust grammar table")
+    directory = tempfile.mkdtemp()
+    with open(os.path.join(directory, "lib.rs"), "w") as handle:
+        handle.write('pub fn free(a: i64) -> i64 { a }\n'
+                     'impl T { pub fn method(&mut self, cost: f64) -> f64 { cost } }\n')
+    found = native.scan(directory, "pkg", "abc123", language="rust")
+    if not found:
+        pytest.skip("the rust grammar is not installed")
+    assert {f.symbol for f in found} == {"free"}
+
+
 def test_an_unregistered_language_is_not_silently_empty():
     """`supported()` is how the miner tells "cannot read this" from "read it, found nothing".
 
