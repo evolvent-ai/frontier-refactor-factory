@@ -96,10 +96,18 @@ _REGISTRY: dict[str, LanguageCapability] = {
     # types at all: they come from an `@param` comment, and the grammar is read for STRUCTURE -- only a
     # top-level `def` is reachable by that `send`.
     #
-    # `package` is absent: no dispatcher. Supply is thin and that is a fact about Ruby rather than
-    # about this reader -- 1884 definitions across the checkouts on hand carried 4 type annotations
-    # between them, and an untyped parameter is refused rather than guessed at.
-    "ruby": LanguageCapability("ruby", "call-capable", "ruby", ("kernel", "module", "repo")),
+    # `package` IS PRESENT NOW, and for the same reason the bridge was unnecessary: a package
+    # dispatcher only has to reach a name, and `send(symbol.to_sym, *args)` after a `require_relative`
+    # does that without knowing a single type. The four static languages still lack one because theirs
+    # needs a concrete type per argument, which `source/package_adapters.py` does not yet emit -- it
+    # captures a signature as a regex STRING.
+    #
+    # THIS IS NOT A CLAIM ABOUT SUPPLY. Ruby's kernel and module cells stay thin for a reason that is
+    # a fact about Ruby rather than about its reader: 1884 definitions across the checkouts on hand
+    # carried 4 type annotations between them, and an untyped parameter is refused rather than guessed
+    # at. The package scale is indifferent to that, because it dispatches by name.
+    "ruby": LanguageCapability("ruby", "call-capable", "ruby",
+                               ("kernel", "module", "package", "repo")),
 }
 
 
