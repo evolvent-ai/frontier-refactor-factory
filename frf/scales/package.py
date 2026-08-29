@@ -99,22 +99,30 @@ class Observer:
         destination = os.path.join(self.workspace, self.material.package_name)
         shutil.copytree(self.material.package_root, destination, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("__pycache__", ".git"))
+        # THE DISPATCHER AND THE MANIFEST MUST BE IN THE SAME DIRECTORY, and this once was not: the
+        # repo went to `workspace/<package_name>/` (where go.mod lives), while the dispatcher and
+        # shim were written at the WORKSPACE ROOT. A Go build `go build serve.go subject.go` run from
+        # that root has no go.mod in scope, so every static-language candidate failed to build there
+        # -- and because the failure text carries a fresh `/tmp/frf-subject-<uuid>` per run, freeze
+        # read the five different messages as five different answers and discarded 100% of probes,
+        # charged to the material. That is the whole of the freeze-100% mystery: a directory mismatch
+        # behind a random path.
         dispatch = {entry["name"]: ((entry["module"], entry["symbol"], entry.get("klass") or "",
                                      entry.get("params") or (), entry.get("result") or {}))
                     for entry in self.material.dispatch}
         self._dispatch = dispatch
-        adapter = os.path.join(self.workspace, _subject_name(spec.language))
+        adapter = os.path.join(destination, _subject_name(spec.language))
         with open(adapter, "w", encoding="utf-8") as handle:
             handle.write(_dispatcher_source(spec.language, dispatch))
-        _, self._argv = shims.materialise(self.workspace, spec.language, adapter, "entry")
+        _, self._argv = shims.materialise(destination, spec.language, adapter, "entry")
 
     def subject(self, spec: Spec | None = None, *, mutated: bool = False,
                 attempt: int = 0):
-        argv, room = self._argv, self.workspace
+        argv, room = self._argv, self._room()
         if mutated:
             room = os.path.join(self.workspace, ".mutant-%d" % attempt)
             shutil.rmtree(room, ignore_errors=True)
-            shutil.copytree(self.workspace, room, dirs_exist_ok=True,
+            shutil.copytree(self._room(), room, dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns(".mutant-*", "__pycache__"))
             adapter = os.path.join(room, _subject_name(spec.language))
             wrong = _dispatcher_source(spec.language, self._dispatch,
@@ -126,6 +134,10 @@ class Observer:
             return RemoteSubject(argv, workspace=room, backend=self._backend,
                                  timeout=PROBE_TIMEOUT)
         return Subject(argv, cwd=room, timeout=PROBE_TIMEOUT)
+
+    def _room(self) -> str:
+        """Where the servable copy lives: the package directory, beside its own manifest."""
+        return os.path.join(self.workspace, self.material.package_name)
 
     def coverage(self):
         return coverage.backend_for(self.material.language)
