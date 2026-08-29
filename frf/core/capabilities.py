@@ -24,30 +24,50 @@ class LanguageCapability:
             raise ValueError("unknown capability level %r" % self.level)
 
 
+# WHAT A ROW MEANS. `level` is the rung on the ladder this language's ADAPTER has reached, and
+# `scales` are the scales it has reached that rung ON. A scale left out is not a scale that cannot
+# run: `capability()` reports an omitted scale one rung lower, which is how "the mechanism works but
+# this particular scale has no certified evidence yet" is said. So a row is two claims -- one about
+# MECHANISM (is the seam built for this language) and one about EVIDENCE (has it been graded) -- and
+# `tests/test_capabilities.py` holds the mechanism half against what the code can actually do.
+#
+# A CALL SEAM HAS TWO HALVES, and one without the other is not being call-capable. The shim (read a
+# JSON line, call the entry, write a reply) ships for eight languages; the function MINER (find the
+# callable functions in a source tree) is the other half, and nothing it cannot find ever reaches a
+# shim. Declaring a language call-capable on the strength of the shim table alone once made a Go
+# module run source hundreds of repositories and widen them into zero candidates, every one refused
+# `call-adapter-not-registered:go` -- a yield figure for a supply that does not exist.
+#
+# THE OPPOSITE STALENESS IS JUST AS REAL, and it is the one that bit us second: when the tree-sitter
+# miner landed for go/rust/java/cpp, this table went on saying those languages reached the repo scale
+# only. Nothing broke, because `capability()` is read by the attestation and audit records rather
+# than by the pipeline -- so the cells they could now produce were reported as cells they could not.
+# A registry that lags the mechanism understates the factory instead of overpromising it, which is
+# quieter and no less wrong.
 _REGISTRY: dict[str, LanguageCapability] = {
-    # Certification is evidence-backed per scale.  Repo has not completed the final Harbor
-    # reference-vs-reference audit yet, so it must remain repo-capable rather than inheriting a
-    # language-wide certified label from the call seam.
+    # Repo is omitted deliberately: it has not completed the final Harbor reference-vs-reference
+    # audit, so it is reported one rung down rather than inheriting a language-wide `certified`
+    # label earned on the call seam.
     "python": LanguageCapability("python", "certified", "python", ("module", "kernel", "package")),
-    "javascript": LanguageCapability("javascript", "call-capable", "javascript", ("package", "repo")),
-    "typescript": LanguageCapability("typescript", "call-capable", "typescript", ("package", "repo")),
-    # A CALL SEAM HAS TWO HALVES, and having one without the other is not being call-capable.
-    # The shim (how a function is invoked: read JSON, call entry, write JSON) exists for nine
-    # languages; the function MINER (how a candidate's functions are found in a source tree)
-    # exists for three: python, javascript, typescript. Nothing the miner cannot find can ever
-    # reach the shim, so declaring these five call-capable on every function scale made the
-    # registry promise what the pipeline cannot deliver -- a Go module run sourced hundreds of
-    # repositories and widened them into zero candidates, all refused as
-    # `call-adapter-not-registered:go`. That is a yield figure for a supply that does not exist.
-    #
-    # Until a language's miner lands, its call-seam scales stay repo-capable: the process seam
-    # needs no miner (any program is served by running it), and the repo scale is where these
-    # languages actually produce today.
-    "go": LanguageCapability("go", "repo-capable", "go", ("repo",)),
-    "rust": LanguageCapability("rust", "repo-capable", "rust", ("repo",)),
-    "java": LanguageCapability("java", "repo-capable", "java", ("repo",)),
+    # Kernel and module are DECLARED because they are attested on disk, not merely mechanical:
+    # kernel/javascript, kernel/typescript, module/javascript and module/typescript all carry
+    # attested subjects. They were missing here while that evidence already existed.
+    "javascript": LanguageCapability("javascript", "call-capable", "javascript",
+                                     ("kernel", "module", "package", "repo")),
+    "typescript": LanguageCapability("typescript", "call-capable", "typescript",
+                                     ("kernel", "module", "package", "repo")),
+    # Both halves of the call seam now exist for these four: a tree-sitter miner that reads their
+    # functions WITH argument types, and a shim that serves one. `package` is deliberately absent --
+    # it needs a generated static dispatcher, which `observe/call/dispatch.py` does not have for
+    # them yet and refuses loudly rather than guessing.
+    "go": LanguageCapability("go", "call-capable", "go", ("kernel", "module", "repo")),
+    "rust": LanguageCapability("rust", "call-capable", "rust", ("kernel", "module", "repo")),
+    "java": LanguageCapability("java", "call-capable", "java", ("kernel", "module", "repo")),
+    "cpp": LanguageCapability("cpp", "call-capable", "cpp", ("kernel", "module", "repo")),
+    # Ruby has a shim and a package surface adapter but NO miner: `native_functions._GRAMMARS` has
+    # no ruby entry, so its call scales cannot be sourced at all. The process seam needs no miner --
+    # any program is served by running it -- and repo/ruby is where ruby produces today.
     "ruby": LanguageCapability("ruby", "repo-capable", "ruby", ("repo",)),
-    "cpp": LanguageCapability("cpp", "repo-capable", "cpp", ("repo",)),
 }
 
 

@@ -124,6 +124,45 @@ def _worth_probing(function, language: str = "python") -> bool:
     return True
 
 
+def _scanner(language: str):
+    """Which reader can mine `language`, or None if no reader can.
+
+    ONE ANSWER, because two callers must not disagree: `_widen`, which mines, and `supported`,
+    which reports whether mining is possible at all. While those were derived separately a reader
+    could land with nothing else noticing -- which is exactly what happened when the tree-sitter
+    reader arrived and `core/capabilities.py` went on declaring go/rust/java/cpp able to reach the
+    repo scale only. The registry was not wrong about evidence; it was stale about mechanism.
+
+    THE PYTHON SCANNER IS NOT A GENERIC SOURCE PARSER. A checkout is only ever handed to the reader
+    for its own language: feeding a Go tree to `ast` and labelling the result Python would turn an
+    open-world source into a false call candidate. A language with no reader is refused by the
+    caller and stays eligible for the process-seam repo scale, which needs no miner.
+
+    The returned callable takes `(root, stem, commit)`, so a caller never needs to know which reader
+    answered or that the native one must be told its language.
+    """
+    key = (language or "").strip().lower()
+    if key in ("python", "python3"):
+        return scan
+    if key in ("javascript", "typescript"):
+        return scan_javascript
+    native = _NATIVE_ALIASES.get(key, key)
+    if scan_native.supported(native):
+        return lambda root, stem, commit: scan_native.scan(root, stem, commit, language=native)
+    return None
+
+
+def supported(language: str) -> bool:
+    """Whether any reader can mine `language` -- the call seam's mining half, as a question.
+
+    `core/` may not import a source layer to ask this, so `core/capabilities.py` states its own
+    judgement and a test holds that judgement against this answer. The registry decides what the
+    EVIDENCE supports; this decides what the MECHANISM supports; a disagreement is a bug in one of
+    them and the test says which.
+    """
+    return _scanner(language) is not None
+
+
 class GitHubFunctions:
     """Functions inside repositories, sourced from a GitHub repository search.
 
@@ -210,30 +249,23 @@ class GitHubFunctions:
 
         stem = full_name.rsplit("/", 1)[-1] or full_name
         language = str(getattr(repository, "language", "") or detail.get("language") or "").lower()
-        # The Python scanner is not a generic source parser. Never feed a non-Python checkout
-        # through it and then label the result as Python: that would silently downgrade an
-        # open-world source into a false call candidate. Until a language-specific call adapter is
-        # registered, the repository remains eligible only for the process-seam repo scale.
-        if language in {"python", "python3"}:
-            found = scan(root, stem, commit)
-        elif language in {"javascript", "typescript"}:
-            found = scan_javascript(root, stem, commit)
-        elif scan_native.supported(_NATIVE_ALIASES.get(language, language)):
-            # A statically typed checkout, read with its own tree-sitter grammar. Before this branch
-            # existed every one of these languages fell to the refusal below, so the three call
-            # scales could not produce a single Go, Rust, Java or C++ task -- not because the
-            # material was unsuitable but because nothing ever looked at it.
-            found = scan_native.scan(root, stem, commit,
-                                     language=_NATIVE_ALIASES.get(language, language))
-            if not found:
-                # The grammar read the checkout and found nothing it could type. That is a fact
-                # about this material, and it must not wear the same label as a language we cannot
-                # read at all -- otherwise a registered adapter looks like a missing one.
-                reason = "no-typeable-functions:%s" % language
-                self.rejection_counts[reason] = self.rejection_counts.get(reason, 0) + 1
-                return []
-        else:
+        # WHICH READER, asked in one place. `_scanner` holds the language-to-reader mapping so that
+        # this branch and `supported()` cannot drift apart -- and each reader is only ever given a
+        # checkout in its own language, because feeding a Go tree to Python's `ast` and labelling the
+        # result Python would turn an open-world source into a false call candidate.
+        scanner = _scanner(language)
+        if scanner is None:
+            # No reader for this language. Our gap, not the material's, and the repository stays
+            # eligible for the process-seam repo scale, which needs no miner.
             reason = "call-adapter-not-registered:%s" % (language or "unknown")
+            self.rejection_counts[reason] = self.rejection_counts.get(reason, 0) + 1
+            return []
+        found = scanner(root, stem, commit)
+        if not found and scan_native.supported(_NATIVE_ALIASES.get(language, language)):
+            # A typing reader ran and found nothing it could type. That is a fact about THIS
+            # material, and it must not wear the same label as a language we cannot read at all --
+            # otherwise a registered adapter is indistinguishable from a missing one.
+            reason = "no-typeable-functions:%s" % language
             self.rejection_counts[reason] = self.rejection_counts.get(reason, 0) + 1
             return []
         found = [function for function in found if _worth_probing(function, language)]
