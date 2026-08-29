@@ -26,22 +26,32 @@ from __future__ import annotations
 
 import json
 
-# What a mutant returns instead of the real answer, indexed by attempt. Both are
-# plausible-looking wrong answers rather than crashes: a mutant that throws is
-# detected by the wire, not by the probe's judgement, and would score the gate
-# far too generously.
-_WRONG = (
-    ("None", "null"),   # attempt 0: a missing value
-    ("0", "0"),         # attempt 1: a falsy-but-present value
-)
-
-# Languages whose runtime can resolve a module by name, and so can carry the table-driven
-# dispatcher. The rest need generated static dispatch.
+# What a mutant returns instead of the real answer: attempt 0 is a missing value, attempt 1 a
+# falsy-but-present one. Both are plausible-looking WRONG ANSWERS rather than crashes, because a
+# mutant that throws is detected by the wire rather than by the probe's judgement, and would score
+# the gate far too generously.
 #
-# One source of truth: the same entry drives `supported()`, so a newly added generator is
-# automatically a newly supported language. Do NOT maintain a separate tuple here -- a second list
-# of what is supported is a second place to forget one.
-DYNAMIC = ("python", "javascript", "typescript")
+# KEYED BY LANGUAGE, because "nothing" is spelled differently in each. This was a two-column tuple
+# chosen by `if language in ("javascript", "typescript")`, so Ruby -- which is neither -- was handed
+# Python's `None` and the mutant died with `NameError: uninitialized constant None`: a crash scored
+# as a detection, which is exactly the failure the paragraph above describes. A dict cannot have that
+# bug, and a missing entry is a KeyError at generation time rather than a silently mis-spelled mutant.
+_WRONG = {
+    "python": ("None", "0"),
+    "javascript": ("null", "0"),
+    "typescript": ("null", "0"),
+    "ruby": ("nil", "0"),
+}
+
+def languages() -> tuple:
+    """Which languages this module can generate a dispatcher for.
+
+    DERIVED FROM THE GENERATORS, because a hand-written list beside them is a second place to forget
+    one -- and that is not hypothetical: a `DYNAMIC` tuple used to live here carrying exactly this
+    meaning, the ruby generator was added, and the tuple was not updated. Its own comment warned
+    against itself ("a second list of what is supported is a second place to forget one").
+    """
+    return tuple(sorted(_GENERATORS))
 
 
 class Unsupported(RuntimeError):
@@ -96,10 +106,52 @@ def _javascript(dispatch: dict, wrong: str | None) -> str:
     )
 
 
+def _ruby(dispatch: dict, wrong: str | None) -> str:
+    if wrong is not None:
+        return ("def entry(op, *args)\n"
+                "  %s\n"
+                "end\n" % wrong)
+    # A DOTTED MODULE BECOMES A PATH. The adapter names an operation's module the way Python spells
+    # one -- `pkg.lib.sorting` -- because that is the shape the contract carries for every language.
+    # Ruby has no such namespace: `require_relative` takes a path, and `Observer.build` has copied the
+    # package to `<package_name>/...` beside this file, so the dots are separators.
+    #
+    # `require_relative` INSIDE the method, not at the top: a package holds files that raise on load
+    # for their own reasons, and requiring all of them up front would fail every operation because one
+    # of them is unloadable. Ruby caches a require, so the cost is paid once per operation.
+    #
+    # `send` because a top-level `def` in a required file is a private method on Object, which a plain
+    # call on an explicit receiver cannot reach -- the same reason serve.rb sends.
+    # WRITTEN WITH `=>`, NOT AS JSON. A JSON object is syntactically valid Ruby and means something
+    # else: `{"quick_sort": [...]}` builds a hash keyed by the SYMBOL :quick_sort, so
+    # `DISPATCH.key?("quick_sort")` was false for every operation and the dispatcher answered
+    # `unknown operation: quick_sort` about a name that was right there in the table. Caught by
+    # running real ruby; nothing about the generated text looks wrong.
+    entries = ",\n  ".join(
+        "%s => [%s, %s]" % (json.dumps(name), json.dumps(module.replace(".", "/")),
+                            json.dumps(symbol))
+        for name, (module, symbol) in sorted(dispatch.items()))
+    return ("DISPATCH = {\n  %s\n}\n"
+            "\n"
+            "def entry(op, *args)\n"
+            "  unless DISPATCH.key?(op)\n"
+            "    raise ArgumentError, \"unknown operation: #{op}\"\n"
+            "  end\n"
+            "  path, symbol = DISPATCH[op]\n"
+            "  require_relative path\n"
+            "  send(symbol.to_sym, *args)\n"
+            "end\n" % entries)
+
+
 _GENERATORS = {
     "python": _python,
     "javascript": _javascript,
     "typescript": _javascript,
+    # Ruby needs no types for this, for the same reason it needed no call bridge: the runtime resolves
+    # a name. The four static languages still refuse below -- their dispatchers need a concrete type
+    # per argument, and `source/package_adapters.py` emits a signature as a regex-captured STRING
+    # rather than typed parameters, so there is nothing yet to generate from.
+    "ruby": _ruby,
 }
 
 
@@ -120,8 +172,10 @@ def source(language: str, dispatch: dict, *, mutant: int | None = None) -> str:
         )
     wrong = None
     if mutant is not None:
-        column = 1 if language in ("javascript", "typescript") else 0
-        wrong = _WRONG[mutant % len(_WRONG)][column]
+        # `len(attempts)`, not `len(_WRONG)`: the table is keyed by language now, so its length is a
+        # count of languages and using it here would cycle through attempts that do not exist.
+        attempts = _WRONG[language]
+        wrong = attempts[mutant % len(attempts)]
     output = generator(dispatch, wrong)
     if language == "typescript":
         # The dispatcher is GENERATED COMMONJS (exports/require). When it is written to a .ts file

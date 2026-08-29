@@ -466,6 +466,14 @@ def scan(root: str, package: str = "", version: str = "", *, language: str = "")
                 if not _reachable(function, spec, source):
                     continue
                 symbol = _symbol(function, spec, source)
+                # A QUALIFIED NAME IS A DEFINITION OF SOMETHING DECLARED ELSEWHERE, and it sits at
+                # FILE SCOPE, so the nesting check above cannot see it. C++ writes a member's body as
+                # `void PyramidCU::BuildPyramid(int n) { ... }` outside the class, and a bridge
+                # emitting `BuildPyramid(arg0)` does not compile -- `'PyramidCU' has not been
+                # declared` was one of six real build refusals in a kernel/cpp batch. `Outer::Inner::
+                # deep` was mined whole, qualifier and all, which no caller could name either.
+                if "::" in symbol:
+                    continue
                 if not symbol or symbol.startswith("_"):
                     continue
                 schema = _parameters(function, spec, source)

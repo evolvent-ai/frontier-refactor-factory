@@ -45,12 +45,36 @@ def test_every_servable_language_has_a_shim_to_serve_it():
     The scale asks the shim for the subject's filename, so a language supported
     here but absent from TEMPLATES would raise KeyError deep inside `build()`,
     in the sandbox, after the candidate was paid for.
+
+    `languages()` is derived from the generators rather than listed beside them. A `DYNAMIC` tuple
+    used to carry this meaning by hand, and its own comment warned that a second list is a second
+    place to forget one -- which is precisely what happened when the ruby generator was added.
     """
-    for language in sorted(dispatch.DYNAMIC):
+    for language in dispatch.languages():
         assert language in shims.TEMPLATES, (
             "%s can be dispatched but has no shim to serve it" % language)
         assert dispatch.supported(language), (
-            "%s is listed as dynamic but has no generator" % language)
+            "%s is listed as dispatchable but has no generator" % language)
+
+
+def test_a_mutant_is_a_wrong_answer_in_the_subjects_own_language():
+    """A mutant that CRASHES is caught by the wire, not by the probe, and scores the gate too high.
+
+    This was a two-column tuple indexed by `if language in ("javascript", "typescript")`, so ruby --
+    being neither -- was handed Python's `None` and its mutants died with
+    `NameError: uninitialized constant None`. Real ruby found it; the generated text looks fine.
+
+    Keyed by language now, so a missing entry is a KeyError at generation time rather than a mutant
+    that is mis-spelled in a way only that language's runtime can tell you about.
+    """
+    spellings = {"python": "None", "javascript": "null", "typescript": "null", "ruby": "nil"}
+    for language in dispatch.languages():
+        assert language in spellings, "%s has a generator but no wrong-answer spelling" % language
+        missing = dispatch.source(language, DISPATCH, mutant=0)
+        assert spellings[language] in missing, (
+            "%s mutant 0 should return that language's own empty value" % language)
+        falsy = dispatch.source(language, DISPATCH, mutant=1)
+        assert "0" in falsy, language
 
 
 def test_the_python_dispatcher_and_its_mutants_are_valid_python():
@@ -145,11 +169,18 @@ def test_a_language_without_a_dispatcher_refuses_loudly(language):
 
 
 def test_the_dispatcher_covers_every_operation_it_was_given():
-    """A dispatcher missing an entry point fails the contract, not the candidate."""
-    for language in sorted(dispatch.DYNAMIC):
+    """A dispatcher missing an entry point fails the contract, not the candidate.
+
+    THE MODULE IS CHECKED IN EITHER SPELLING. The contract names a module the way Python spells one --
+    `mypkg.stem` -- because one shape has to serve every language. Ruby has no such namespace: its
+    dispatcher rewrites the dots to a path for `require_relative`, so demanding the dotted form here
+    would fail a dispatcher that is correct, and demanding only the path form would fail the other
+    three.
+    """
+    for language in dispatch.languages():
         source = dispatch.source(language, DISPATCH)
         for operation, (module, symbol) in DISPATCH.items():
             assert operation in source, (
                 "%s dispatcher omits operation %s" % (language, operation))
-            assert module in source, (
-                "%s dispatcher omits module %s" % (language, module))
+            assert module in source or module.replace(".", "/") in source, (
+                "%s dispatcher omits module %s in any spelling" % (language, module))

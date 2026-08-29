@@ -850,12 +850,40 @@ def _cpp(symbol: str, params: list, result: dict, package: str, owner: str = "")
     return "\n".join(lines) + "\n"
 
 
+def _reconcile_cpp(text: str) -> str:
+    """A mined C++ file with the standard headers hoisted above it.
+
+    THE BRIDGE IS APPENDED, so its own `#include <vector>` lands BELOW the subject -- which is legal
+    C++ and useless to a subject that needed the declaration earlier. Mined headers make this bite:
+    a `.h` is not a translation unit, it is written to be included, and it relies on its includer for
+    `<vector>` and `<string>`. Compiled standalone as subject.cpp it fails with
+
+        error: 'vector' was not declared in this scope
+
+    which is a fact about how we compiled it, not about the material. Hoisting the headers the bridge
+    needs anyway also gives a mined header the declarations its includer would have provided. Include
+    guards make the repetition free, and prepending cannot change the meaning of code that already
+    included them.
+    """
+    if _CPP_HOISTED in text:
+        return text
+    return "%s\n%s" % (_CPP_HOISTED, text)
+
+
+# Hoisted above a mined C++ file. Deliberately only the standard headers the generated bridge itself
+# uses: anything more would be guessing at what the subject needs, and a guess that happens to work
+# hides a candidate that should have been refused.
+_CPP_HOISTED = ("// --- frf: standard headers, hoisted so a mined header compiles standalone ---\n"
+                "#include <cstdio>\n#include <cstdlib>\n#include <cstring>\n"
+                "#include <string>\n#include <vector>\n#include <algorithm>")
+
+
 _GENERATORS = {"go": _go, "rust": _rust, "java": _java, "cpp": _cpp}
 
 # How a mined file is made to compile beside its shim. Separate from `_GENERATORS` because a language
 # can need one without the other: Rust reaches the subject as `mod subject`, so its file needs no
-# surgery at all, while Go and Java cannot compile without it.
-_RECONCILERS = {"go": _reconcile_go, "java": _reconcile_java}
+# surgery at all, while Go, Java and C++ cannot compile without it.
+_RECONCILERS = {"go": _reconcile_go, "java": _reconcile_java, "cpp": _reconcile_cpp}
 
 
 # What marks generated text inside a mined file, so appending twice appends once. A comment rather
