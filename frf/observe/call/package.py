@@ -107,30 +107,23 @@ def _serve_package_here(room: str, shim, material, *, language: str = "python") 
         destination = os.path.join(room, package_name)
         if os.path.abspath(package_root) != os.path.abspath(destination):
             shutil.copytree(package_root, destination, dirs_exist_ok=True)
-    if language in ("javascript", "typescript"):
-        adapter = os.path.join(room, "subject.js")
-        dispatch = {entry["name"]: (entry["module"], entry["symbol"])
-                    for entry in material.dispatch}
-        with open(adapter, "w", encoding="utf-8") as handle:
-            handle.write("const DISPATCH = %s;\nexports.entry = async function(op, ...args) {\n"
-                         "  if (!DISPATCH[op]) throw new Error('unknown operation');\n"
-                         "  const [mod, symbol] = DISPATCH[op];\n"
-                         "  let loaded;\n"
-                         "  try { loaded = await import(mod); } catch (e) { loaded = require(mod); }\n"
-                         "  const fn = loaded[symbol] || (loaded.default && loaded.default[symbol]) || loaded.default;\n"
-                         "  if (typeof fn !== 'function') throw new Error('export is not callable: ' + symbol);\n"
-                         "  return fn(...args);\n}\n" % json.dumps(dispatch, sort_keys=True))
-        _serve_here(room, shim, type("AdapterMaterial", (), {"source_path": adapter, "symbol": "entry"})(),
-                    language=language)
-        return
-    adapter = os.path.join(room, "subject.py")
-    dispatch = {entry["name"]: (entry["module"], entry["symbol"])
-                for entry in material.dispatch}
+    # THE DISPATCHER IS GENERATED IN ONE PLACE, and this was the second copy of it. What stood here
+    # was `if language in ("javascript", "typescript")` writing JS inline, and everything else falling
+    # through to a PYTHON dispatcher written to subject.py -- which is precisely the fault
+    # `observe/call/dispatch.py` was created to end, and says so in its own docstring: "The scale used
+    # to decide with `native = language in ("javascript", "typescript")`, which quietly sent the other
+    # six down the Python branch."
+    #
+    # `scales/package.py` was fixed to call the generator; this path was not, so the build tree got a
+    # correct dispatcher and the EMITTED task got a Python one. A ruby package task would have shipped
+    # `import importlib` in subject.py and failed replay for a reason that reads like broken material.
+    # Now a language with no dispatcher raises Unsupported here, loudly, as it does everywhere else.
+    from . import dispatch as call_dispatch
+
+    table = {entry["name"]: (entry["module"], entry["symbol"]) for entry in material.dispatch}
+    adapter = os.path.join(room, shims.TEMPLATES[language].subject)
     with open(adapter, "w", encoding="utf-8") as handle:
-        handle.write("import importlib\n_DISPATCH = %r\ndef entry(op, *args):\n"
-                     "    if op not in _DISPATCH: raise ValueError('unknown operation')\n"
-                     "    module, symbol = _DISPATCH[op]\n"
-                     "    return getattr(importlib.import_module(module), symbol)(*args)\n" % dispatch)
+        handle.write(call_dispatch.source(language, table))
     _serve_here(room, shim, type("AdapterMaterial", (), {"source_path": adapter, "symbol": "entry"})(),
                 language=language)
 

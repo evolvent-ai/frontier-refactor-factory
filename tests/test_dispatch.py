@@ -184,3 +184,51 @@ def test_the_dispatcher_covers_every_operation_it_was_given():
                 "%s dispatcher omits operation %s" % (language, operation))
             assert module in source or module.replace(".", "/") in source, (
                 "%s dispatcher omits module %s in any spelling" % (language, module))
+
+
+def test_the_emitted_package_task_gets_a_dispatcher_in_its_own_language():
+    """The task that ships must carry the same dispatcher the build tree used.
+
+    A SECOND COPY OF THIS GENERATOR LIVED IN `observe/call/package.py`, written inline: JS/TS got
+    JavaScript, and EVERY OTHER LANGUAGE fell through to a Python dispatcher in subject.py. That is
+    the exact fault `dispatch.py` was created to end -- its docstring names the old
+    `native = language in ("javascript", "typescript")` test as the bug -- reintroduced in the emit
+    path after `scales/package.py` was fixed.
+
+    So a ruby package task would have built correctly and SHIPPED `import importlib`, failing replay
+    for a reason that reads like broken material. A language with no dispatcher now refuses loudly
+    here, as it does everywhere else, instead of silently receiving Python.
+    """
+    import os
+    import tempfile
+
+    from frf.observe.call import package as emit, shims
+
+    class Material:
+        package_name = "mypkg"
+        symbol = "entry"
+        dispatch = [{"name": "quick_sort", "module": "mypkg.lib.sorting", "symbol": "quick_sort"}]
+        root = None
+        package_root = None
+
+    def emitted(language):
+        room = tempfile.mkdtemp()
+        material = Material()
+        material.root = room
+        material.package_root = os.path.join(room, "mypkg")
+        os.makedirs(material.package_root, exist_ok=True)
+        emit._serve_package_here(room, shims.TEMPLATES[language], material, language=language)
+        subject = shims.TEMPLATES[language].subject
+        return subject, open(os.path.join(room, subject), encoding="utf-8").read()
+
+    # The filename comes from the shim rather than a second hardcoded list, which is why TypeScript
+    # gets subject.ts here -- the inline copy wrote subject.js for it.
+    for language, marker in (("ruby", "send("), ("python", "importlib"),
+                             ("javascript", "exports.entry"), ("typescript", "exports.entry")):
+        subject, text = emitted(language)
+        assert subject == shims.TEMPLATES[language].subject
+        assert marker in text, "%s task did not get a %s dispatcher: %s" % (language, language, subject)
+
+    for language in ("go", "rust", "java", "cpp"):
+        with pytest.raises(dispatch.Unsupported):
+            emitted(language)
