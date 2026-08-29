@@ -120,7 +120,10 @@ def _serve_package_here(room: str, shim, material, *, language: str = "python") 
     # Now a language with no dispatcher raises Unsupported here, loudly, as it does everywhere else.
     from . import dispatch as call_dispatch
 
-    table = {entry["name"]: (entry["module"], entry["symbol"]) for entry in material.dispatch}
+    table = {entry["name"]: ((entry["module"], entry["symbol"])
+                             if not (entry.get("klass") or "")
+                             else (entry["module"], entry["symbol"], entry["klass"]))
+             for entry in material.dispatch}
     adapter = os.path.join(room, shims.TEMPLATES[language].subject)
     with open(adapter, "w", encoding="utf-8") as handle:
         handle.write(call_dispatch.source(language, table))

@@ -99,7 +99,9 @@ class Observer:
         destination = os.path.join(self.workspace, self.material.package_name)
         shutil.copytree(self.material.package_root, destination, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("__pycache__", ".git"))
-        dispatch = {entry["name"]: (entry["module"], entry["symbol"])
+        dispatch = {entry["name"]: ((entry["module"], entry["symbol"])
+                                    if not (entry.get("klass") or "")
+                                    else (entry["module"], entry["symbol"], entry["klass"]))
                     for entry in self.material.dispatch}
         self._dispatch = dispatch
         adapter = os.path.join(self.workspace, _subject_name(spec.language))
@@ -339,7 +341,8 @@ class Package:
                                              str(entry.get("module") or ""),
                                              str(entry.get("symbol") or ""),
                                              str(entry.get("signature") or ""),
-                                             bool(entry.get("json_safe", True)))
+                                             bool(entry.get("json_safe", True)),
+                                             str(entry.get("klass") or ""))
                            for entry in dispatch)
         contract = PackageContract(candidate.identity, str(detail.get("package_name") or ""),
                                    operations,

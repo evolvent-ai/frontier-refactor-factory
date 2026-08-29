@@ -43,6 +43,13 @@ class PackageOperation:
     symbol: str
     signature: str = ""
     json_safe: bool = True
+    # HOW A RUBY INSTANCE IS MADE, when the operation is an instance method. Ruby gems expose almost
+    # everything as instance methods on a class, and those cannot be reached by `send` on the main
+    # object the way a top-level `def` can: `MightyString::String.pop` needs an instance first. This
+    # names the class, so a generated dispatcher can do `const_get(klass).new(<ctor args>)` and then
+    # call `method` on what it built. Empty for a static method or a language with no such notion,
+    # which is why it is optional and why every other generator ignores it.
+    klass: str = ""
 
     def validate(self) -> None:
         if not self.name or not self.module or not self.symbol:

@@ -120,25 +120,54 @@ def _ruby(dispatch: dict, wrong: str | None) -> str:
     # for their own reasons, and requiring all of them up front would fail every operation because one
     # of them is unloadable. Ruby caches a require, so the cost is paid once per operation.
     #
-    # `send` because a top-level `def` in a required file is a private method on Object, which a plain
-    # call on an explicit receiver cannot reach -- the same reason serve.rb sends.
-    # WRITTEN WITH `=>`, NOT AS JSON. A JSON object is syntactically valid Ruby and means something
-    # else: `{"quick_sort": [...]}` builds a hash keyed by the SYMBOL :quick_sort, so
-    # `DISPATCH.key?("quick_sort")` was false for every operation and the dispatcher answered
-    # `unknown operation: quick_sort` about a name that was right there in the table. Caught by
-    # running real ruby; nothing about the generated text looks wrong.
+    # EVERY GEM SURFACE IS AN INSTANCE METHOD, which is the one real difference from the old top-level
+    # `def` convention. `send` alone can reach only a method on the main object; `MightyString::String
+    # #pop` needs an instance of that class first. So when the entry carries a `klass` -- the class
+    # that owns the method -- the dispatcher resolves it with `const_get` and calls `Klass.new` before
+    # the send. The adapter only records a class with a no-argument `initialize`, so `new` takes no
+    # arguments and every probe argument belongs to the method itself.
+    #
+    # A STATIC method (`def self.x`) carries the same `klass` and would fail on `new`, because Ruby
+    # disallows calling `new` on a module that has none... static methods are reached as
+    # `klass.method(*args)` without a `.new`; the adapter distinguishes the two through the symbol
+    # prefix `self.`.
+    # ONLY A REAL CLASS GOES IN THE TABLE. The first cut wrote `(module, symbol, klass or "")`, so an
+    # operation with no owning class -- a top-level `def` -- put an EMPTY STRING in the table, and
+    # Ruby's truthiness made it a klass: `Object.const_get("")` raised before `send` was ever reached,
+    # and every probe of a top-level method failed with a confusing const error. Absent is the only
+    # representation that means absent, so an unclassed entry stays a two-element array and the
+    # dispatcher's `path, symbol, klass = ...` yields nil for klass, which the `if klass` then
+    # correctly reads as "no instance to build".
+    # LOAD PATH, ONCE, SO GEM-INTERNAL `require` WORKS. A real gem's entry file says
+    # `require "human_time/version"` -- a load-path require, not a relative one. The dispatcher's own
+    # `require_relative` finds the entry file itself, but the file's internal requires look in
+    # `$LOAD_PATH`, and the room has no path set. Adding these up front is what a gem's own loader does
+    # (`lib = File.expand_path('../lib', __FILE__)`), and costing it per call would make every probe a
+    # path search; `require` is cached in Ruby, so the guard is measured safe.
     entries = ",\n  ".join(
-        "%s => [%s, %s]" % (json.dumps(name), json.dumps(module.replace(".", "/")),
-                            json.dumps(symbol))
-        for name, (module, symbol) in sorted(dispatch.items()))
+        "%s => [%s, %s%s]" % (json.dumps(name), json.dumps(module.replace(".", "/")),
+                              json.dumps(symbol),
+                              (", %s" % json.dumps(klass[0])) if klass else "")
+        for name, (module, symbol, *klass) in sorted(dispatch.items()))
     return ("DISPATCH = {\n  %s\n}\n"
             "\n"
+            "lib = File.expand_path('lib', __dir__)\n"
+            "$LOAD_PATH.unshift(lib) unless $LOAD_PATH.include?(lib)\n"
             "def entry(op, *args)\n"
             "  unless DISPATCH.key?(op)\n"
             "    raise ArgumentError, \"unknown operation: #{op}\"\n"
             "  end\n"
-            "  path, symbol = DISPATCH[op]\n"
+            "  path, symbol, klass = DISPATCH[op]\n"
             "  require_relative path\n"
+            "  if klass\n"
+            "    owner = Object.const_get(klass)\n"
+            "    if symbol.start_with?('self.')\n"
+            "      return owner.send(symbol.sub(/self\\./, '').to_sym, *args)\n"
+            "    end\n"
+            "    # The adapter records only classes whose `initialize` takes no arguments, so `new`\n"
+            "    # receives none and every probe argument is the method's own.\n"
+            "    return owner.new.send(symbol.to_sym, *args)\n"
+            "  end\n"
             "  send(symbol.to_sym, *args)\n"
             "end\n" % entries)
 

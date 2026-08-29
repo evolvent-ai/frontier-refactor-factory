@@ -20,11 +20,15 @@ class Operation:
     signature: str = ""
     language: str = ""
     json_safe: bool = True
+    # The class owning a Ruby instance/static method. See `PackageOperation.klass` for why: a gem
+    # surface is class methods, and a Ruby dispatcher has to instantiate the class before it can
+    # reach one. Empty for a top-level `def` and for every language without this notion.
+    klass: str = ""
 
     def to_json(self) -> dict:
         return {"name": self.name, "module": self.module, "symbol": self.symbol,
                 "signature": self.signature, "language": self.language,
-                "json_safe": self.json_safe}
+                "json_safe": self.json_safe, "klass": self.klass}
 
 
 def operations(root: str, language: str, package_name: str, package_root: str) -> list[dict]:
@@ -141,41 +145,155 @@ def _go(root, package_name, package_root):
 
 
 def _ruby(root, package_name, package_root):
+    """Ruby gem surface: class instance methods, which is what a gem actually exposes.
+
+    THE OLD REGULAR EXPRESSION MINED TOP-LEVEL `def`s -- and the real supply has none. Every gem
+    surveyed (mightystring, geometry, google_distance_matrix, human_time, jekyll-spaceship, gush,
+    perfect-shape) exposes its API as INSTANCE methods on a class: `MightyString::String#pop`, not
+    `def pop` at the top. Mining top-level defs therefore produced either nothing (emptying the
+    surface) or class methods that `send` cannot reach (raising NoMethodError on every probe, which
+    freeze reads as 100% discarded).
+
+    A RUBY INSTANCE METHOD NEEDS AN INSTANCE, so the operation carries the class that owns it --
+    `klass` -- and only classes with a no-argument `initialize` are servable. That is the one shape a
+    generated dispatcher can construct without guessing: `const_get(klass).new` takes no arguments
+    and the method receives all of them. Three of the surveyed gems (human_time,
+    google_distance_matrix, llm_docs_builder) expose exactly that shape, so the supply is real.
+
+    `static` methods (`def self.x`) were kept too: they are sensible on the main object, but the gem
+    convention puts them on named modules/classes, so they are recorded with their owning class and
+    reached as `klass.method(...)`.
+    """
+    parser = None
+    try:
+        from tree_sitter import Language, Parser
+        import tree_sitter_ruby
+        parser = Parser(Language(tree_sitter_ruby.language()))
+    except Exception:                                   # noqa: BLE001 -- absent grammar
+        return []
+
     result = []
     for directory, dirs, files in os.walk(package_root):
         dirs[:] = [d for d in dirs if not _skip(d)]
         for filename in files:
-            if filename.endswith(".rb"):
-                text = open(os.path.join(directory, filename), encoding="utf-8", errors="replace").read()
-                # RELATIVE TO THE REPO ROOT, WITH NO PACKAGE-NAME PREFIX. The dispatcher's
-                # `require_relative` resolves against the directory holding subject.rb, which is the
-                # room root after `_serve_package_here`'s copytree of `material.root` -- so the path
-                # the runtime sees is `<room>/lib/algo/sorting.rb`, and the module has to be
-                # `lib.algo.sorting` for `require_relative "lib/algo/sorting"` to find it.
-                #
-                # Prefixed with the package name -- `algo.lib.algo.sorting` -- the require path became
-                # `algo/lib/algo/sorting`, which `_serve_package_here` never creates: copytree only
-                # puts `material.root`'s own subtree there, and `lib/` is already inside it. Every
-                # ruby package task would have failed E7 with LoadError after passing every earlier
-                # gate. Because a ruby gem has no import-time package prefix -- the load path is the
-                # directory -- the correct module is the file path, not a dotted namespace.
-                rel_file = os.path.relpath(os.path.join(directory, filename), root)[:-3]
-                module = rel_file.replace(os.sep, ".")
-                for match in re.finditer(r"^[ \t]*def\s+([a-zA-Z_]\w*[!?=]?)", text, re.M):
-                    symbol = match.group(1)
-                    if symbol.startswith("_"):
-                        continue
-                    rest = text[match.end():]
-                    if rest[:1] == "(":
-                        signature = _call_signature(text, match.end())
-                    elif rest.split("\n", 1)[0].strip():
-                        continue  # parenless arguments; the name alone would misstate the arity
+            if not filename.endswith(".rb"):
+                continue
+            path = os.path.join(directory, filename)
+            raw = open(path, encoding="utf-8", errors="replace").read()
+            try:
+                tree = parser.parse(raw.encode("utf-8"))
+            except Exception:                            # noqa: BLE001 -- a grammar can reject
+                continue
+            rel_file = os.path.relpath(path, root)[:-3]
+            module = rel_file.replace(os.sep, ".")
+
+            def visit(node, klass):
+                # RUBY SPELLS THE TWO KINDS DIFFERENTLY. An instance method is `method`; a static one
+                # -- `def self.x` -- is `singleton_method`. The old traversal tested only `method`, so
+                # human_time's four `def self.x` helpers on the HumanTime MODULE were _never reached_
+                # and the surface mined as empty. Both kinds are servable; they just bind differently.
+                if node.type in ("method", "singleton_method"):
+                    name_node = node.child_by_field_name("name")
+                    if name_node is None:
+                        return
+                    name = raw[name_node.start_byte:name_node.end_byte]
+                    if name.startswith("_") or name == "initialize":
+                        return
+                    span = node.start_byte
+                    # A STATIC node is static by its type; an instance `def` is not, and the receiver
+                    # is only ever meaningful inside a class/module.
+                    self_def = node.type == "singleton_method"
+                    # `_call_signature` looks for a '(' after `span`; a parenless method -- `def
+                    # self.greater_than_aliases`, which human_time's real surface is full of -- has
+                    # none, so it returns None and the method is dropped. No parens means no
+                    # parameters, which `"()"` says plainly.
+                    signature = _call_signature(raw, span) or "()"
+                    if klass:
+                        # A STATIC method needs no instance -- `Klass.method(*args)` -- so it never
+                        # requires `new`-ability. Only an INSTANCE method does, and only a class with
+                        # a no-argument `initialize` is servable as one.
+                        if not self_def and not _ruby_class_newable(tree, klass, raw):
+                            return
+                        symbol = ("self." + name if self_def else name)
+                        result.append(Operation(name, module, symbol, signature,
+                                                "ruby", klass=klass).to_json())
+                    elif self_def:
+                        # A top-level `def self.x` is not valid; skip.
+                        return
                     else:
-                        signature = "()"
-                    if signature is None:
-                        continue
-                    result.append(Operation(symbol, module, symbol, signature, "ruby").to_json())
+                        result.append(Operation(name, module, name, signature,
+                                                "ruby").to_json())
+                for child in node.children:
+                    if child.type in ("class", "module"):
+                        name_node = _ruby_node_name(child)
+                        if name_node is None:
+                            continue
+                        sub = raw[name_node.start_byte:name_node.end_byte]
+                        qualified = "%s::%s" % (klass, sub) if klass else sub
+                        visit(child, qualified)
+                    elif child.type == "body_statement":
+                        for c in child.children:
+                            visit(c, klass)
+                    elif klass is None and child.type in ("method", "singleton_method"):
+                        visit(child, klass)
+
+            visit(tree.root_node, None)
     return _unique(result)
+
+
+def _ruby_node_name(node) -> object | None:
+    """The NAME child of a class/module node, found without relying on the grammar's field.
+
+    tree-sitter's Ruby grammar gives some (but not all) `class`/`module` nodes a usable `name`
+    field. A `module HumanTime; module String` nesting returns None for the second one, which is
+    where the old `child_by_field_name("name")` died mid-walk and silently dropped the remaining
+    methods of the file. The name is always the first `constant` or `identifier` child of the
+    declaration; children[0] is the keyword node, so the search starts at index 1.
+    """
+    for child in node.children[1:]:
+        if child.type in ("constant", "identifier", "scope_resolution", "constant_path"):
+            return child
+    return None
+
+
+def _ruby_class_newable(tree, klass: str, raw: str) -> bool:
+    """Whether `klass` can be constructed with no arguments.
+
+    `initialize` declared with no parameters is the one shape a dispatcher can call without guessing.
+    A class whose initialize takes arguments -- `Arc#initialize(center, radius, ...)`, which the
+    surveyed geometry gem is full of -- would need arguments the probe protocol has no place for, so
+    it is not servable and its instance methods are skipped rather than called wrongly.
+    """
+    const = klass.split("::")
+    node = tree.root_node
+    for part in const:
+        found = None
+        stack = [node]
+        while stack and found is None:
+            current = stack.pop()
+            if current.type in ("class", "module"):
+                name = _ruby_node_name(current)
+                if name is not None and raw[name.start_byte:name.end_byte] == part:
+                    found = current
+                    break
+            stack.extend(current.children)
+        if found is None:
+            return False
+        node = found
+    # We found the class; now search its body for a no-arg initialize.
+    newable = None
+    for child in node.children:
+        if child.type == "body_statement":
+            for c in child.children:
+                if c.type == "method":
+                    name = c.child_by_field_name("name")
+                    if name is not None and raw[name.start_byte:name.end_byte] == "initialize":
+                        params = c.child_by_field_name("parameters")
+                        if params is None or all(p.type in ("(", ")") for p in params.children):
+                            newable = True
+                        else:
+                            return False
+    return bool(newable)
 
 
 def _java(root, package_name, package_root):
