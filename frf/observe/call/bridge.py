@@ -897,12 +897,24 @@ def _reconcile_cpp(text: str) -> str:
     return "%s\n%s" % (_CPP_HOISTED, text)
 
 
-# Hoisted above a mined C++ file. Deliberately only the standard headers the generated bridge itself
-# uses: anything more would be guessing at what the subject needs, and a guess that happens to work
-# hides a candidate that should have been refused.
-_CPP_HOISTED = ("// --- frf: standard headers, hoisted so a mined header compiles standalone ---\n"
+# Hoisted above a mined C++ file: the standard headers the bridge itself uses, and the `using` that a
+# header's includer would have been carrying.
+#
+# WHY `using namespace std` AND NOT MORE HEADERS. A mined `.h` is written to be included, and the
+# algorithm headers that make up this supply say `vector<int>` and `min(a, b)` unqualified because the
+# `.cpp` that included them opened the namespace first. Compiled standalone they fail with
+# `'min' was not declared in this scope; did you mean 'std::min'?` -- a fact about how we compiled the
+# file, not about the material, which is precisely what reconciliation is for.
+#
+# It cannot hide a bad candidate. If the subject defines its own `min` at file scope, an unqualified
+# call becomes AMBIGUOUS rather than silently resolving to std -- a compile error, loudly refused. And
+# the generated bridge qualifies everything it touches (`std::string`, `std::vector`), so opening the
+# namespace changes nothing it does. Adding headers beyond these would be guessing at what the subject
+# needs; this is supplying what its own includer did.
+_CPP_HOISTED = ("// --- frf: what a mined header's includer would have provided ---\n"
                 "#include <cstdio>\n#include <cstdlib>\n#include <cstring>\n"
-                "#include <string>\n#include <vector>\n#include <algorithm>")
+                "#include <string>\n#include <vector>\n#include <algorithm>\n"
+                "using namespace std;")
 
 
 _GENERATORS = {"go": _go, "rust": _rust, "java": _java, "cpp": _cpp}

@@ -250,6 +250,27 @@ def test_reconciling_twice_is_reconciling_once():
     assert bridge.reconcile("go", once) == once
 
 
+def test_a_mined_cpp_header_is_given_what_its_includer_would_have_provided():
+    """A `.h` is written to be included, and this supply is full of them.
+
+    The algorithm headers that make up the C++ material say `vector<int>` and `min(a, b)` unqualified,
+    because the `.cpp` that included them opened the namespace first. Compiled standalone as
+    subject.cpp they failed a real batch with `'min' was not declared in this scope; did you mean
+    'std::min'?` -- a fact about how we compiled the file, not about the material.
+
+    This cannot hide a bad candidate: a subject defining its own `min` at file scope makes the
+    unqualified call AMBIGUOUS, which is a loud compile error, and the generated bridge qualifies
+    everything it touches, so opening the namespace changes nothing it does.
+    """
+    out = bridge.reconcile("cpp", "void f(vector<int>& v) { sort(v.begin(), v.end()); }\n")
+    assert "using namespace std;" in out
+    assert "#include <vector>" in out
+    assert "#include <algorithm>" in out
+    assert out.rstrip().endswith("}"), "the mined code must still be there, after the preamble"
+    # Idempotent: the mutant path re-materialises a file already at its destination.
+    assert bridge.reconcile("cpp", out) == out
+
+
 def test_a_language_needing_no_reconciliation_is_returned_unchanged():
     """Rust reaches its subject as `mod subject`, so its file needs no surgery.
 
