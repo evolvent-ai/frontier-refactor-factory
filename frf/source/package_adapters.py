@@ -337,20 +337,21 @@ def _java(root, package_name, package_root):
 
 
 def _c_cpp(root, package_name, package_root):
+    """C/C++ package operations, typed via `native_functions` like Go and Java."""
+    from . import native_functions as native
+
     result = []
-    for directory, dirs, files in os.walk(package_root):
-        dirs[:] = [d for d in dirs if not _skip(d)]
-        for filename in files:
-            if filename.endswith((".h", ".hpp")):
-                text = open(os.path.join(directory, filename), encoding="utf-8", errors="replace").read()
-                module = package_name + "." + os.path.relpath(os.path.join(directory, filename), root)
-                for match in re.finditer(r"\b((?:[A-Za-z_]\w*[\s*&]+)+)([A-Za-z_]\w*)\s*(?=\()", text):
-                    close_index = _close_paren(text, match.end())
-                    if close_index is None or text[close_index + 1:].lstrip()[:1] != ";":
-                        continue  # a definition or macro body, not a declared entry point
-                    params = " ".join(text[match.end():close_index + 1].split())
-                    returns, symbol = " ".join(match.group(1).split()), match.group(2)
-                    result.append(Operation(symbol, module, symbol, params + " -> " + returns, "cpp").to_json())
+    found = native.scan(root, package_name, "1.0", language="cpp")
+    seen = set()
+    for fn in found:
+        if fn.symbol in seen:
+            continue
+        seen.add(fn.symbol)
+        module = package_name + "." + os.path.relpath(os.path.dirname(fn.path), root).replace(os.sep, ".")
+        signature = "(%s)" % ", ".join(str(p["native"]) for p in fn.schema["params"])
+        result.append(Operation(fn.symbol, module, fn.symbol, signature, "cpp",
+                                params=tuple(dict(p) for p in fn.schema["params"]),
+                                result=dict(fn.result or {})).to_json())
     return _unique(result)
 
 

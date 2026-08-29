@@ -44,6 +44,7 @@ _WRONG = {
     "go": ("nil", "0"),
     "rust": ("Ok(crate::Json::Null)", "Ok(crate::Json::Number(0.0))"),
     "java": ("null", "0"),
+    "cpp": ("\"null\"", "0"),
 }
 
 def languages() -> tuple:
@@ -450,6 +451,82 @@ def _ruby(dispatch: dict, wrong: str | None) -> str:
             "end\n" % entries)
 
 
+
+
+
+def _static_cpp(dispatch: dict, wrong: str | None) -> str:
+    """A C++ package dispatcher: `extern "C" entry(json)` switching on operation name.
+
+    serve.c is compiled AS C and its JSON reader is static, so the dispatcher carries the reader
+    from `bridge._CPP_PREAMBLE` -- the same payload the single-function bridge ships. Every operation
+    is extracted and encoded with the bridge's own helpers (`_cpp_extract`/`_cpp_encode`), so C++
+    decoding changes propagate. All subject functions live in the same translation unit, called
+    unqualified.
+    """
+    from ..call import bridge
+
+    if wrong is not None:
+        return ('#include <cstring>\n'
+                'extern "C" const char *entry(const char *args_json) { (void)args_json; return %s; }\n'
+                % (wrong if wrong not in (None,) else '"null"'))
+    lines = [bridge._CPP_PREAMBLE.strip("\n"), ""]
+    # One helper per operation, each doing its own extraction and call.
+    for name, (_mod, sym, _klass, params, result) in sorted(dispatch.items()):
+        params = list(params or ())
+        result = dict(result or {})
+        lines.append("static const char *frf_call_%s(const char *args_json) {" % _cpp_slug(name))
+        lines.append("    const char *frf_at = args_json;")
+        lines.append("    frf::Value frf_parsed;")
+        lines.append('    if (!frf::parse(frf_at, frf_parsed) || frf_parsed.kind != frf::Value::Array) '
+                     'return frf_refuse("the arguments must be a JSON array");')
+        lines.append("    const std::vector<frf::Value> &frf_items = frf_parsed.items;")
+        lines.append("    if (frf_items.size() != %d) return frf_refuse(\"wrong number of arguments\");" % (len(params) + 1))
+        call_args = []
+        for index, p in enumerate(params):
+            k = str(p.get("kind", ""))
+            native = " ".join(str(p.get("native", "")).split())
+            extracted = bridge._cpp_extract(index, k, native, False)
+            # items[0] is the operation name the dispatcher matched on, so every parameter lives
+            # one slot further along. The bridge's extractor is written for a parameter-only list;
+            # shifting the reference here, once, keeps that function single-purpose.
+            lines.extend(line.replace("frf_items[%d]" % index, "frf_items[%d]" % (index + 1))
+                        for line in extracted)
+            call_args.append("frf_arg%d" % index)
+        kind = str(result.get("kind", ""))
+        if kind:
+            lines.append("    auto frf_value = %s(%s);" % (sym, ", ".join(call_args)))
+            lines.extend(bridge._cpp_encode(kind, "frf_value"))
+        else:
+            carrier = next((n for n, p in enumerate(params)
+                            if str(p.get("kind", "")).endswith("_array")), None)
+            if carrier is None:
+                lines.append("    %s(%s);" % (sym, ", ".join(call_args)))
+                lines.append('    return frf::own("null");')
+            else:
+                lines.append("    %s(%s);" % (sym, ", ".join(call_args)))
+                lines.extend(bridge._cpp_encode(str(params[carrier]["kind"]), "frf_arg%d" % carrier))
+        lines.append("}")
+        lines.append("")
+    lines.append('extern "C" const char *entry(const char *args_json) {')
+    lines.append("    const char *frf_at = args_json;")
+    lines.append("    frf::Value frf_parsed;")
+    lines.append('    if (!frf::parse(frf_at, frf_parsed) || frf_parsed.kind != frf::Value::Array) '
+                 'return frf_refuse("the arguments must be a JSON array");')
+    lines.append("    const std::vector<frf::Value> &frf_items = frf_parsed.items;")
+    lines.append('    if (frf_items.empty()) return frf_refuse("expected an operation name");')
+    lines.append('    if (frf_items[0].kind != frf::Value::String) return frf_refuse("operation name must be a string");')
+    lines.append("    const std::string frf_op = frf_items[0].text;")
+    for name, (_mod, sym, _klass, params, result) in sorted(dispatch.items()):
+        lines.append('    if (frf_op == %s) return frf_call_%s(args_json);' %
+                     (json.dumps(name), _cpp_slug(name)))
+    lines.append('    return frf_refuse(("unknown operation: " + frf_op).c_str());')
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def _cpp_slug(name: str) -> str:
+    import re as _re
+    return _re.sub(r"[^A-Za-z0-9_]", "_", name)
 _GENERATORS = {
     "python": _python,
     "javascript": _javascript,
@@ -465,6 +542,7 @@ _GENERATORS = {
     "go": _static_go,
     "rust": _static_rust,
     "java": _static_java,
+    "cpp": _static_cpp,
 }
 
 
