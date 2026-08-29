@@ -312,19 +312,27 @@ def _ruby_class_newable(tree, klass: str, raw: str) -> bool:
 
 
 def _java(root, package_name, package_root):
+    """Java package operations, typed and class-owned via `native_functions`.
+
+    Same change as `_go`: a generated static dispatcher needs a concrete type per argument and the
+    class that owns the method, which the regex `signature` string cannot give. `native_functions`
+    reads those from the grammar.
+    """
+    from . import native_functions as native
+
     result = []
-    for directory, dirs, files in os.walk(package_root):
-        dirs[:] = [d for d in dirs if not _skip(d)]
-        for filename in files:
-            if filename.endswith(".java"):
-                text = open(os.path.join(directory, filename), encoding="utf-8", errors="replace").read()
-                module = package_name + "." + os.path.relpath(os.path.join(directory, filename), root)[:-5].replace(os.sep, ".")
-                for match in re.finditer(r"\bpublic\s+(?:static\s+)?([\w<>\[\], ]+?)\s+([A-Za-z_]\w*)\s*\(", text):
-                    params = _call_signature(text, match.end() - 1)
-                    if params is None:
-                        continue
-                    returns, symbol = " ".join(match.group(1).split()), match.group(2)
-                    result.append(Operation(symbol, module, symbol, params + " -> " + returns, "java").to_json())
+    found = native.scan(root, package_name, "1.0", language="java")
+    seen = set()
+    for fn in found:
+        if fn.symbol in seen:
+            continue
+        seen.add(fn.symbol)
+        module = package_name + "." + os.path.relpath(os.path.dirname(fn.path), root).replace(os.sep, ".")
+        signature = "(%s)" % ", ".join(str(p["native"]) for p in fn.schema["params"])
+        result.append(Operation(fn.symbol, module, fn.symbol, signature, "java",
+                                klass=fn.owner,
+                                params=tuple(dict(p) for p in fn.schema["params"]),
+                                result=dict(fn.result or {})).to_json())
     return _unique(result)
 
 

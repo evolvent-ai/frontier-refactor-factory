@@ -43,6 +43,7 @@ _WRONG = {
     "ruby": ("nil", "0"),
     "go": ("nil", "0"),
     "rust": ("Ok(crate::Json::Null)", "Ok(crate::Json::Number(0.0))"),
+    "java": ("null", "0"),
 }
 
 def languages() -> tuple:
@@ -193,6 +194,92 @@ def _static_go(dispatch: dict, wrong: str | None) -> str:
 
 def _unsupported(message: str):
     raise Unsupported(message)
+
+
+def _static_java(dispatch: dict, wrong: str | None) -> str:
+    """A Java package dispatcher inside `Subject`, matching what Serve.java reflects for.
+
+    `entry(List<Object> args)` is the same single-argument shape; args[0] is the operation name.
+    Each operation calls its owning class's static method (`Owner.method(...)`), and the converter
+    helpers reuse `bridge._JAVA_CONVERTERS` so decoding changes propagate.
+    """
+    from ..call import bridge
+
+    if wrong is not None:
+        return ("public class Subject {\n"
+                "    public static Object entry(java.util.List<Object> args) {\n"
+                "        return %s;\n"
+                "    }\n"
+                "}\n" % wrong)
+    lines = ["public class Subject {"]
+    used = []
+    for _name, (_mod, _sym, owner, params, _res) in sorted(dispatch.items()):
+        if owner:
+            continue  # owner is class-level, not per kind
+        for p in list(params or ()):
+            k = str(p.get("kind", ""))
+            if k in bridge._JAVA_CONVERTERS and k not in used:
+                used.append(k)
+    # kinds may come from any op: collect across all, not just owner-less ones
+    used = []
+    for _name, (_mod, _sym, _owner, params, _res) in sorted(dispatch.items()):
+        for p in list(params or ()):
+            k = str(p.get("kind", ""))
+            if k in bridge._JAVA_CONVERTERS and k not in used:
+                used.append(k)
+    for k in used:
+        lines.append(bridge._JAVA_CONVERTERS[k][1].strip("\n"))
+    for k, dep in (("int_array", "int"), ("float_array", "float")):
+        if k in used and dep not in used:
+            lines.append(bridge._JAVA_CONVERTERS[dep][1].strip("\n"))
+    box_needed = any(dict(res or {}).get("kind", "").endswith("_array")
+                     for _n, _m, _o, _p, res in dispatch.values())
+    if box_needed:
+        lines.append(bridge._java_box_helper("long", "int_array").rstrip("\n"))
+    lines.append("")
+    lines.append("    public static Object entry(java.util.List<Object> args) {")
+    lines.append("        if (args.isEmpty()) throw new IllegalArgumentException(\"expected an operation name\");")
+    lines.append("        String op = (String) args.get(0);")
+    lines.append("        java.util.List<Object> rest = args.subList(1, args.size());")
+    for name, (_mod, _sym, owner, params, res) in sorted(dispatch.items()):
+        params = list(params or ())
+        res = dict(res or {})
+        lines.append("        if (%s.equals(op)) {" % json.dumps(name))
+        if not owner:
+            return _unsupported("a Java package operation needs its owning class")
+        lines.append("            if (rest.size() != %d) throw new IllegalArgumentException("
+                     '\"expected %d argument(s), got \" + rest.size());' % (len(params), len(params)))
+        call_args = []
+        for index, p in enumerate(params):
+            k = str(p.get("kind", ""))
+            conv = bridge._JAVA_CONVERTERS.get(k)
+            if conv is None:
+                return _unsupported("no Java conversion for a %r argument" % k)
+            native = " ".join(str(p.get("native", "")).split()) or bridge._JAVA_OWNED[k]
+            owned = bridge._JAVA_OWNED[k]
+            lines.append("            %s arg%d = %s(rest.get(%d));" % (owned, index, conv[0], index))
+            if native != owned:
+                if k.endswith("_array"):
+                    element = bridge._java_element(native)
+                    lines.append("            %s[] arg%dc = new %s[arg%d.length];" % (element, index, element, index))
+                    lines.append("            for (int i = 0; i < arg%d.length; i++) arg%dc[i] = (%s) arg%d[i];"
+                                 % (index, index, element, index))
+                    call_args.append("arg%dc" % index)
+                else:
+                    lines.append("            %s arg%dc = (%s) arg%d;" % (native, index, native, index))
+                    call_args.append("arg%dc" % index)
+            else:
+                call_args.append("arg%d" % index)
+        kind = str(res.get("kind", ""))
+        if kind.endswith("_array"):
+            lines.append("            return frfBox(%s.%s(%s));" % (owner, _sym, ", ".join(call_args)))
+        else:
+            lines.append("            return %s.%s(%s);" % (owner, _sym, ", ".join(call_args)))
+        lines.append("        }")
+    lines.append("        throw new IllegalArgumentException(\"unknown operation: \" + op);")
+    lines.append("    }")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
 
 
 
@@ -377,6 +464,7 @@ _GENERATORS = {
     # `native_functions` (see package_adapters), which reads types off the grammar.
     "go": _static_go,
     "rust": _static_rust,
+    "java": _static_java,
 }
 
 
