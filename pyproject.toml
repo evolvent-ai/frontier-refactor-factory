@@ -45,7 +45,14 @@ include = ["frf*"]
 [tool.setuptools.package-data]
 # The shims are data, not importable code: they are written into a task and run there, by whichever
 # language the subject is in. They have to ship with the wheel.
-"frf.observe.call.shims" = ["*.py", "*.go", "*.js", "*.rb"]
+#
+# ONE ENTRY PER TEMPLATE THAT EXISTS, and the list was wrong: it named .py/.go/.js/.rb, so `serve.c`,
+# `serve.rs` and `Serve.java` were left out of the wheel. That failure is SILENT and it lies about a
+# design claim -- `shims.available()` answers by asking whether the template file exists, so an
+# installed wheel reported c, cpp, rust and java as languages this factory cannot serve, while the
+# repository reported that it can. A missing template is indistinguishable from an unsupported
+# language, which is the confusion the shim table exists to prevent.
+"frf.observe.call.shims" = ["*.py", "*.c", "*.go", "*.java", "*.js", "*.rb", "*.rs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

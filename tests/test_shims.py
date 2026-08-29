@@ -33,6 +33,31 @@ def test_every_registered_language_has_its_template_on_disk():
             "%s is registered but %s is missing" % (language, shim.template))
 
 
+def test_every_template_is_declared_as_package_data():
+    """A template in the repository but not in the wheel is a language that vanishes on install.
+
+    NOT COVERED BY THE TEST ABOVE, which asks the filesystem and is answered by the checkout. The
+    wheel is built from an explicit glob list in pyproject.toml, and that list said
+    `["*.py", "*.go", "*.js", "*.rb"]` -- leaving out `serve.c`, `serve.rs` and `Serve.java`. Every
+    structural check passed, because all three files are right there in the repository.
+
+    The failure is silent AND it inverts a design claim: `available()` answers by asking whether the
+    template file exists, so an installed wheel reported c, cpp, rust and java as languages this
+    factory cannot serve while the repository reported that it can. A missing template is
+    indistinguishable from an unsupported language, which is the confusion the table exists to end.
+    """
+    import tomllib
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "pyproject.toml"), "rb") as handle:
+        config = tomllib.load(handle)
+    patterns = config["tool"]["setuptools"]["package-data"]["frf.observe.call.shims"]
+    suffixes = {pattern.removeprefix("*") for pattern in patterns}
+    uncovered = sorted({shim.template for shim in shims.TEMPLATES.values()
+                        if not any(shim.template.endswith(s) for s in suffixes)})
+    assert not uncovered, (
+        "these templates ship in no wheel glob %s: %s" % (sorted(patterns), uncovered))
+
+
 def test_every_language_declares_the_tool_that_actually_starts_it():
     """`tool` is what `usable()` checks, so a typo there disables the language silently."""
     for language, shim in sorted(shims.TEMPLATES.items()):
