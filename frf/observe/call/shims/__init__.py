@@ -51,9 +51,20 @@ class Shim:
     build: tuple = ()              # argv lists run once, in the workspace, before serving
     tool: str = ""                 # the executable that must exist for any of this to work
     # Where a GENERATED BRIDGE is written, for a shim that cannot bind a mined symbol itself. Empty
-    # for the dynamic shims, which need none. A language that needs one also has to name `{bridge}`
-    # in its build argv, or the file would be written and never compiled.
+    # for the dynamic shims, which need none.
+    #
+    # A SEPARATE FILE OR THE SUBJECT ITSELF, and the compiler decides which. Go names every file on
+    # the command line, so `bridge.go` is its own translation unit -- and must be named in the build
+    # argv as `{bridge}`, or it is written and never compiled. Rust names only the shim: `serve.rs`
+    # reaches the subject as `mod subject;`, so a third file would be invisible to rustc. Setting this
+    # equal to `subject` means the bridge is APPENDED to the subject, which is also why it needs no
+    # argv slot -- and why, being one module, it can call the mined function by its plain name.
     bridge: str = ""
+
+    @property
+    def bridge_is_subject(self) -> bool:
+        """Whether the bridge is appended to the subject rather than written beside it."""
+        return bool(self.bridge) and self.bridge == self.subject
     # WHETHER THIS SHIM CAN BIND A MINED FUNCTION BY ITSELF. The third thing a call seam needs, and
     # the one that is easy to miss because two of them are so visible.
     #
@@ -103,11 +114,16 @@ class Shim:
         # a binding and so has no bridge file. Naming a file that was never written fails the build
         # with a message about a missing path, which says nothing about either the subject or the
         # bridge. Written, it is compiled; not written, it is dropped from the command.
-        bridge_path = slots["bridge"]
+        # ONLY A SEPARATE BRIDGE CAN BE ABSENT. When the bridge IS the subject -- rust, java, cpp, where
+        # the generated entry is appended to the mined file -- there is nothing to drop, and dropping
+        # it removed the SUBJECT from the build: `undefined reference to entry_error` for an
+        # unbridged C++ subject that declares its own entry. A subject is always compiled.
+        bridge_path = slots["bridge"] if not self.bridge_is_subject else ""
         build = []
         for argv in self.build:
             resolved = [part.format(**slots) for part in argv]
-            build.append([part for part in resolved if part != bridge_path or bridged])
+            build.append([part for part in resolved
+                          if not bridge_path or part != bridge_path or bridged])
         return tuple(build), [part.format(**slots) for part in self.run]
 
 
@@ -149,13 +165,20 @@ TEMPLATES = {
     # on disk the linker never sees, which fails as `undefined: Entry`.
     "go": Shim("serve.go", "subject.go", ("{binary}",), tool="go", bridge="bridge.go",
                build=(("go", "build", "-o", "{binary}", "{entry}", "{bridge}", "{subject}"),)),
-    "rust": Shim("serve.rs", "subject.rs", ("{binary}",), tool="rustc",
+    # THE BRIDGE IS THE SUBJECT FILE, because rustc is handed only the shim and reaches the subject as
+    # `mod subject;` -- a third file would be invisible to the compiler. So the generated `entry` is
+    # APPENDED to the mined source, which also puts the mined function in scope under its plain name.
+    "rust": Shim("serve.rs", "subject.rs", ("{binary}",), tool="rustc", bridge="subject.rs",
                  # The subject is reached as `mod subject;` from the shim, so only the shim is named
                  # to the compiler and the subject is found beside it.
                  build=(("rustc", "-O", "--edition", "2021", "-o", "{binary}", "{entry}"),)),
     "c": Shim("serve.c", "subject.c", ("{binary}",), tool="cc",
               build=(("cc", "-std=c11", "-O2", "-o", "{binary}", "{entry}", "{subject}"),)),
-    "cpp": Shim("serve.c", "subject.cpp", ("{binary}",), tool="c++",
+    # THE BRIDGE IS THE SUBJECT FILE here too, and for a third distinct reason: serve.c is compiled AS
+    # C, so it cannot hold C++ at all, and its JSON parser is `static` -- unreachable from another
+    # translation unit. The bridge therefore carries its own reader and is appended to subject.cpp,
+    # where the mined function is already declared above it and needs no synthesised prototype.
+    "cpp": Shim("serve.c", "subject.cpp", ("{binary}",), tool="c++", bridge="subject.cpp",
                 # The C shim serves C++ too: it speaks the wire and calls one extern "C" entry
                 # point, which is a boundary C++ already has. A second near-identical template
                 # would be a copy to keep in step for no behaviour of its own.
@@ -163,7 +186,12 @@ TEMPLATES = {
                         "{workdir}/serve.o"),
                        ("c++", "-std=c++17", "-O2", "-o", "{binary}", "{workdir}/serve.o",
                         "{subject}"))),
+    # THE BRIDGE IS THE SUBJECT FILE, because Serve.java reflects for `Class.forName("Subject")` -- so
+    # the generated class has to BE `Subject`, and a Java file may hold several top-level classes as
+    # long as the public one matches the filename. `Subject.java` therefore holds the mined class with
+    # its `public` stripped (see `bridge._reconcile_java`) and `public class Subject` beside it.
     "java": Shim("Serve.java", "Subject.java", ("java", "-cp", "{workdir}", "Serve"), tool="javac",
+                 bridge="Subject.java",
                  build=(("javac", "-d", "{workdir}", "{entry}", "{subject}"),)),
 }
 
@@ -229,16 +257,18 @@ def materialise(workdir: str, language: str, subject_path: str,
     shim = load(language)
     os.makedirs(workdir, exist_ok=True)
     bridged = bool(binding and shim.bridge)
+    destination = os.path.join(workdir, shim.subject)
+    generated = ""
     if bridged:
         # Imported here rather than at module scope: `bridge` is a sibling in this package and only
         # this branch needs it, so a shim table with no static language stays importable on its own.
         from .. import bridge as bridges
-        with open(os.path.join(workdir, shim.bridge), "w", encoding="utf-8") as handle:
-            handle.write(bridges.source(language, symbol=symbol,
-                                        params=binding.get("params") or (),
-                                        result=binding.get("result") or {},
-                                        package=str(binding.get("package") or "")))
-    destination = os.path.join(workdir, shim.subject)
+        generated = bridges.source(language, symbol=symbol,
+                                   params=binding.get("params") or (),
+                                   result=binding.get("result") or {},
+                                   package=str(binding.get("package") or ""),
+                                   owner=str(binding.get("owner") or ""))
+
     if shim.bridge:
         # A STATIC SUBJECT IS RECONCILED, NOT JUST COPIED. Go requires every file in a directory to
         # declare one package, and mined material declares its own -- `package sort` beside the
@@ -247,13 +277,22 @@ def materialise(workdir: str, language: str, subject_path: str,
         # that ships a program also has its own `func main`, which collides with the shim's.
         #
         # Read-then-write rather than copyfile, and it is deliberately safe for the mutant path,
-        # which materialises a file that is ALREADY at the destination: the text is fully read before
-        # anything is written, and `reconcile` is idempotent, so reconciling twice is reconciling.
+        # which can materialise a file that is ALREADY at the destination: the text is fully read
+        # before anything is written, and both `reconcile` and `attach` are idempotent.
         from .. import bridge as bridges
         with open(subject_path, encoding="utf-8", errors="surrogateescape") as handle:
-            text = handle.read()
+            text = bridges.reconcile(language, handle.read())
+        # SUBJECT AND BRIDGE IN ONE FILE, when the compiler is handed only the shim. rustc reaches the
+        # subject as `mod subject;`, so a separate bridge.rs would never be compiled -- writing it
+        # first and the subject second, as this function used to, silently overwrote it. Appended
+        # here, in the one place that knows both texts.
+        if bridged and shim.bridge_is_subject:
+            text = bridges.attach(text, generated)
         with open(destination, "w", encoding="utf-8", errors="surrogateescape") as handle:
-            handle.write(bridges.reconcile(language, text))
+            handle.write(text)
+        if bridged and not shim.bridge_is_subject:
+            with open(os.path.join(workdir, shim.bridge), "w", encoding="utf-8") as handle:
+                handle.write(generated)
     # A source that is ALREADY where it needs to be is not an error. It happens whenever the file
     # is conventionally named -- `subject.py` served as python -- and most of all in the mutant
     # path, which writes a perturbed copy into a scratch directory under exactly this name and then

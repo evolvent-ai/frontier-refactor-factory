@@ -130,6 +130,11 @@ _GRAMMARS = {
         # Rust has no package clause a bridge must match: the shim reaches the subject as
         # `mod subject`, so the file's own name is the declaration.
         "package_node": "",
+        # UNREACHABLE BY ITS PLAIN NAME. A bridge calls the mined function as `symbol(args)`, so an
+        # associated function inside `impl T` needs `T::symbol` and one inside `mod inner` needs
+        # `inner::symbol`. Neither carries a `self_parameter`, so the receiver refusal does not catch
+        # them, and a bridge generated for one does not compile -- charged to the material.
+        "skip_nested_in": ("impl_item", "mod_item", "trait_item"),
         "skip_dirs": {"target", "tests", ".git"},
         "skip_files": (),
     },
@@ -149,6 +154,13 @@ _GRAMMARS = {
         # The bridge is generated as class `Subject`, which the shim reflects for; a package
         # declaration in the mined file would put the real symbol somewhere else, so it is read.
         "package_node": "package_declaration",
+        # EVERY JAVA METHOD IS IN A CLASS, so nesting cannot be the test -- reachability is. A bridge
+        # calls `Owner.method(...)`, which needs no instance only when the method is static. An
+        # instance method would need a constructor this factory cannot know how to call, and the
+        # generated bridge would not compile.
+        "require_static": True,
+        # Which class owns the method, so the bridge can name it.
+        "owner_nodes": ("class_declaration",),
         "skip_dirs": {"target", "build", "test", ".git"},
         "skip_files": ("Test.java",),
     },
@@ -166,6 +178,10 @@ _GRAMMARS = {
         "result_field": "type",
         # A namespace, if the file opens one, is part of the name the bridge has to call.
         "package_node": "namespace_definition",
+        # A member function needs an instance, and a namespaced one needs qualifying -- neither is
+        # callable as `symbol(args)`, which is what the bridge emits. The C shim also reaches the
+        # subject through `extern "C"`, so only a free function at file scope can be bound.
+        "skip_nested_in": ("class_specifier", "struct_specifier", "namespace_definition"),
         "skip_dirs": {"build", "test", "tests", ".git", "third_party"},
         "skip_files": (),
     },
@@ -344,6 +360,49 @@ def _declared_package(tree, spec: dict, source: bytes) -> str:
     return ""
 
 
+def _reachable(function, spec: dict, source: bytes) -> bool:
+    """Whether a bridge can call this function by name, with no instance and no qualification.
+
+    THE SAME CLASS OF FAULT AS A RECEIVER, arriving without one. A bridge emits `symbol(args)`, so:
+
+        Rust  -- `impl T { fn assoc(a: i64) }` needs `T::assoc`, `mod inner { fn f() }` needs
+                 `inner::f`. Neither has a `self_parameter`, so the receiver check above passes them
+                 straight through, and the generated bridge fails to compile.
+        C++   -- a member function needs an instance and a namespaced one needs qualifying; the C shim
+                 also reaches the subject through `extern "C"`, which a member cannot be.
+        Java  -- every method is inside a class, so nesting cannot be the test. `Owner.method(...)`
+                 needs no instance only when the method is static; an instance method would need a
+                 constructor this factory has no way to call.
+
+    Each of those is a build failure charged to the MATERIAL, which is what the whole-function
+    refusals in this file exist to prevent.
+    """
+    forbidden = spec.get("skip_nested_in") or ()
+    if forbidden:
+        parent = function.parent
+        while parent is not None:
+            if parent.type in forbidden:
+                return False
+            parent = parent.parent
+    if spec.get("require_static"):
+        modifiers = next((child for child in function.children if child.type == "modifiers"), None)
+        if modifiers is None or "static" not in _text(source, modifiers).split():
+            return False
+    return True
+
+
+def _owner(function, spec: dict, source: bytes) -> str:
+    """The class a static method belongs to, so a bridge can call `Owner.method(...)`. "" if none."""
+    for wanted in spec.get("owner_nodes") or ():
+        parent = function.parent
+        while parent is not None:
+            if parent.type == wanted:
+                name = parent.child_by_field_name("name")
+                return _text(source, name).strip() if name is not None else ""
+            parent = parent.parent
+    return ""
+
+
 def _symbol(function, spec: dict, source: bytes) -> str:
     name_node = function.child_by_field_name(spec["name_field"])
     if name_node is None:
@@ -401,6 +460,11 @@ def scan(root: str, package: str = "", version: str = "", *, language: str = "")
                 # `receiver` field; Rust's `self_parameter` is caught in `_parameters`.
                 if function.child_by_field_name("receiver") is not None:
                     continue
+                # And a function a bridge cannot NAME is refused for the same reason -- see
+                # `_reachable`. This catches what the receiver check cannot: an `impl` block, a `mod`,
+                # a C++ member, a non-static Java method.
+                if not _reachable(function, spec, source):
+                    continue
                 symbol = _symbol(function, spec, source)
                 if not symbol or symbol.startswith("_"):
                     continue
@@ -422,6 +486,9 @@ def scan(root: str, package: str = "", version: str = "", *, language: str = "")
                 found.append(SimpleNamespace(
                     package=package, version=version, module=module, symbol=symbol,
                     path=path, schema={"params": schema}, doc="",
-                    result=result, declared_package=declared))
+                    result=result, declared_package=declared,
+                    # Which class holds a static method, so a Java bridge can call `Owner.method(...)`.
+                    # "" for the languages whose functions stand at file scope.
+                    owner=_owner(function, spec, source)))
     found.sort(key=lambda item: (item.module, item.symbol))
     return found

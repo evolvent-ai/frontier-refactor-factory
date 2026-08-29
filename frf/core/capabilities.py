@@ -76,12 +76,19 @@ _REGISTRY: dict[str, LanguageCapability] = {
     # static dispatcher, which `observe/call/dispatch.py` does not have for Go and refuses loudly
     # rather than guessing.
     "go": LanguageCapability("go", "call-capable", "go", ("kernel", "module", "repo")),
-    "rust": LanguageCapability("rust", "repo-capable", "rust", ("repo",),
-                               reason="mined symbols need a generated call bridge"),
-    "java": LanguageCapability("java", "repo-capable", "java", ("repo",),
-                               reason="mined symbols need a generated call bridge"),
-    "cpp": LanguageCapability("cpp", "repo-capable", "cpp", ("repo",),
-                              reason="mined symbols need a generated call bridge"),
+    # ALL THREE PARTS EXIST FOR THESE THREE, each needing a differently shaped bridge -- and that is a
+    # claim about MECHANISM, which is the rung `call-capable` names. It is deliberately NOT the claim
+    # `certified` makes: unlike go, which carries an attested subject, these have been proven against
+    # real toolchains (rustc 1.83, javac 21, g++ 13.3) but have produced no graded task yet. A batch
+    # promotes them further; nothing here should.
+    #
+    # Each bridge lives INSIDE the subject file rather than beside it, for three different reasons:
+    # rustc is handed only the shim and reaches the subject as `mod subject`; Serve.java reflects for
+    # `Class.forName("Subject")`, so the generated class must be that class; serve.c is compiled as C
+    # and its JSON reader is `static`, so the C++ bridge carries a reader of its own.
+    "rust": LanguageCapability("rust", "call-capable", "rust", ("kernel", "module", "repo")),
+    "java": LanguageCapability("java", "call-capable", "java", ("kernel", "module", "repo")),
+    "cpp": LanguageCapability("cpp", "call-capable", "cpp", ("kernel", "module", "repo")),
     # RUBY HAS ALL THREE, and needed no bridge for the third -- only the symbol. serve.rb splatted any
     # arity from the start but hard-coded the name `entry`, which was true of the file and not of the
     # language: a dynamic runtime resolves a name, so `send(ENTRY, *args)` and one argv slot replaced

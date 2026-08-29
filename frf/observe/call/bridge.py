@@ -113,7 +113,7 @@ _GO_NATIVE_OF_KIND = {
 }
 
 
-def _go(symbol: str, params: list, result: dict, package: str) -> str:
+def _go(symbol: str, params: list, result: dict, package: str, owner: str = "") -> str:
     lines = ["package main", "", 'import "fmt"', ""]
     used: list = []
     body = []
@@ -216,12 +216,668 @@ def _reconcile_go(text: str) -> str:
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 
-_GENERATORS = {"go": _go}
+# ----------------------------------------------------------------------------------- Rust
+#
+# The bridge is APPENDED TO THE SUBJECT here, not written beside it: `rustc -o bin serve.rs` names
+# only the shim, which reaches the subject as `mod subject`, so a third file would be invisible to the
+# compiler. Being one module has a compensating benefit -- the mined function is in scope under its
+# plain name, which is why `_reachable` refuses anything inside an `impl` or a `mod`.
+_RUST_CONVERTERS = {
+    "int": ("frf_i64", """
+fn frf_i64(value: &crate::Json) -> Result<i64, String> {
+    // JSON has one number type, so an integer arrives as f64. A non-integral value is REFUSED rather
+    // than truncated: dropping .5 would have the subject answer a question it was not asked.
+    match value.as_f64() {
+        Some(number) if number.fract() == 0.0 => Ok(number as i64),
+        _ => Err("expected an integer".to_string()),
+    }
+}
+"""),
+    "float": ("frf_f64", """
+fn frf_f64(value: &crate::Json) -> Result<f64, String> {
+    value.as_f64().ok_or_else(|| "expected a number".to_string())
+}
+"""),
+    "bool": ("frf_bool", """
+fn frf_bool(value: &crate::Json) -> Result<bool, String> {
+    match value {
+        crate::Json::Bool(flag) => Ok(*flag),
+        _ => Err("expected a boolean".to_string()),
+    }
+}
+"""),
+    "string": ("frf_string", """
+fn frf_string(value: &crate::Json) -> Result<String, String> {
+    value.as_str().map(|text| text.to_string()).ok_or_else(|| "expected a string".to_string())
+}
+"""),
+    "int_array": ("frf_i64s", """
+fn frf_i64s(value: &crate::Json) -> Result<Vec<i64>, String> {
+    let items = value.as_array().ok_or_else(|| "expected an array".to_string())?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(frf_i64(item)?);
+    }
+    Ok(out)
+}
+"""),
+    "float_array": ("frf_f64s", """
+fn frf_f64s(value: &crate::Json) -> Result<Vec<f64>, String> {
+    let items = value.as_array().ok_or_else(|| "expected an array".to_string())?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(frf_f64(item)?);
+    }
+    Ok(out)
+}
+"""),
+}
+
+# The type each converter yields. A parameter spelled otherwise -- `i32`, `Vec<usize>` -- is cast from
+# this, because the compiler will not do it silently and the mined spelling is what the call must match.
+_RUST_OWNED = {"int": "i64", "float": "f64", "bool": "bool", "string": "String",
+               "int_array": "Vec<i64>", "float_array": "Vec<f64>"}
+
+# How a returned value becomes JSON. `{}` -- a void function -- is handled separately, through what it
+# mutated, exactly as in Go.
+_RUST_ENCODE = {
+    "int": "crate::Json::Number(value as f64)",
+    "float": "crate::Json::Number(value as f64)",
+    "bool": "crate::Json::Bool(value)",
+    "string": "crate::Json::String(value.to_string())",
+    "int_array": "crate::Json::Array(value.iter().map(|item| "
+                 "crate::Json::Number(*item as f64)).collect())",
+    "float_array": "crate::Json::Array(value.iter().map(|item| "
+                   "crate::Json::Number(*item as f64)).collect())",
+}
+
+
+def _rust_element(native: str) -> str:
+    """The element type inside a Rust sequence spelling: `Vec<i32>` and `&[i32]` -> `i32`."""
+    stripped = native.lstrip("&").replace("mut ", "").strip()
+    if stripped.startswith("Vec<") and stripped.endswith(">"):
+        return stripped[4:-1].strip()
+    return stripped.strip("[]").strip()
+
+
+def _rust(symbol: str, params: list, result: dict, package: str, owner: str = "") -> str:
+    lines: list = []
+    used: list = []
+    body: list = []
+    call_args: list = []
+    void = not result
+
+    for index, param in enumerate(params):
+        kind = str(param.get("kind", ""))
+        entry = _RUST_CONVERTERS.get(kind)
+        if entry is None:
+            raise Unsupported(
+                "no Rust conversion for a %r argument; the bridge would not compile" % kind)
+        converter = entry[0]
+        if kind not in used:
+            used.append(kind)
+        native = " ".join(str(param.get("native", "")).split()) or _RUST_OWNED[kind]
+        owned = _RUST_OWNED[kind]
+        borrowed = native.startswith("&")
+        # A void subject writes into its argument, so the binding has to be mutable for it to.
+        mutable = "mut" if void and kind.endswith("_array") else ""
+        name = "arg%d" % index
+        body.append("    let %s%s = %s(&items[%d])?;"
+                    % (mutable + " " if mutable else "", name, converter, index))
+        # THE SPELLING MATTERS, NOT ONLY THE KIND. `Vec<i32>` and `Vec<i64>` are both `int_array`, and
+        # the converter yields `Vec<i64>`; Rust will not coerce between them, so the cast is written.
+        # `usize` is the common case in real material -- an index or a length.
+        target_element = _rust_element(native)
+        if kind.endswith("_array") and target_element != _rust_element(owned):
+            body.append("    let %s%s: Vec<%s> = %s.into_iter().map(|item| item as %s).collect();"
+                        % (mutable + " " if mutable else "", name, target_element, name,
+                           target_element))
+        elif not kind.endswith("_array") and native.lstrip("&").strip() != owned:
+            body.append("    let %s = %s as %s;" % (name, name, native.lstrip("&").strip()))
+        # A borrowed parameter takes a reference to what was just built. `&String` coerces to `&str`
+        # and `&Vec<T>` to `&[T]`, so one rule covers both spellings.
+        prefix = "&mut " if (borrowed and mutable) else ("&" if borrowed else "")
+        call_args.append("%s%s" % (prefix, name))
+
+    for kind in used:
+        lines.append(_RUST_CONVERTERS[kind][1].strip("\n"))
+        lines.append("")
+    for kind, dependency in (("int_array", "int"), ("float_array", "float")):
+        if kind in used and dependency not in used:
+            lines.append(_RUST_CONVERTERS[dependency][1].strip("\n"))
+            lines.append("")
+
+    lines.append("// entry is what serve.rs calls. See frf/observe/call/bridge.py.")
+    lines.append("pub fn entry(args: &crate::Json) -> Result<crate::Json, String> {")
+    lines.append('    let items = args.as_array()'
+                 '.ok_or_else(|| "the arguments must be a JSON array".to_string())?;')
+    lines.append("    if items.len() != %d {" % len(params))
+    lines.append('        return Err(format!("expected %d argument(s), got {}", items.len()));'
+                 % len(params))
+    lines.append("    }")
+    lines.extend(body)
+    if void:
+        carrier = next((n for n, param in enumerate(params)
+                        if str(param.get("kind", "")).endswith("_array")), None)
+        if carrier is None:
+            raise Unsupported(
+                "%s returns nothing and has no array argument to observe a mutation through" % symbol)
+        lines.append("    %s(%s);" % (symbol, ", ".join(call_args)))
+        lines.append("    let value = arg%d;" % carrier)
+        lines.append("    Ok(%s)" % _RUST_ENCODE[str(params[carrier]["kind"])])
+    else:
+        kind = str(result.get("kind", ""))
+        if kind not in _RUST_ENCODE:
+            raise Unsupported("no Rust encoding for a %r result" % kind)
+        lines.append("    let value = %s(%s);" % (symbol, ", ".join(call_args)))
+        lines.append("    Ok(%s)" % _RUST_ENCODE[kind])
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+# ----------------------------------------------------------------------------------- Java
+#
+# APPENDED TO THE SUBJECT, like Rust but for a different reason: Serve.java reflects for
+# `Class.forName("Subject")`, so the generated class has to BE `Subject` -- and a Java file may hold
+# several top-level classes as long as the public one matches the filename. So `Subject.java` ends up
+# holding the mined `class M` (stripped of `public`, see `_reconcile_java`) and `public class Subject`
+# beside it.
+#
+# EVERY NAME IS FULLY QUALIFIED in what follows. Java requires imports above the first class
+# declaration and the bridge is appended BELOW one, so there is nowhere to put an import.
+_JAVA_CONVERTERS = {
+    "int": ("frfInt", """
+    static long frfInt(Object value) {
+        // The shim's parser yields Long for an integral token and Double otherwise, so both arrive
+        // here. A non-integral value is REFUSED rather than truncated.
+        if (!(value instanceof Number)) throw new IllegalArgumentException("expected an integer");
+        double number = ((Number) value).doubleValue();
+        if (number != Math.rint(number)) throw new IllegalArgumentException("expected an integer");
+        return (long) number;
+    }
+"""),
+    "float": ("frfFloat", """
+    static double frfFloat(Object value) {
+        if (!(value instanceof Number)) throw new IllegalArgumentException("expected a number");
+        return ((Number) value).doubleValue();
+    }
+"""),
+    "bool": ("frfBool", """
+    static boolean frfBool(Object value) {
+        if (!(value instanceof Boolean)) throw new IllegalArgumentException("expected a boolean");
+        return ((Boolean) value).booleanValue();
+    }
+"""),
+    "string": ("frfString", """
+    static String frfString(Object value) {
+        if (!(value instanceof String)) throw new IllegalArgumentException("expected a string");
+        return (String) value;
+    }
+"""),
+    "int_array": ("frfInts", """
+    static long[] frfInts(Object value) {
+        if (!(value instanceof java.util.List)) throw new IllegalArgumentException("expected an array");
+        java.util.List<?> items = (java.util.List<?>) value;
+        long[] out = new long[items.size()];
+        for (int i = 0; i < out.length; i++) out[i] = frfInt(items.get(i));
+        return out;
+    }
+"""),
+    "float_array": ("frfFloats", """
+    static double[] frfFloats(Object value) {
+        if (!(value instanceof java.util.List)) throw new IllegalArgumentException("expected an array");
+        java.util.List<?> items = (java.util.List<?>) value;
+        double[] out = new double[items.size()];
+        for (int i = 0; i < out.length; i++) out[i] = frfFloat(items.get(i));
+        return out;
+    }
+"""),
+}
+
+_JAVA_OWNED = {"int": "long", "float": "double", "bool": "boolean", "string": "String",
+               "int_array": "long[]", "float_array": "double[]"}
+
+
+def _java_element(native: str) -> str:
+    return native.replace("[]", "").strip()
+
+
+def _java_box_helper(native: str, kind: str) -> str:
+    """A boxing helper for the EXACT array type being returned.
+
+    A Java array is not a List and Serve.java's writer does not walk one, so an array result has to be
+    boxed element by element -- handed back raw it would serialise as an opaque object and every
+    expectation would be frozen against that rather than against the numbers.
+
+    GENERATED FOR THE MINED SPELLING, because Java does not widen array types. Fixed `long[]` and
+    `double[]` overloads looked reasonable and real javac refused them:
+
+        error: no suitable method found for frfBox(int[])
+          method Subject.frfBox(long[]) is not applicable
+            (argument mismatch; int[] cannot be converted to long[])
+
+    An `int[]` parameter is the common case in mined material, so that was most of the supply. The
+    ELEMENT still widens on its way into the box -- `Long.valueOf(int)` is a widening conversion
+    followed by boxing -- which is why one helper per array type is enough.
+    """
+    element = _java_element(native)
+    boxed = "Long" if kind == "int_array" else "Double"
+    return ("    static java.util.List<Object> frfBox(%s[] items) {\n"
+            "        java.util.List<Object> out = new java.util.ArrayList<Object>();\n"
+            "        for (%s item : items) out.add(%s.valueOf(item));\n"
+            "        return out;\n"
+            "    }\n" % (element, element, boxed))
+
+
+def _java(symbol: str, params: list, result: dict, package: str, owner: str = "") -> str:
+    if not owner:
+        raise Unsupported(
+            "a Java bridge needs the class holding %s: the generated Subject calls "
+            "`Owner.method(...)` and cannot construct an instance" % symbol)
+    used: list = []
+    body: list = []
+    call_args: list = []
+    void = not result
+
+    for index, param in enumerate(params):
+        kind = str(param.get("kind", ""))
+        entry = _JAVA_CONVERTERS.get(kind)
+        if entry is None:
+            raise Unsupported(
+                "no Java conversion for a %r argument; the bridge would not compile" % kind)
+        if kind not in used:
+            used.append(kind)
+        native = " ".join(str(param.get("native", "")).split()) or _JAVA_OWNED[kind]
+        owned = _JAVA_OWNED[kind]
+        name = "arg%d" % index
+        body.append("        %s %s = %s(args.get(%d));" % (owned, name, entry[0], index))
+        # THE SPELLING MATTERS. `int[]` and `long[]` are both `int_array` and the converter yields
+        # `long[]`; Java narrows only with an explicit cast, and a mined `int[]` parameter is common.
+        if native != owned:
+            if kind.endswith("_array"):
+                element = _java_element(native)
+                body.append("        %s[] %sc = new %s[%s.length];" % (element, name, element, name))
+                body.append("        for (int i = 0; i < %s.length; i++) %sc[i] = (%s) %s[i];"
+                            % (name, name, element, name))
+                call_args.append("%sc" % name)
+            else:
+                body.append("        %s %sc = (%s) %s;" % (native, name, native, name))
+                call_args.append("%sc" % name)
+        else:
+            call_args.append(name)
+
+    # THE CALL IS COMPOSED BEFORE THE CLASS IS ASSEMBLED, because a boxing helper has to be emitted
+    # ABOVE `entry` and which one is needed depends on the exact array type being handed back.
+    tail: list = []
+    boxes: dict = {}
+    if void:
+        carrier = next((n for n, param in enumerate(params)
+                        if str(param.get("kind", "")).endswith("_array")), None)
+        if carrier is None:
+            raise Unsupported(
+                "%s returns nothing and has no array argument to observe a mutation through" % symbol)
+        carried = str(params[carrier]["kind"])
+        boxes[" ".join(str(params[carrier].get("native", "")).split())
+              or _JAVA_OWNED[carried]] = carried
+        tail.append("        %s.%s(%s);" % (owner, symbol, ", ".join(call_args)))
+        tail.append("        return frfBox(%s);" % call_args[carrier])
+    else:
+        kind = str(result.get("kind", ""))
+        if kind not in _JAVA_OWNED:
+            raise Unsupported("no Java encoding for a %r result" % kind)
+        spelling = " ".join(str(result.get("native", "")).split()) or _JAVA_OWNED[kind]
+        if kind.endswith("_array"):
+            # DECLARED WITH THE MINED SPELLING. `long[] value = M.f()` does not compile when f returns
+            # `int[]`: Java widens an element, never an array.
+            boxes[spelling] = kind
+            tail.append("        %s value = %s.%s(%s);"
+                        % (spelling, owner, symbol, ", ".join(call_args)))
+            tail.append("        return frfBox(value);")
+        else:
+            # A scalar is declared as the converter's own type -- an `int` result widens into a `long`
+            # -- and autoboxes on the way out through Object.
+            tail.append("        %s value = %s.%s(%s);"
+                        % (_JAVA_OWNED[kind], owner, symbol, ", ".join(call_args)))
+            tail.append("        return value;")
+
+    lines = ["public class Subject {"]
+    for kind in used:
+        lines.append(_JAVA_CONVERTERS[kind][1].strip("\n"))
+    for kind, dependency in (("int_array", "int"), ("float_array", "float")):
+        if kind in used and dependency not in used:
+            lines.append(_JAVA_CONVERTERS[dependency][1].strip("\n"))
+    for spelling, kind in boxes.items():
+        lines.append(_java_box_helper(spelling, kind).rstrip("\n"))
+    lines.append("")
+    lines.append("    // entry is what Serve.java reflects for. See frf/observe/call/bridge.py.")
+    lines.append("    public static Object entry(java.util.List<Object> args) {")
+    lines.append("        if (args.size() != %d) {" % len(params))
+    lines.append('            throw new IllegalArgumentException('
+                 '"expected %d argument(s), got " + args.size());' % len(params))
+    lines.append("        }")
+    lines.extend(body)
+    lines.extend(tail)
+    lines.append("    }")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def _reconcile_java(text: str) -> str:
+    """A mined Java file, made able to hold `public class Subject` beside its own class.
+
+    ONE PUBLIC CLASS PER FILE, and its name must match the filename. The bridge is appended to
+    `Subject.java` because Serve.java reflects for `Class.forName("Subject")`, so a mined
+    `public class M` in that file is a compile error -- `class M is public, should be declared in a
+    file named M.java`. Java is perfectly happy with several package-private top-level classes in one
+    file, so dropping the modifier is all that is needed, and it changes nothing about the method the
+    bridge calls: a static method stays reachable as `M.method(...)` from a class in the same file.
+
+    A PACKAGE DECLARATION IS DROPPED for the same reason. It would put the mined class in a package
+    while Serve.java looks for `Subject` in the default one, so the reflection would fail at run time
+    with ClassNotFoundException -- after a successful build, which is the worst place to find out.
+    """
+    out = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("package ") and stripped.endswith(";"):
+            continue
+        # `public class`, `public final class`, `public abstract class`, and the same for interfaces
+        # and enums, which a mined file can also declare beside its class.
+        if stripped.startswith("public ") and not line.startswith((" ", "\t")):
+            words = stripped.split()
+            if any(word in ("class", "interface", "enum", "record") for word in words[:4]):
+                out.append(line.replace("public ", "", 1))
+                continue
+        out.append(line)
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
+# ----------------------------------------------------------------------------------- C++
+#
+# THE HEAVIEST OF THE FOUR, for one reason: serve.c is compiled AS C (`-x c`) and its JSON parser is
+# `static`, so the bridge cannot reach it and has to read the argument array itself. The contract is
+# also the rawest -- `extern "C" const char *entry(const char *args_json)` returning a malloc'd
+# document that serve.c frees, refusing by returning NULL with a message left in `entry_error`.
+#
+# APPENDED TO subject.cpp, like Rust and Java: the mined function is then already declared above, so
+# no forward declaration has to be synthesised from a type spelling.
+_CPP_PREAMBLE = """
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+
+extern "C" { char *entry_error = nullptr; }
+
+namespace frf {
+
+// A JSON value, only as far as this wire carries one. Deliberately not a general parser: it reads the
+// argument array serve.c hands over, and nothing else ever reaches it.
+struct Value {
+    enum Kind { Null, Bool, Number, String, Array } kind = Null;
+    bool boolean = false;
+    double number = 0.0;
+    std::string text;
+    std::vector<Value> items;
+};
+
+inline void skip(const char *&at) {
+    while (*at == ' ' || *at == '\\t' || *at == '\\n' || *at == '\\r') at++;
+}
+
+bool parse(const char *&at, Value &out);
+
+inline bool parse_string(const char *&at, std::string &out) {
+    if (*at != '"') return false;
+    at++;
+    while (*at && *at != '"') {
+        if (*at == '\\\\') {
+            at++;
+            switch (*at) {
+                case 'n': out.push_back('\\n'); break;
+                case 't': out.push_back('\\t'); break;
+                case 'r': out.push_back('\\r'); break;
+                case 'b': out.push_back('\\b'); break;
+                case 'f': out.push_back('\\f'); break;
+                // A \\uXXXX escape is carried as the bytes that spell it rather than decoded: this
+                // side only ever hands the string back to the subject, and a half-decoded surrogate
+                // pair would be a different string from the one the factory sent.
+                case 'u': out.append("\\\\u"); for (int i = 0; i < 4 && at[1]; i++) out.push_back(*++at); break;
+                case '\\0': return false;
+                default: out.push_back(*at);
+            }
+            at++;
+            continue;
+        }
+        out.push_back(*at++);
+    }
+    if (*at != '"') return false;
+    at++;
+    return true;
+}
+
+inline bool parse(const char *&at, Value &out) {
+    skip(at);
+    if (*at == 'n' && std::strncmp(at, "null", 4) == 0) { at += 4; out.kind = Value::Null; return true; }
+    if (*at == 't' && std::strncmp(at, "true", 4) == 0) {
+        at += 4; out.kind = Value::Bool; out.boolean = true; return true;
+    }
+    if (*at == 'f' && std::strncmp(at, "false", 5) == 0) {
+        at += 5; out.kind = Value::Bool; out.boolean = false; return true;
+    }
+    if (*at == '"') { out.kind = Value::String; return parse_string(at, out.text); }
+    if (*at == '[') {
+        at++;
+        out.kind = Value::Array;
+        skip(at);
+        if (*at == ']') { at++; return true; }
+        for (;;) {
+            Value item;
+            if (!parse(at, item)) return false;
+            out.items.push_back(item);
+            skip(at);
+            if (*at == ',') { at++; continue; }
+            if (*at == ']') { at++; return true; }
+            return false;
+        }
+    }
+    if (*at == '{') {
+        // An object is not something any parameter of this wire is drawn as, so it is READ AND
+        // REFUSED rather than skipped: silently accepting one would call the subject with a
+        // default-constructed value and charge the answer to it.
+        return false;
+    }
+    {
+        char *end = nullptr;
+        double number = std::strtod(at, &end);
+        if (end == at) return false;
+        at = end;
+        out.kind = Value::Number;
+        out.number = number;
+        return true;
+    }
+}
+
+// A malloc'd copy, because serve.c frees what entry returns.
+inline const char *own(const std::string &text) {
+    char *out = static_cast<char *>(std::malloc(text.size() + 1));
+    if (out == nullptr) return nullptr;
+    std::memcpy(out, text.c_str(), text.size() + 1);
+    return out;
+}
+
+inline std::string number_text(double value) {
+    // %.17g round-trips a double exactly, and an integral value is written without a fractional part
+    // so that an integer answer is frozen as an integer.
+    char buffer[40];
+    if (value == static_cast<double>(static_cast<long long>(value))) {
+        std::snprintf(buffer, sizeof buffer, "%lld", static_cast<long long>(value));
+    } else {
+        std::snprintf(buffer, sizeof buffer, "%.17g", value);
+    }
+    return std::string(buffer);
+}
+
+inline bool as_int(const Value &value, long long &out) {
+    if (value.kind != Value::Number) return false;
+    if (value.number != static_cast<double>(static_cast<long long>(value.number))) return false;
+    out = static_cast<long long>(value.number);
+    return true;
+}
+
+}  // namespace frf
+
+// The message entry_error points at. Static storage: serve.c reads it and never frees it.
+static std::string frf_message;
+
+static const char *frf_refuse(const char *why) {
+    frf_message = why;
+    entry_error = const_cast<char *>(frf_message.c_str());
+    return nullptr;
+}
+"""
+
+_CPP_OWNED = {"int": "long long", "float": "double", "bool": "bool", "string": "std::string",
+              "int_array": "std::vector<long long>", "float_array": "std::vector<double>"}
+
+
+def _cpp_element(native: str) -> str:
+    """The element type inside a C++ sequence spelling: `std::vector<int>` -> `int`."""
+    stripped = native.replace("const", " ").replace("&", " ").strip()
+    if "<" in stripped and stripped.endswith(">"):
+        return stripped[stripped.index("<") + 1:-1].strip()
+    return stripped
+
+
+def _cpp_extract(index: int, kind: str, native: str, void: bool) -> list:
+    """The lines that turn one JSON value into one typed C++ variable."""
+    name = "arg%d" % index
+    lines = []
+    if kind == "int":
+        lines.append("    long long %s = 0;" % name)
+        lines.append("    if (!frf::as_int(items[%d], %s)) "
+                     'return frf_refuse("argument %d is not an integer");' % (index, name, index))
+    elif kind == "float":
+        lines.append("    if (items[%d].kind != frf::Value::Number) "
+                     'return frf_refuse("argument %d is not a number");' % (index, index))
+        lines.append("    double %s = items[%d].number;" % (name, index))
+    elif kind == "bool":
+        lines.append("    if (items[%d].kind != frf::Value::Bool) "
+                     'return frf_refuse("argument %d is not a boolean");' % (index, index))
+        lines.append("    bool %s = items[%d].boolean;" % (name, index))
+    elif kind == "string":
+        lines.append("    if (items[%d].kind != frf::Value::String) "
+                     'return frf_refuse("argument %d is not a string");' % (index, index))
+        lines.append("    std::string %s = items[%d].text;" % (name, index))
+    elif kind in ("int_array", "float_array"):
+        element = _cpp_element(native) or ("long long" if kind == "int_array" else "double")
+        lines.append("    if (items[%d].kind != frf::Value::Array) "
+                     'return frf_refuse("argument %d is not an array");' % (index, index))
+        lines.append("    std::vector<%s> %s;" % (element, name))
+        lines.append("    for (const frf::Value &item : items[%d].items) {" % index)
+        if kind == "int_array":
+            lines.append("        long long scalar = 0;")
+            lines.append("        if (!frf::as_int(item, scalar)) "
+                         'return frf_refuse("argument %d has a non-integer element");' % index)
+            lines.append("        %s.push_back(static_cast<%s>(scalar));" % (name, element))
+        else:
+            lines.append("        if (item.kind != frf::Value::Number) "
+                         'return frf_refuse("argument %d has a non-numeric element");' % index)
+            lines.append("        %s.push_back(static_cast<%s>(item.number));" % (name, element))
+        lines.append("    }")
+    else:
+        raise Unsupported("no C++ conversion for a %r argument; the bridge would not compile" % kind)
+    return lines
+
+
+def _cpp_encode(kind: str, expression: str) -> list:
+    """The lines that turn a returned value into the JSON document serve.c expects."""
+    if kind in ("int", "float"):
+        return ["    return frf::own(frf::number_text(static_cast<double>(%s)));" % expression]
+    if kind == "bool":
+        return ['    return frf::own(%s ? "true" : "false");' % expression]
+    if kind == "string":
+        return ["    std::string out = \"\\\"\";",
+                "    for (char letter : %s) {" % expression,
+                "        if (letter == '\"' || letter == '\\\\') out.push_back('\\\\');",
+                "        out.push_back(letter);",
+                "    }",
+                "    out.push_back('\"');",
+                "    return frf::own(out);"]
+    if kind in ("int_array", "float_array"):
+        return ["    std::string out = \"[\";",
+                "    for (std::size_t i = 0; i < %s.size(); i++) {" % expression,
+                "        if (i) out.push_back(',');",
+                "        out += frf::number_text(static_cast<double>(%s[i]));" % expression,
+                "    }",
+                "    out.push_back(']');",
+                "    return frf::own(out);"]
+    raise Unsupported("no C++ encoding for a %r result" % kind)
+
+
+def _cpp(symbol: str, params: list, result: dict, package: str, owner: str = "") -> str:
+    void = not result
+    lines = [_CPP_PREAMBLE.strip("\n"), "",
+             "// entry is what serve.c calls. See frf/observe/call/bridge.py.",
+             'extern "C" const char *entry(const char *args_json) {',
+             "    const char *at = args_json;",
+             "    frf::Value parsed;",
+             '    if (!frf::parse(at, parsed) || parsed.kind != frf::Value::Array) '
+             'return frf_refuse("the arguments must be a JSON array");',
+             "    const std::vector<frf::Value> &items = parsed.items;",
+             "    if (items.size() != %d) "
+             'return frf_refuse("wrong number of arguments");' % len(params)]
+    call_args = []
+    for index, param in enumerate(params):
+        kind = str(param.get("kind", ""))
+        native = " ".join(str(param.get("native", "")).split())
+        lines.extend(_cpp_extract(index, kind, native, void))
+        # A reference parameter is what a void subject writes through, and a `const &` is just a
+        # borrow. Either way the variable is passed by name; C++ binds the reference itself.
+        call_args.append("arg%d" % index)
+    if void:
+        carrier = next((n for n, param in enumerate(params)
+                        if str(param.get("kind", "")).endswith("_array")), None)
+        if carrier is None:
+            raise Unsupported(
+                "%s returns nothing and has no array argument to observe a mutation through" % symbol)
+        lines.append("    %s(%s);" % (symbol, ", ".join(call_args)))
+        lines.extend(_cpp_encode(str(params[carrier]["kind"]), "arg%d" % carrier))
+    else:
+        lines.append("    auto value = %s(%s);" % (symbol, ", ".join(call_args)))
+        lines.extend(_cpp_encode(str(result.get("kind", "")), "value"))
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+_GENERATORS = {"go": _go, "rust": _rust, "java": _java, "cpp": _cpp}
 
 # How a mined file is made to compile beside its shim. Separate from `_GENERATORS` because a language
 # can need one without the other: Rust reaches the subject as `mod subject`, so its file needs no
-# package surgery at all, while Go cannot compile without it.
-_RECONCILERS = {"go": _reconcile_go}
+# surgery at all, while Go and Java cannot compile without it.
+_RECONCILERS = {"go": _reconcile_go, "java": _reconcile_java}
+
+
+# What marks generated text inside a mined file, so appending twice appends once. A comment rather
+# than a sentinel file: it survives being copied, perturbed and read back, which is what the mutant
+# path does to a subject.
+MARKER = "// --- frf call bridge (generated) ---"
+
+
+def attach(subject: str, generated: str) -> str:
+    """A mined file with the bridge appended. Idempotent.
+
+    FOR THE COMPILERS THAT ARE HANDED ONLY THE SHIM. rustc compiles `serve.rs`, which reaches the
+    subject as `mod subject;`, so a separate bridge file is never seen -- the generated `entry` has to
+    live in the subject's own module. That the two share a module is also what lets the bridge call the
+    mined function by its plain name.
+
+    IDEMPOTENT BECAUSE THE MUTANT PATH RE-MATERIALISES. E3 copies a workspace, perturbs the subject and
+    materialises it again; appending a second `pub fn entry` would fail to compile as a duplicate
+    definition, and E3 would score that as a detected mutation without the probe judging anything.
+    """
+    head = subject.split(MARKER, 1)[0].rstrip("\n")
+    return "%s\n\n%s\n%s" % (head, MARKER, generated.strip("\n"))
 
 
 def reconcile(language: str, text: str) -> str:
@@ -240,12 +896,18 @@ def supported(language: str) -> bool:
 
 
 def source(language: str, *, symbol: str, params: list, result: dict | None = None,
-           package: str = "") -> str:
+           package: str = "", owner: str = "") -> str:
     """The bridge source for one mined function.
 
     `params` are the schema entries the miner produced, each carrying `kind` and the source's own
     `native` spelling. `result` is the same shape for what the function returns, `{}` for void.
     `package` is what the mined file declared, which the caller may need to reconcile separately.
+    `owner` is the class holding the symbol, which only Java needs -- its bridge calls
+    `Owner.method(...)` because every Java method lives in a class and cannot be reached without one.
+
+    EVERY GENERATOR TAKES ALL FIVE, even the three that ignore `owner`. A signature that varied per
+    language would put a branch here choosing which arguments to pass, which is one more place to
+    forget a language when the next argument is added.
     """
     key = (language or "").strip().lower()
     generator = _GENERATORS.get(key)
@@ -257,4 +919,4 @@ def source(language: str, *, symbol: str, params: list, result: dict | None = No
             % (language, ", ".join(sorted(_GENERATORS)) or "(none)"))
     if not symbol:
         raise Unsupported("a bridge needs the symbol it is binding")
-    return generator(symbol, list(params or ()), dict(result or {}), package or "")
+    return generator(symbol, list(params or ()), dict(result or {}), package or "", owner or "")

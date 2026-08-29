@@ -351,6 +351,10 @@ def _to_candidate(function, *, root: str, full_name: str, commit: str,
             # for python/javascript/typescript, so both are read with a default downstream.
             "result": getattr(function, "result", None),
             "declared_package": getattr(function, "declared_package", ""),
+            # Which class holds the symbol. Java only: every method there lives in a class, so its
+            # bridge calls `Owner.method(...)` and cannot be generated without the name. "" for the
+            # languages whose functions stand at file scope.
+            "owner": getattr(function, "owner", ""),
             # The whole checkout, so checkout-native emission keeps local imports and fixtures
             # exactly as the repository published them.
             "root": root,

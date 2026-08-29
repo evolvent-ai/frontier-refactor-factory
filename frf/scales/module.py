@@ -426,7 +426,8 @@ class Module:
             # params that nothing reads, because their shims bind a symbol themselves.
             binding={"params": (detail["schema"] or {}).get("params", ()),
                      "result": detail.get("result") or {},
-                     "package": detail.get("declared_package", "")})
+                     "package": detail.get("declared_package", ""),
+                     "owner": detail.get("owner", "")})
 
 
 def _task_name(material: Material) -> str:

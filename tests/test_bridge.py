@@ -106,14 +106,47 @@ def test_an_unconvertible_argument_is_refused_not_guessed():
 
 
 def test_a_language_without_a_generator_refuses_loudly():
-    """Rust, Java and C++ have static shims and no bridge yet.
+    """A language with no bridge is a stated gap, not source generated in the wrong language.
 
-    Generating Go source for a Rust subject would fail the build as though the material were broken,
-    so the gap is stated instead. `dispatch.py` refuses the same way for the same reason.
+    Handing a Ruby subject a Go bridge would fail the build as though the material were broken, which
+    is the confusion this whole layer exists to prevent. `dispatch.py` refuses the same way.
+
+    Ruby is here because it needs NO bridge -- serve.rb resolves the symbol itself -- so asking for one
+    is a caller mistake rather than a missing feature.
     """
-    for language in ("rust", "java", "cpp", "ruby"):
+    for language in ("ruby", "python", "javascript", "cobol"):
         with pytest.raises(bridge.Unsupported):
             bridge.source(language, symbol="f", params=[_ints()], result=_ints())
+
+
+def test_every_static_language_generates_a_bridge_declaring_its_own_entry_point():
+    """Four shims, four different contracts, and each bridge has to satisfy its own.
+
+    Verified against real toolchains elsewhere (rustc 1.83, javac 21, g++ 13.3, go); this pins the
+    declaration each one must contain, which is what breaks first if a template is edited.
+    """
+    expected = {
+        "go": "func Entry(args []interface{}) (interface{}, error)",
+        "rust": "pub fn entry(args: &crate::Json) -> Result<crate::Json, String>",
+        "java": "public static Object entry(java.util.List<Object> args)",
+        "cpp": 'extern "C" const char *entry(const char *args_json)',
+    }
+    for language, declaration in expected.items():
+        source = bridge.source(language, symbol="f", params=[_ints()],
+                               result={"kind": "int", "native": "int"},
+                               owner="M" if language == "java" else "")
+        assert declaration in source, language
+
+
+def test_a_java_bridge_without_its_owning_class_is_refused():
+    """Every Java method lives in a class, so the bridge calls `Owner.method(...)`.
+
+    Without the name there is nothing to call and no way to construct an instance, so this refuses
+    rather than emitting a bridge that cannot compile.
+    """
+    with pytest.raises(bridge.Unsupported):
+        bridge.source("java", symbol="f", params=[_ints()],
+                      result={"kind": "int", "native": "int"})
 
 
 def test_the_package_clause_is_reconciled_to_the_shim():
@@ -161,10 +194,16 @@ def test_a_language_needing_no_reconciliation_is_returned_unchanged():
 
 
 def test_supported_names_only_languages_with_a_generator():
-    """One source of truth, so a new generator is automatically a newly supported language."""
-    assert bridge.supported("go")
-    assert not bridge.supported("rust")
-    assert not bridge.supported("")
+    """One source of truth, so a new generator is automatically a newly supported language.
+
+    The four static languages have one each. The dynamic ones deliberately do NOT: their shims resolve
+    a symbol by name, so a bridge would be a second mechanism for something already handled -- and
+    `observe/call.servable` is what asks the combined question.
+    """
+    for language in ("go", "rust", "java", "cpp"):
+        assert bridge.supported(language), language
+    for language in ("python", "javascript", "typescript", "ruby", "", "cobol"):
+        assert not bridge.supported(language), language
 
 
 # --------------------------------------------------------------------- what an emitted task ships
