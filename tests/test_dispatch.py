@@ -301,3 +301,59 @@ def test_a_ruby_package_task_reaches_its_operations_in_the_emitted_layout():
     assert served.returncode == 0, served.stderr
     assert '"value":[1,2,3]' in served.stdout, (
         "the dispatched operation did not load in the emitted layout: %s" % served.stderr)
+
+
+def test_a_ruby_class_method_is_reached_through_reflection():
+    """A gem's `def self.x` is NOT a top-level def, and needs `Klass.method`.
+
+    THE THIRD TIME THE SAME CLASS OF BUG APPEARED. The old `_ruby` adapter mined `^def\s+`, which on a
+    real gem (human_time, mightystring, geometry) finds nothing top-level and silently empties the
+    surface. This test pins the real shape: a module with static methods and instance methods, mine
+    through `_ruby`, and serve through the generated dispatcher.
+
+    The `klass` field is where the owning class lives; the dispatcher's `Object.const_get` +
+    `klass.method(...)` is what lets the probe reach a method that `send` on the main object cannot.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    from frf.observe.call import package as emit, shims
+    from frf.observe.call import dispatch as d
+    from frf.source import package_adapters as pa
+
+    if not shims.usable("ruby"):
+        pytest.skip("ruby is not installed")
+
+    repo = tempfile.mkdtemp()
+    os.makedirs(os.path.join(repo, "lib"))
+    with open(os.path.join(repo, "lib", "human_time.rb"), "w") as handle:
+        handle.write("module HumanTime\n"
+                     "  def self.greater_than_aliases\n"
+                     "    %w{newer_than? more_recent_than?}\n"
+                     "  end\n"
+                     "  def self.greater_than_or_equal_to_aliases\n"
+                     "    %w{newer_than_or_equal_to?}\n"
+                     "  end\n"
+                     "end\n")
+
+    ops = pa.operations(repo, "ruby", "human_time", os.path.join(repo, "lib"))
+    static = [o for o in ops if o.get("klass") == "HumanTime"]
+    assert static, "the module's static methods must be mined with their owning class"
+    assert all(o["symbol"].startswith("self.") for o in static), static
+
+    room = tempfile.mkdtemp()
+    shutil.copytree(repo, room, dirs_exist_ok=True)
+    table = {o["name"]: ((o["module"], o["symbol"]) if not (o.get("klass") or "")
+                         else (o["module"], o["symbol"], o["klass"])) for o in ops}
+    adapter = os.path.join(room, "subject.rb")
+    with open(adapter, "w", encoding="utf-8") as handle:
+        handle.write(d.source("ruby", table))
+    shims.materialise(room, "ruby", adapter, "entry")
+
+    served = subprocess.run(
+        ["ruby", "serve.rb", "entry"], cwd=room,
+        input='{"id":1,"op":"run","args":["greater_than_aliases"]}\n',
+        capture_output=True, text=True, timeout=30)
+    assert served.returncode == 0, served.stderr
+    assert "newer_than?" in served.stdout, served.stdout
