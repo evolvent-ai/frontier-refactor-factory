@@ -138,6 +138,74 @@ def test_every_static_language_generates_a_bridge_declaring_its_own_entry_point(
         assert declaration in source, language
 
 
+def test_a_generated_name_cannot_shadow_the_mined_symbol():
+    """A variable shadows a function in C++, and the mined symbol shares the bridge's scope.
+
+    A REAL BUILD FAILURE. A subject whose function is called `at` -- an entirely ordinary name for
+    element access -- met the bridge's own `const char *at` and g++ said `'at' cannot be used as a
+    function`, charged to the material. `items`, `value`, `out` and `parsed` are the same hazard, so
+    every generated name carries the `frf_` prefix.
+    """
+    import re
+
+    source = bridge.source("cpp", symbol="subject_fn", params=[_ints(native="std::vector<int>")],
+                           result={"kind": "int", "native": "int"})
+    # SCOPED TO THE FUNCTION THAT CALLS THE SUBJECT. The fixed preamble declares its helpers inside
+    # `namespace frf` and none of them call the subject, so a parameter named `at` in `frf::skip`
+    # shadows nothing that matters. Only `frf_call` names the mined symbol.
+    body = source.split("static const char *frf_call", 1)[1]
+    # Comments discuss these names -- this test's own bug report is in one -- and `frf_parsed.items`
+    # legitimately reads a member called `items`. Neither can shadow anything, so both are removed
+    # before looking. Deliberately NOT a parse: the names below are the ones the generator used to
+    # emit unprefixed, so their absence is the regression check, and no C++ grammar is needed for it.
+    code = re.sub(r"//[^\n]*", "", body)
+    code = re.sub(r"\.\w+", "", code)
+    for name in ("at", "items", "parsed", "value", "out", "item", "scalar", "letter"):
+        assert not re.search(r"\b%s\b" % name, code), (
+            "the bridge still uses %r as a bare local; a mined function of that name would be "
+            "shadowed, which is how `'at' cannot be used as a function` reached a real batch" % name)
+
+
+def test_a_subject_owning_the_entry_points_name_is_refused():
+    """`pub fn entry` beside a mined `entry` is a duplicate definition, not a bridge.
+
+    Three of the four bridges are appended to the subject, and Go's shares its package, so the
+    collision is real in every one. Refused where the reason can be stated rather than as a compiler
+    error about a redefinition, which reads like broken material.
+    """
+    for language, reserved in (("go", "Entry"), ("rust", "entry"), ("cpp", "entry"),
+                               ("java", "entry")):
+        with pytest.raises(bridge.Unsupported):
+            bridge.source(language, symbol=reserved, params=[_ints()],
+                          result={"kind": "int", "native": "int"}, owner="M")
+
+
+def test_the_static_shims_turn_a_crash_into_an_answer():
+    """A panic or a thrown exception is how real code refuses, and it must not kill the process.
+
+    MEASURED, NOT SUPPOSED. Before serve.rs caught unwinds, a Rust subject that panicked on one input
+    answered probe 1 and was never heard from again -- freeze discarded 47% to 100% of the corpus and
+    refused the candidate with `will-not-repeat-itself`, which reads as unusable material and was a
+    missing seven lines in the shim. C++ is worse placed: serve.c is compiled AS C and cannot catch a
+    C++ exception at all, so the generated bridge has to.
+
+    Structural here; `test_wire_roundtrip.py` runs the real compilers where they are installed.
+    """
+    import os
+
+    from frf.observe.call import shims
+
+    here = os.path.dirname(os.path.abspath(shims.__file__))
+    rust = open(os.path.join(here, "serve.rs"), encoding="utf-8").read()
+    assert "catch_unwind" in rust, "a Rust panic would take the process down mid-corpus"
+    assert "downcast_ref::<&str>" in rust, "a caught panic needs its message, never a backtrace"
+
+    generated = bridge.source("cpp", symbol="f", params=[_ints(native="std::vector<int>")],
+                              result={"kind": "int", "native": "int"})
+    assert "catch (const std::exception" in generated
+    assert "catch (...)" in generated, "a thrown non-standard type is still an answer"
+
+
 def test_a_java_bridge_without_its_owning_class_is_refused():
     """Every Java method lives in a class, so the bridge calls `Owner.method(...)`.
 

@@ -604,6 +604,7 @@ def _reconcile_java(text: str) -> str:
 _CPP_PREAMBLE = """
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -750,40 +751,46 @@ def _cpp_element(native: str) -> str:
 
 
 def _cpp_extract(index: int, kind: str, native: str, void: bool) -> list:
-    """The lines that turn one JSON value into one typed C++ variable."""
-    name = "arg%d" % index
+    """The lines that turn one JSON value into one typed C++ variable.
+
+    EVERY GENERATED NAME IS PREFIXED, because a variable shadows a function in C++ and the mined
+    symbol shares this scope. A subject whose function is called `at` -- an entirely ordinary name for
+    element access -- met a local `const char *at` and the build failed with `'at' cannot be used as a
+    function`, charged to the material. `items`, `value`, `out` and `parsed` are the same hazard.
+    """
+    name = "frf_arg%d" % index
     lines = []
     if kind == "int":
         lines.append("    long long %s = 0;" % name)
-        lines.append("    if (!frf::as_int(items[%d], %s)) "
+        lines.append("    if (!frf::as_int(frf_items[%d], %s)) "
                      'return frf_refuse("argument %d is not an integer");' % (index, name, index))
     elif kind == "float":
-        lines.append("    if (items[%d].kind != frf::Value::Number) "
+        lines.append("    if (frf_items[%d].kind != frf::Value::Number) "
                      'return frf_refuse("argument %d is not a number");' % (index, index))
-        lines.append("    double %s = items[%d].number;" % (name, index))
+        lines.append("    double %s = frf_items[%d].number;" % (name, index))
     elif kind == "bool":
-        lines.append("    if (items[%d].kind != frf::Value::Bool) "
+        lines.append("    if (frf_items[%d].kind != frf::Value::Bool) "
                      'return frf_refuse("argument %d is not a boolean");' % (index, index))
-        lines.append("    bool %s = items[%d].boolean;" % (name, index))
+        lines.append("    bool %s = frf_items[%d].boolean;" % (name, index))
     elif kind == "string":
-        lines.append("    if (items[%d].kind != frf::Value::String) "
+        lines.append("    if (frf_items[%d].kind != frf::Value::String) "
                      'return frf_refuse("argument %d is not a string");' % (index, index))
-        lines.append("    std::string %s = items[%d].text;" % (name, index))
+        lines.append("    std::string %s = frf_items[%d].text;" % (name, index))
     elif kind in ("int_array", "float_array"):
         element = _cpp_element(native) or ("long long" if kind == "int_array" else "double")
-        lines.append("    if (items[%d].kind != frf::Value::Array) "
+        lines.append("    if (frf_items[%d].kind != frf::Value::Array) "
                      'return frf_refuse("argument %d is not an array");' % (index, index))
         lines.append("    std::vector<%s> %s;" % (element, name))
-        lines.append("    for (const frf::Value &item : items[%d].items) {" % index)
+        lines.append("    for (const frf::Value &frf_item : frf_items[%d].items) {" % index)
         if kind == "int_array":
-            lines.append("        long long scalar = 0;")
-            lines.append("        if (!frf::as_int(item, scalar)) "
+            lines.append("        long long frf_scalar = 0;")
+            lines.append("        if (!frf::as_int(frf_item, frf_scalar)) "
                          'return frf_refuse("argument %d has a non-integer element");' % index)
-            lines.append("        %s.push_back(static_cast<%s>(scalar));" % (name, element))
+            lines.append("        %s.push_back(static_cast<%s>(frf_scalar));" % (name, element))
         else:
-            lines.append("        if (item.kind != frf::Value::Number) "
+            lines.append("        if (frf_item.kind != frf::Value::Number) "
                          'return frf_refuse("argument %d has a non-numeric element");' % index)
-            lines.append("        %s.push_back(static_cast<%s>(item.number));" % (name, element))
+            lines.append("        %s.push_back(static_cast<%s>(frf_item.number));" % (name, element))
         lines.append("    }")
     else:
         raise Unsupported("no C++ conversion for a %r argument; the bridge would not compile" % kind)
@@ -797,35 +804,35 @@ def _cpp_encode(kind: str, expression: str) -> list:
     if kind == "bool":
         return ['    return frf::own(%s ? "true" : "false");' % expression]
     if kind == "string":
-        return ["    std::string out = \"\\\"\";",
-                "    for (char letter : %s) {" % expression,
-                "        if (letter == '\"' || letter == '\\\\') out.push_back('\\\\');",
-                "        out.push_back(letter);",
+        return ["    std::string frf_out = \"\\\"\";",
+                "    for (char frf_letter : %s) {" % expression,
+                "        if (frf_letter == '\"' || frf_letter == '\\\\') frf_out.push_back('\\\\');",
+                "        frf_out.push_back(frf_letter);",
                 "    }",
-                "    out.push_back('\"');",
-                "    return frf::own(out);"]
+                "    frf_out.push_back('\"');",
+                "    return frf::own(frf_out);"]
     if kind in ("int_array", "float_array"):
-        return ["    std::string out = \"[\";",
-                "    for (std::size_t i = 0; i < %s.size(); i++) {" % expression,
-                "        if (i) out.push_back(',');",
-                "        out += frf::number_text(static_cast<double>(%s[i]));" % expression,
+        return ["    std::string frf_out = \"[\";",
+                "    for (std::size_t frf_i = 0; frf_i < %s.size(); frf_i++) {" % expression,
+                "        if (frf_i) frf_out.push_back(',');",
+                "        frf_out += frf::number_text(static_cast<double>(%s[frf_i]));" % expression,
                 "    }",
-                "    out.push_back(']');",
-                "    return frf::own(out);"]
+                "    frf_out.push_back(']');",
+                "    return frf::own(frf_out);"]
     raise Unsupported("no C++ encoding for a %r result" % kind)
 
 
 def _cpp(symbol: str, params: list, result: dict, package: str, owner: str = "") -> str:
     void = not result
     lines = [_CPP_PREAMBLE.strip("\n"), "",
-             "// entry is what serve.c calls. See frf/observe/call/bridge.py.",
-             'extern "C" const char *entry(const char *args_json) {',
-             "    const char *at = args_json;",
-             "    frf::Value parsed;",
-             '    if (!frf::parse(at, parsed) || parsed.kind != frf::Value::Array) '
+             "// The work; `entry` below wraps it so a thrown exception cannot cross into serve.c.",
+             "static const char *frf_call(const char *args_json) {",
+             "    const char *frf_at = args_json;",
+             "    frf::Value frf_parsed;",
+             '    if (!frf::parse(frf_at, frf_parsed) || frf_parsed.kind != frf::Value::Array) '
              'return frf_refuse("the arguments must be a JSON array");',
-             "    const std::vector<frf::Value> &items = parsed.items;",
-             "    if (items.size() != %d) "
+             "    const std::vector<frf::Value> &frf_items = frf_parsed.items;",
+             "    if (frf_items.size() != %d) "
              'return frf_refuse("wrong number of arguments");' % len(params)]
     call_args = []
     for index, param in enumerate(params):
@@ -834,7 +841,7 @@ def _cpp(symbol: str, params: list, result: dict, package: str, owner: str = "")
         lines.extend(_cpp_extract(index, kind, native, void))
         # A reference parameter is what a void subject writes through, and a `const &` is just a
         # borrow. Either way the variable is passed by name; C++ binds the reference itself.
-        call_args.append("arg%d" % index)
+        call_args.append("frf_arg%d" % index)
     if void:
         carrier = next((n for n, param in enumerate(params)
                         if str(param.get("kind", "")).endswith("_array")), None)
@@ -842,11 +849,31 @@ def _cpp(symbol: str, params: list, result: dict, package: str, owner: str = "")
             raise Unsupported(
                 "%s returns nothing and has no array argument to observe a mutation through" % symbol)
         lines.append("    %s(%s);" % (symbol, ", ".join(call_args)))
-        lines.extend(_cpp_encode(str(params[carrier]["kind"]), "arg%d" % carrier))
+        lines.extend(_cpp_encode(str(params[carrier]["kind"]), "frf_arg%d" % carrier))
     else:
-        lines.append("    auto value = %s(%s);" % (symbol, ", ".join(call_args)))
-        lines.extend(_cpp_encode(str(result.get("kind", "")), "value"))
+        lines.append("    auto frf_value = %s(%s);" % (symbol, ", ".join(call_args)))
+        lines.extend(_cpp_encode(str(result.get("kind", "")), "frf_value"))
     lines.append("}")
+    lines.extend([
+        "",
+        "// entry is what serve.c calls. See frf/observe/call/bridge.py.",
+        'extern "C" const char *entry(const char *args_json) {',
+        "    // A THROWN EXCEPTION CANNOT CROSS THIS BOUNDARY, and serve.c has no way to catch one:",
+        "    // it is compiled as C. An exception escaping here terminates the process, so every probe",
+        "    // queued behind it is lost -- the same fault that cost the Rust shim 47% to 100% of a",
+        "    // corpus before it caught unwinds. std::out_of_range from .at(), std::bad_alloc, a",
+        "    // std::domain_error: all of them are ways real C++ refuses, and a refusal is an ANSWER.",
+        "    try {",
+        "        return frf_call(args_json);",
+        "    } catch (const std::exception &failure) {",
+        "        return frf_refuse(failure.what());",
+        "    } catch (...) {",
+        "        // A thrown int, a thrown string, a custom type: no message to report, but still an",
+        "        // answer rather than a dead process.",
+        '        return frf_refuse("the subject threw a non-standard exception");',
+        "    }",
+        "}",
+    ])
     return "\n".join(lines) + "\n"
 
 
@@ -947,4 +974,14 @@ def source(language: str, *, symbol: str, params: list, result: dict | None = No
             % (language, ", ".join(sorted(_GENERATORS)) or "(none)"))
     if not symbol:
         raise Unsupported("a bridge needs the symbol it is binding")
+    # A SUBJECT THAT ALREADY OWNS THE ENTRY POINT'S NAME CANNOT BE BRIDGED. For the three languages
+    # whose bridge is appended to the subject, `pub fn entry` beside a mined `entry` is a duplicate
+    # definition; in Go the bridge is its own file but shares the package, so `Entry` collides just
+    # the same. Refused here, where the reason can be stated, rather than as a compiler error about
+    # a redefinition that reads like broken material.
+    reserved = {"go": "Entry", "rust": "entry", "cpp": "entry", "java": "entry"}
+    if symbol == reserved.get(key):
+        raise Unsupported(
+            "%s already defines %r, which is the name the %s shim's entry point must have"
+            % (key, symbol, key))
     return generator(symbol, list(params or ()), dict(result or {}), package or "", owner or "")

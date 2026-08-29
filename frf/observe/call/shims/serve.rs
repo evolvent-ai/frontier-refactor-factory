@@ -24,6 +24,7 @@ mod subject;
 
 use std::fmt::Write as _;
 use std::io::{self, BufRead, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::time::Instant;
 
 /// One JSON value.
@@ -407,7 +408,7 @@ fn handle(request: &Json) -> String {
         let repeats = request.get("repeats").and_then(Json::as_f64).unwrap_or(1.0) as i64;
         let started = Instant::now();
         for _ in 0..repeats {
-            if let Err(message) = subject::entry(args) {
+            if let Err(message) = attempt(args) {
                 return reply_err(&id, &message);
             }
         }
@@ -415,11 +416,44 @@ fn handle(request: &Json) -> String {
         return reply_ok(&id, "seconds", Json::Number(elapsed));
     }
 
-    match subject::entry(args) {
+    match attempt(args) {
         Ok(value) => reply_ok(&id, "value", value),
         // A REFUSAL IS AN ANSWER. How the subject rejects bad input is behaviour a reimplementation
         // has to reproduce, so it is reported and the loop carries on reading.
         Err(message) => reply_err(&id, &message),
+    }
+}
+
+/// Call the subject, collapsing both of Rust's ways of failing into one description.
+///
+/// THE UNWIND CATCH IS NOT DEFENSIVE TIDINESS. A panic is how a great deal of Rust refuses -- an
+/// index past the end of a slice, `unwrap` on None, a division by zero, an arithmetic overflow in a
+/// debug build -- and without this it takes the process down and every probe queued behind it is
+/// lost. Measured, before this existed: a subject panicking on one input answered probe 1 and was
+/// never heard from again, so freeze discarded 47% to 100% of the corpus and refused the candidate
+/// with `will-not-repeat-itself`. That reads as unusable material and was a missing seven lines here.
+///
+/// `AssertUnwindSafe` because the closure borrows `args`, which this function does not mutate and
+/// does not hand out; there is nothing for a partially-unwound call to have left inconsistent.
+fn attempt(args: &Json) -> Result<Json, String> {
+    match panic::catch_unwind(AssertUnwindSafe(|| subject::entry(args))) {
+        Ok(answered) => answered,
+        Err(payload) => Err(describe_panic(&payload)),
+    }
+}
+
+/// A caught panic as a one-line message -- and never as a backtrace.
+///
+/// A trace carries the absolute paths of the machine that produced it, and frozen into an expectation
+/// those could not be reproduced anywhere else. The payload of a Rust panic is `&str` for a literal
+/// message and `String` for a formatted one; anything else carries no text worth reporting.
+fn describe_panic(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        format!("panic: {}", text)
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        format!("panic: {}", text)
+    } else {
+        "panic: the subject panicked without a message".to_string()
     }
 }
 
