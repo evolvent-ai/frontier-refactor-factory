@@ -129,9 +129,13 @@ def _static_go(dispatch: dict, wrong: str | None) -> str:
                 "}\n" % wrong)
     from ..call import bridge
 
+    needs_base64 = any("bytes" in str(p.get("kind", "")) for _n, _m, _k, params, _r in dispatch.values()
+                       for p in list(params or ()))
     lines = ["package main", "", 'import "fmt"', ""]
+    if needs_base64:
+        lines[2] = 'import (\n\t"fmt"\n\t"encoding/base64"\n)'
     used: list = []
-    for symbol, (_module, _symbol, _klass, params, _result) in sorted(dispatch.items()):
+    for _sym, (_mod, _sym2, _klass, params, _result) in sorted(dispatch.items()):
         for param in list(params or ()):
             kind = str(param.get("kind", ""))
             if kind in bridge._GO_CONVERTERS and kind not in used:

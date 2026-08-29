@@ -61,6 +61,17 @@ func frfBool(value interface{}) (bool, bool) {
 	return flag, ok
 }
 """),
+    "bytes": ("frfBytes", """
+func frfBytes(value interface{}) ([]byte, bool) {
+	// JSON carries bytes as a base64 string; the wire's own encoder produced it that way.
+	text, ok := value.(string)
+	if !ok {
+		return nil, false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(text)
+	return decoded, err == nil
+}
+"""),
     "string": ("frfString", """
 func frfString(value interface{}) (string, bool) {
 	text, ok := value.(string)
@@ -109,7 +120,7 @@ func frfFloats(value interface{}) ([]float64, bool) {
 # type. `frfInt` yields `int`; a parameter spelled `int32` needs the conversion written out.
 _GO_NATIVE_OF_KIND = {
     "int": "int", "float": "float64", "bool": "bool", "string": "string",
-    "int_array": "[]int", "float_array": "[]float64",
+    "int_array": "[]int", "float_array": "[]float64", "bytes": "[]byte",
 }
 
 
@@ -276,7 +287,7 @@ fn frf_f64s(value: &crate::Json) -> Result<Vec<f64>, String> {
 # The type each converter yields. A parameter spelled otherwise -- `i32`, `Vec<usize>` -- is cast from
 # this, because the compiler will not do it silently and the mined spelling is what the call must match.
 _RUST_OWNED = {"int": "i64", "float": "f64", "bool": "bool", "string": "String",
-               "int_array": "Vec<i64>", "float_array": "Vec<f64>"}
+               "int_array": "Vec<i64>", "float_array": "Vec<f64>", "bytes": "Vec<u8>"}
 
 # How a returned value becomes JSON. `{}` -- a void function -- is handled separately, through what it
 # mutated, exactly as in Go.
