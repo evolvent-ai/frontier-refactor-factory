@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from frf.core.capabilities import _REGISTRY, capability
 from frf.observe.call import dispatch, servable, shims
-from frf.source.function_miner import supported as minable
+from frf.source.function_miner import canonical, supported as minable
 
 # The scales that reach a subject over the call seam, and therefore need both halves. `repo` is
 # absent on purpose: the process seam runs a whole program, so it needs no miner and no shim.
@@ -119,6 +119,28 @@ def test_an_omitted_scale_is_reported_one_rung_down_not_as_unknown():
     item = capability("python", scale="repo")
     assert item.level != "discovered"
     assert item.adapter == "python"
+
+
+def test_the_outside_worlds_spelling_is_canonicalised_before_it_is_used():
+    """GitHub says `C++`; every table in this factory is keyed `cpp`.
+
+    A REAL BATCH FAILURE. The alias table was consulted only to pick a scanner, so a C++ repository
+    was mined correctly and then carried `language="c++"` onwards -- and every candidate was refused
+    at specify with `no shim for 'c++'`, after the clone had been paid for. A language the factory
+    fully supports, reported as one it does not, with the checkout already spent.
+
+    Canonicalising at the boundary fixes it once for every table downstream: the shim registry, the
+    capability registry, the bridge generators and the dispatchers are all keyed the same way.
+    """
+    for spelling in ("C++", "c++", "CPlusPlus"):
+        assert canonical(spelling) == "cpp", spelling
+        assert canonical(spelling) in shims.TEMPLATES
+        assert capability(canonical(spelling)).level != "discovered"
+    assert canonical("golang") == "go"
+    assert canonical("  Rust  ") == "rust"
+    # An unknown language is still reported as itself, lowercased -- not mapped to something we do
+    # support, which would be far worse than not knowing it.
+    assert canonical("Zig") == "zig"
 
 
 def test_an_unregistered_language_stays_discovered():

@@ -36,13 +36,26 @@ from . import ruby_functions as scan_ruby
 from ..core.scale import Candidate
 from .functions import scan
 
-# What GitHub calls a language, spelled the way the grammar table does. GitHub reports
-# `C++` and some repositories say `golang`, and a spelling miss here is indistinguishable
-# from an unsupported language -- it would silently return the whole checkout to the repo
-# scale with no record of why.
-_NATIVE_ALIASES = {
+# What GitHub calls a language, spelled the way the rest of the factory does. GitHub reports `C++`
+# and some repositories say `golang`, and a spelling miss here is indistinguishable from an
+# unsupported language.
+#
+# APPLIED TO THE CANDIDATE, not only to the choice of scanner. It used to be consulted for the
+# scanner alone, so a C++ candidate was mined correctly and then carried `language="c++"` into a
+# pipeline where every table is keyed `cpp`: `shims.load` raised `no shim for 'c++'` at specify --
+# after the checkout had been paid for -- and `capability("c++")` would have recorded a registered
+# language as `discovered`. One spelling, decided once, at the boundary where the outside world's
+# name enters.
+_ALIASES = {
     "c++": "cpp", "cplusplus": "cpp", "golang": "go", "rustlang": "rust",
+    "c#": "csharp", "objective-c": "objc", "f#": "fsharp",
 }
+
+
+def canonical(language: str) -> str:
+    """The name this factory uses for `language`, whatever the source called it."""
+    key = (language or "").strip().lower()
+    return _ALIASES.get(key, key)
 
 # How long a clone may take. Shallow and single-commit, so this is generous rather than tight.
 CLONE_TIMEOUT = 300.0
@@ -142,7 +155,7 @@ def _scanner(language: str):
     The returned callable takes `(root, stem, commit)`, so a caller never needs to know which reader
     answered or that the native one must be told its language.
     """
-    key = (language or "").strip().lower()
+    key = canonical(language)
     if key in ("python", "python3"):
         return scan
     if key in ("javascript", "typescript"):
@@ -152,9 +165,8 @@ def _scanner(language: str):
     # object, so only a top-level `def` can be served.
     if key == "ruby" and scan_ruby.supported():
         return scan_ruby.scan
-    native = _NATIVE_ALIASES.get(key, key)
-    if scan_native.supported(native):
-        return lambda root, stem, commit: scan_native.scan(root, stem, commit, language=native)
+    if scan_native.supported(key):
+        return lambda root, stem, commit: scan_native.scan(root, stem, commit, language=key)
     return None
 
 
@@ -254,7 +266,13 @@ class GitHubFunctions:
             return []
 
         stem = full_name.rsplit("/", 1)[-1] or full_name
-        language = str(getattr(repository, "language", "") or detail.get("language") or "").lower()
+        # CANONICALISED HERE, at the one point where the outside world's name for a language enters.
+        # GitHub says `C++`; every table in this factory is keyed `cpp`. Carrying the outside spelling
+        # onwards mined the checkout correctly and then refused it at specify with
+        # `no shim for 'c++'` -- a language we support, reported as one we do not, after the clone had
+        # been paid for.
+        language = canonical(str(getattr(repository, "language", "")
+                                 or detail.get("language") or ""))
         # WHICH READER, asked in one place. `_scanner` holds the language-to-reader mapping so that
         # this branch and `supported()` cannot drift apart -- and each reader is only ever given a
         # checkout in its own language, because feeding a Go tree to Python's `ast` and labelling the
@@ -267,7 +285,7 @@ class GitHubFunctions:
             self.rejection_counts[reason] = self.rejection_counts.get(reason, 0) + 1
             return []
         found = scanner(root, stem, commit)
-        if not found and scan_native.supported(_NATIVE_ALIASES.get(language, language)):
+        if not found and scan_native.supported(language):
             # A typing reader ran and found nothing it could type. That is a fact about THIS
             # material, and it must not wear the same label as a language we cannot read at all --
             # otherwise a registered adapter is indistinguishable from a missing one.
