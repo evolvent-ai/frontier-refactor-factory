@@ -164,6 +164,23 @@ def _find_package_root(root: str, language: str = "python"):
         if os.path.isdir(lib) and any(f.endswith(".rb") for f in os.listdir(lib)):
             return lib, name
         return "", ""
+    # A STATIC LANGUAGE'S PACKAGE ROOT IS ITS MANIFEST'S DIRECTORY, not an __init__.py hunt.
+    # Go has go.mod, Rust Cargo.toml, C++ CMakeLists.txt (or a src/ dir). The old fall-through made
+    # every Go batch walk the WHOLE repository looking for __init__.py -- TheAlgorithms/Go is 140MB
+    # and hundreds of files, and each widened candidate paid that walk, which is what produced the
+    # twenty-minute stalls with zero CPU and no network: an os.walk with no subprocess to show for it.
+    if language in ("go", "rust", "cpp", "c"):
+        manifests = {"go": ("go.mod",), "rust": ("Cargo.toml",), "cpp": ("CMakeLists.txt",),
+                     "c": ("CMakeLists.txt",)}
+        for manifest in manifests.get(language, ()):
+            found_manifest = os.path.join(root, manifest)
+            if os.path.isfile(found_manifest):
+                return root, os.path.basename(root)
+        # No manifest at root: src/ is the conventional C/C++/Rust layout.
+        for candidate in ("src",):
+            if os.path.isdir(os.path.join(root, candidate)):
+                return os.path.join(root, candidate), os.path.basename(root)
+        return "", ""
     candidates = []
     for directory, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in (".git", "tests", "test", "docs", "examples")]
