@@ -131,9 +131,20 @@ def _static_go(dispatch: dict, wrong: str | None) -> str:
 
     needs_base64 = any("bytes" in str(p.get("kind", "")) for _n, _m, _k, params, _r in dispatch.values()
                        for p in list(params or ()))
-    lines = ["package main", "", 'import "fmt"', ""]
-    if needs_base64:
-        lines[2] = 'import (\n\t"fmt"\n\t"encoding/base64"\n)'
+    # THE OPERATION'S MODULE IS A REAL GO IMPORT PATH (`github.com/x/y/graph`), and its klass is the
+    # declared package name (`graph`). A Go dispatcher imports the package and calls `graph.Func`.
+    # Unique imports only -- duplicate import paths are a compile error.
+    imports = []
+    for _n, (module, _s, klass, _p, _r) in sorted(dispatch.items()):
+        if module and module not in imports:
+            imports.append(module)
+    imports = ["fmt", "encoding/base64" if needs_base64 else None, *imports]
+    import_lines = ["import ("]
+    for path in imports:
+        if path:
+            import_lines.append('\t"%s"' % path)
+    import_lines.append(")")
+    lines = ["package main", "", "\n".join(import_lines), ""]
     used: list = []
     for _sym, (_mod, _sym2, _klass, params, _result) in sorted(dispatch.items()):
         for param in list(params or ()):
@@ -160,7 +171,7 @@ def _static_go(dispatch: dict, wrong: str | None) -> str:
     lines.append("\tif !ok { return nil, fmt.Errorf(\"operation name must be a string\") }")
     lines.append("\targs = args[1:]")
     lines.append("\tswitch op {")
-    for symbol, (_module, _symbol, _klass, params, _result) in sorted(dispatch.items()):
+    for symbol, (_module, _symbol, klass, params, _result) in sorted(dispatch.items()):
         params = list(params or ())
         lines.append("\tcase %s:" % json.dumps(symbol))
         lines.append("\t\tif len(args) != %d {" % len(params))
@@ -190,7 +201,9 @@ def _static_go(dispatch: dict, wrong: str | None) -> str:
         # A PACKAGE SUBJECT COMPILES INTO THE SAME PACKAGE as the dispatcher (all files in one
         # directory), so the symbol is called unqualified -- no module prefix. Go has no per-file
         # namespace; that is the module import's job, and it is not one here.
-        lines.append("\t\treturn %s(%s), nil" % (symbol, ", ".join(call_args)))
+        pkg = klass if klass else ""
+        qualified = ("%s." % pkg) if pkg else ""
+        lines.append("\t\treturn %s%s(%s), nil" % (qualified, symbol, ", ".join(call_args)))
     lines.append("\t}")
     lines.append('\treturn nil, fmt.Errorf("unknown operation: %s", op)')
     lines.append("}")

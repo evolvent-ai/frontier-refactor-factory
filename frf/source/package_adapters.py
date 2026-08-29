@@ -143,6 +143,18 @@ def _go(root, package_name, package_root):
     """
     from . import native_functions as native
 
+    # THE GO IMPORT PATH, not a made-up dotted name. `_reactor` used to emit
+    # `package_name + "." + os.path.relpath(...)` which produced `pkg..` -- a string with no
+    # meaning to the Go compiler. A Go package dispatcher has to `import "github.com/x/y/graph"`
+    # and call `graph.Func(...)`, so the operation's module is the real import path (go.mod module
+    # plus the file's relative directory), and its klass is the declared package name (`graph`).
+    module_path = ""
+    go_mod_path = os.path.join(root, "go.mod")
+    if os.path.isfile(go_mod_path):
+        import re as _re
+        match = _re.search(r"module\s+(\S+)", open(go_mod_path, encoding="utf-8", errors="replace").read())
+        module_path = match.group(1) if match else ""
+
     result = []
     found = native.scan(root, package_name, "1.0", language="go")
     seen = set()
@@ -150,9 +162,11 @@ def _go(root, package_name, package_root):
         if fn.symbol in seen:
             continue
         seen.add(fn.symbol)
-        module = package_name + "." + os.path.relpath(os.path.dirname(fn.path), root).replace(os.sep, ".")
+        rel_dir = os.path.relpath(os.path.dirname(fn.path), root)
+        import_path = (module_path + "/" + rel_dir.replace(os.sep, "/")).rstrip("/") if module_path else ""
         signature = "(%s)" % ", ".join(str(p["native"]) for p in fn.schema["params"])
-        result.append(Operation(fn.symbol, module, fn.symbol, signature, "go",
+        result.append(Operation(fn.symbol, import_path, fn.symbol, signature, "go",
+                                klass=fn.declared_package,
                                 params=tuple(dict(p) for p in fn.schema["params"]),
                                 result=dict(fn.result or {})).to_json())
     return _unique(result)
