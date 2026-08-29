@@ -75,13 +75,18 @@ class Shim:
     # -- and, once the package name was fixed by hand, `undefined: Entry` underneath it.
     binds_symbol: bool = False
 
-    def commands(self, workdir: str, symbol: str = "entry") -> tuple:
+    def commands(self, workdir: str, symbol: str = "entry", *, bridged: bool = False) -> tuple:
         """-> (build argv lists, run argv), resolved against a real directory.
 
         `symbol` is WHICH function to serve, and it travels to the shim as an argument rather than
         being written into it. A shim that could only serve a function literally called `entry`
         could only serve a subject somebody had written for the occasion, and the material this
         factory sources is real code where the function is called `camel_to_snake`.
+
+        `bridged` says whether a generated bridge was written beside the subject. TOLD, not probed:
+        this once tested `os.path.exists`, which is wrong for the caller that emits a task package --
+        it resolves `workdir="."` so the run.sh it writes is portable, and the check then asked about
+        the factory's own working directory rather than the room the commands will run in.
         """
         slots = {"entry": os.path.join(workdir, self.template),
                  "subject": os.path.join(workdir, self.subject),
@@ -97,13 +102,12 @@ class Shim:
         # hand-written one in a test, or any subject written for this wire -- is materialised without
         # a binding and so has no bridge file. Naming a file that was never written fails the build
         # with a message about a missing path, which says nothing about either the subject or the
-        # bridge. Present, it is compiled; absent, it is dropped from the command.
+        # bridge. Written, it is compiled; not written, it is dropped from the command.
         bridge_path = slots["bridge"]
         build = []
         for argv in self.build:
             resolved = [part.format(**slots) for part in argv]
-            build.append([part for part in resolved
-                          if part != bridge_path or os.path.exists(bridge_path)])
+            build.append([part for part in resolved if part != bridge_path or bridged])
         return tuple(build), [part.format(**slots) for part in self.run]
 
 
@@ -222,7 +226,8 @@ def materialise(workdir: str, language: str, subject_path: str,
     """
     shim = load(language)
     os.makedirs(workdir, exist_ok=True)
-    if binding and shim.bridge:
+    bridged = bool(binding and shim.bridge)
+    if bridged:
         # Imported here rather than at module scope: `bridge` is a sibling in this package and only
         # this branch needs it, so a shim table with no static language stays importable on its own.
         from .. import bridge as bridges
@@ -256,4 +261,4 @@ def materialise(workdir: str, language: str, subject_path: str,
         shutil.copyfile(subject_path, destination)
     with open(os.path.join(workdir, shim.template), "w", encoding="utf-8") as handle:
         handle.write(source(shim))
-    return shim.commands(workdir, symbol)
+    return shim.commands(workdir, symbol, bridged=bridged)

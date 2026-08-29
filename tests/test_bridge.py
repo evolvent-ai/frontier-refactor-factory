@@ -165,3 +165,86 @@ def test_supported_names_only_languages_with_a_generator():
     assert bridge.supported("go")
     assert not bridge.supported("rust")
     assert not bridge.supported("")
+
+
+# --------------------------------------------------------------------- what an emitted task ships
+
+
+class _Corpus:
+    """The three fields `write_tests` reads. A real Corpus needs a freeze to build."""
+
+    expectations = ()
+    inputs: dict = {}
+    timed = ()
+
+
+class _Material:
+    """A mined Go function, as `_locate` would have produced it."""
+
+    def __init__(self, source_path):
+        self.identity = "github:o/r@abc123#s/bubble.go.Bubble"
+        self.language = "go"
+        self.source_path = source_path
+        self.symbol = "Bubble"
+        self.description = "sort"
+        self.forbidden = ()
+        self.binding = {"params": [_ints()], "result": _ints(), "package": "sort"}
+
+
+def _emit(tmp_path):
+    from types import SimpleNamespace
+    from frf.observe.call import package as call_package
+
+    subject = tmp_path / "bubble.go"
+    subject.write_text("package sort\n"
+                       "func main() { println(1) }\n"
+                       "func Bubble(array []int) []int { return array }\n")
+    out = tmp_path / "task"
+    (out / "environment").mkdir(parents=True)
+    call_package.write_tests(str(out), _Corpus(),
+                             spec=SimpleNamespace(language="go", name="t", scale="kernel"),
+                             material=_Material(str(subject)))
+    return out
+
+
+def test_an_emitted_static_task_ships_the_bridge_it_needs_to_build(tmp_path):
+    """E7 replay failed for exactly this, having passed freeze, adequacy and evidence.
+
+    The emitted package laid the subject out with its OWN copy of "copy the source, write the shim",
+    so it was missing everything `materialise` had learned: no bridge.go, and a subject.go still
+    saying `package sort` beside a serve.go saying `package main`. The reference could not build out
+    of the package it shipped in, reported as `the submission exited without answering`.
+
+    This is the class of fault E7 exists to catch -- a reference built somewhere the package does not
+    contain -- so it is pinned on both sides of the wall.
+    """
+    out = _emit(tmp_path)
+    for side in (out / "tests" / "reference", out / "environment"):
+        assert (side / "bridge.go").is_file(), "%s ships no bridge; serve.go has no Entry" % side
+        assert "func Entry(" in (side / "bridge.go").read_text()
+        subject = (side / "subject.go").read_text()
+        assert subject.startswith("package main"), "the package clause was not reconciled"
+        assert "frfUnusedMain(" in subject, "a second main would collide with the shim's"
+
+
+def test_run_sh_compiles_the_bridge_and_keeps_paths_portable(tmp_path):
+    """run.sh ships inside the package and is started after a cd, so paths must stay relative.
+
+    `bridged` is passed to `commands()` rather than probed with os.path.exists for this reason: the
+    workdir resolves to ".", so a probe would have asked about the factory's own directory and
+    dropped bridge.go from a build that needs it.
+    """
+    run = (_emit(tmp_path) / "environment" / "run.sh").read_text()
+    assert "bridge.go" in run, "the bridge is written but never compiled"
+    assert "/tmp" not in run and str(tmp_path) not in run, "run.sh carries this machine's paths"
+
+
+def test_both_sides_of_the_wall_are_laid_out_identically(tmp_path):
+    """The timing comparison is only meaningful if the two sides are byte-identical.
+
+    A reference served differently from the candidate measures the difference between two harnesses.
+    """
+    out = _emit(tmp_path)
+    reference, environment = out / "tests" / "reference", out / "environment"
+    for name in ("subject.go", "bridge.go", "serve.go", "run.sh"):
+        assert (reference / name).read_text() == (environment / name).read_text(), name

@@ -81,7 +81,7 @@ def write_tests(path: str, corpus, *, spec, material) -> None:
     if hasattr(material, "entry_points"):
         _serve_package_here(reference, shim, material, language=spec.language)
     else:
-        _serve_here(reference, shim, material)
+        _serve_here(reference, shim, material, language=spec.language)
 
     with open(os.path.join(tests, VERIFIER), "w", encoding="utf-8") as handle:
         handle.write(VERIFIER_SOURCE)
@@ -89,7 +89,7 @@ def write_tests(path: str, corpus, *, spec, material) -> None:
     if hasattr(material, "entry_points"):
         _serve_package_here(os.path.join(path, "environment"), shim, material, language=spec.language)
     else:
-        _serve_here(os.path.join(path, "environment"), shim, material)
+        _serve_here(os.path.join(path, "environment"), shim, material, language=spec.language)
 
 
 def _serve_package_here(room: str, shim, material, *, language: str = "python") -> None:
@@ -120,7 +120,8 @@ def _serve_package_here(room: str, shim, material, *, language: str = "python") 
                          "  const fn = loaded[symbol] || (loaded.default && loaded.default[symbol]) || loaded.default;\n"
                          "  if (typeof fn !== 'function') throw new Error('export is not callable: ' + symbol);\n"
                          "  return fn(...args);\n}\n" % json.dumps(dispatch, sort_keys=True))
-        _serve_here(room, shim, type("AdapterMaterial", (), {"source_path": adapter, "symbol": "entry"})())
+        _serve_here(room, shim, type("AdapterMaterial", (), {"source_path": adapter, "symbol": "entry"})(),
+                    language=language)
         return
     adapter = os.path.join(room, "subject.py")
     dispatch = {entry["name"]: (entry["module"], entry["symbol"])
@@ -130,27 +131,41 @@ def _serve_package_here(room: str, shim, material, *, language: str = "python") 
                      "    if op not in _DISPATCH: raise ValueError('unknown operation')\n"
                      "    module, symbol = _DISPATCH[op]\n"
                      "    return getattr(importlib.import_module(module), symbol)(*args)\n" % dispatch)
-    _serve_here(room, shim, type("AdapterMaterial", (), {"source_path": adapter, "symbol": "entry"})())
+    _serve_here(room, shim, type("AdapterMaterial", (), {"source_path": adapter, "symbol": "entry"})(),
+                language=language)
 
 
-def _serve_here(room: str, shim, material) -> None:
+def _serve_here(room: str, shim, material, *, language: str) -> None:
     """Lay out one servable copy of the subject: the source, the shim, and a run.sh.
 
     BOTH SIDES ARE LAID OUT THE SAME WAY, by the same function. The reference in tests/ and the
     solver's starting point in environment/ are byte-identical, which is what makes the timing
     comparison meaningful -- a reference served differently from the candidate would be measuring
     the difference between two harnesses.
+
+    `language` is taken rather than inferred from `shim`: a Shim is a row of data with no name of its
+    own, and two languages legitimately share one -- typescript uses serve.js, cpp uses serve.c.
     """
     import shlex
 
-    os.makedirs(room, exist_ok=True)
-    destination = os.path.join(room, shim.subject)
-    if not (os.path.exists(destination) and os.path.samefile(material.source_path, destination)):
-        shutil.copyfile(material.source_path, destination)
-    with open(os.path.join(room, shim.template), "w", encoding="utf-8") as handle:
-        handle.write(shims.source(shim))
+    # LAID OUT BY THE SAME FUNCTION THAT LAYS OUT THE BUILD TREE, which is what the docstring above
+    # claims and what this did not do. It used to copy the subject and write the shim itself, so an
+    # emitted package was missing everything `materialise` had learned to add: for a static language,
+    # the generated bridge that declares the shim's entry point, and the package clause reconciled to
+    # the shim's own. The reference then FROZE and PASSED EVIDENCE in the build tree and failed E7
+    # replay out of the package, as `the submission exited without answering` -- a subject.go saying
+    # `package dynamic` beside a serve.go saying `package main`, with no bridge.go at all.
+    #
+    # This is exactly the class of fault `drive` exists to catch: a reference that was built somewhere
+    # the package does not contain.
+    binding = getattr(material, "binding", None)
+    shims.materialise(room, language, material.source_path, material.symbol, binding=binding)
 
-    build, argv = shim.commands(".", material.symbol)
+    # RESOLVED AGAINST ".", not against `room`: run.sh ships inside the package and is started by the
+    # verifier after a `cd` to its own directory, so absolute paths from this machine would name
+    # directories the solver never had. `bridged` is passed rather than probed for the same reason --
+    # there is no bridge at `./bridge.go` on THIS host to look for.
+    build, argv = shim.commands(".", material.symbol, bridged=bool(binding and shim.bridge))
     lines = ["#!/usr/bin/env bash",
              "# Serve the subject over the wire the verifier speaks. Replace the implementation,",
              "# not this file: the verifier starts it exactly as written.",
