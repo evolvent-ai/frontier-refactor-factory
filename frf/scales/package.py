@@ -111,6 +111,15 @@ class Observer:
                                      entry.get("params") or (), entry.get("result") or {}))
                     for entry in self.material.dispatch}
         self._dispatch = dispatch
+        # GO NEEDS AN INDEPENDENT PACKAGE, and the dispatcher/shim live in a subpackage of the module
+        # rather than beside its sources. The module's own packages are `package cayley`, `package
+        # graph`, and a `page main` dispatcher at the repo root collides with them; a `frfd/`
+        # subpackage is a peer that imports them (`graph.IsPersistent`), which `go build .` inside it
+        # resolves through go.mod -- the same module scope the earlier layout fix established, but
+        # without package-name collisions. Other languages keep the dispatcher beside their sources.
+        if spec.language == "go":
+            destination = os.path.join(destination, "frfd")
+            os.makedirs(destination, exist_ok=True)
         adapter = os.path.join(destination, _subject_name(spec.language))
         with open(adapter, "w", encoding="utf-8") as handle:
             handle.write(_dispatcher_source(spec.language, dispatch))
