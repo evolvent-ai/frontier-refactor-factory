@@ -42,6 +42,7 @@ _WRONG = {
     "typescript": ("null", "0"),
     "ruby": ("nil", "0"),
     "go": ("nil", "0"),
+    "rust": ("Ok(crate::Json::Null)", "Ok(crate::Json::Number(0.0))"),
 }
 
 def languages() -> tuple:
@@ -194,6 +195,108 @@ def _unsupported(message: str):
     raise Unsupported(message)
 
 
+
+def _rust_element(native: str) -> str:
+    """The element type inside a Rust sequence spelling: `Vec<i32>` / `&[i32]` -> `i32`."""
+    stripped = native.lstrip("&").replace("mut ", "").strip()
+    if stripped.startswith("Vec<") and stripped.endswith(">"):
+        return stripped[4:-1].strip()
+    return stripped.strip("[]").strip()
+
+
+def _static_rust(dispatch: dict, wrong: str | None) -> str:
+    """A Rust package dispatcher, appended to the subject like the single-function bridge.
+
+    The shim calls `entry(args: &crate::Json)`; the operation name is args[0], the rest are the
+    call's arguments. Each operation converts with the same functions the single-function bridge
+    uses (`bridge._RUST_CONVERTERS`), so decoding changes propagate everywhere. All operations live
+    in `mod subject`, so the symbol is called unqualified.
+    """
+    if wrong is not None:
+        return ("pub fn entry(_args: &crate::Json) -> Result<crate::Json, String> {\n"
+                "    %s\n"
+                "}\n" % wrong)
+    from ..call import bridge
+
+    lines: list = []
+    used: list = []
+    for _symbol, (_module, _sym, _klass, params, _result) in sorted(dispatch.items()):
+        for param in list(params or ()):
+            kind = str(param.get("kind", ""))
+            if kind in bridge._RUST_CONVERTERS and kind not in used:
+                used.append(kind)
+    for kind in used:
+        lines.append(bridge._RUST_CONVERTERS[kind][1].strip("\n"))
+        lines.append("")
+    for kind, dependency in (("int_array", "int"), ("float_array", "float")):
+        if kind in used and dependency not in used:
+            lines.append(bridge._RUST_CONVERTERS[dependency][1].strip("\n"))
+            lines.append("")
+    lines.append("// entry is what serve.rs calls; dispatch on args[0].")
+    lines.append("pub fn entry(args: &crate::Json) -> Result<crate::Json, String> {")
+    lines.append('    let items = args.as_array()'
+                 '.ok_or_else(|| "the arguments must be a JSON array".to_string())?;')
+    lines.append('    if items.is_empty() { return Err("expected an operation name".to_string()); }')
+    lines.append('    let op = items[0].as_str().ok_or_else(|| "operation name must be a string".to_string())?;')
+    lines.append("    let rest = &items[1..];")
+    lines.append("    match op {")
+    for symbol, (_module, _sym, _klass, params, result) in sorted(dispatch.items()):
+        params = list(params or ())
+        lines.append('        %s => {' % json.dumps(symbol))
+        lines.append('            if rest.len() != %d {' % len(params))
+        lines.append('                return Err(format!("expected %d argument(s), got {}", rest.len()));'
+                     % len(params))
+        lines.append("            }")
+        call_args: list = []
+        for index, param in enumerate(params):
+            kind = str(param.get("kind", ""))
+            if kind not in bridge._RUST_CONVERTERS:
+                return _unsupported("no Rust conversion for a %r argument" % kind)
+            converter = bridge._RUST_CONVERTERS[kind][0]
+            native = " ".join(str(param.get("native", "")).split()) or bridge._RUST_OWNED[kind]
+            owned = bridge._RUST_OWNED[kind]
+            name = "arg%d" % index
+            lines.append("            let %s = %s(&rest[%d])?;" % (name, converter, index))
+            # The mined spelling can differ from the converter's type: Vec<usize> vs Vec<i64>.
+            element = _rust_element(native)
+            if kind.endswith("_array") and element != _rust_element(owned):
+                lines.append("            let %s: Vec<%s> = %s.into_iter().map(|item| item as %s).collect();"
+                             % (name, element, name, element))
+            elif not kind.endswith("_array") and native.lstrip("&").strip() != owned:
+                lines.append("            let %s = %s as %s;" % (name, name, native.lstrip("&").strip()))
+            call_args.append(name)
+        result = dict(result or {})
+        kind = str(result.get("kind", ""))
+        if kind not in bridge._RUST_ENCODE:
+            if kind:
+                return _unsupported("no Rust encoding for a %r result" % kind)
+            # A void function: nothing to return, so the mutation of an argument is observed
+            # through what is handed back -- the same rule the single-function bridge follows.
+            carrier = next((n for n, p in enumerate(params)
+                            if str(p.get("kind", "")).endswith("_array")), None)
+            if carrier is None:
+                # No array argument to observe, and no result to encode. A no-argument
+                # metadata-style function (e.g. a config getter) is still callable; its value is
+                # whatever it returns, which we cannot express without a result type -- so call
+                # and report null. The probe still distinguishes an implementation that throws
+                # from one that answers.
+                lines.append("            %s(%s);" % (symbol, ", ".join(call_args)))
+                lines.append("            Ok(crate::Json::Null)")
+                lines.append("        }")
+                continue
+            lines.append("            %s(%s);" % (symbol, ", ".join(call_args)))
+            lines.append("            Ok(crate::Json::Array(arg%d.iter().map(|item| crate::Json::Number(*item as f64)).collect()))" % carrier)
+            lines.append("        }")
+            continue
+        lines.append("            let value = %s(%s);" % (symbol, ", ".join(call_args)))
+        lines.append("            Ok(%s)" % bridge._RUST_ENCODE[kind])
+        lines.append("        }")
+    lines.append('        _ => Err(format!("unknown operation: {}", op).to_string()),')
+    lines.append("    }")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
 def _ruby(dispatch: dict, wrong: str | None) -> str:
     if wrong is not None:
         return ("def entry(op, *args)\n"
@@ -273,6 +376,7 @@ _GENERATORS = {
     # conversion of the probe's argument list. `params`/`result` per operation now come from
     # `native_functions` (see package_adapters), which reads types off the grammar.
     "go": _static_go,
+    "rust": _static_rust,
 }
 
 

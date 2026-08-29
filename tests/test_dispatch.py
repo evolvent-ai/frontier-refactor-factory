@@ -67,7 +67,7 @@ def test_a_mutant_is_a_wrong_answer_in_the_subjects_own_language():
     Keyed by language now, so a missing entry is a KeyError at generation time rather than a mutant
     that is mis-spelled in a way only that language's runtime can tell you about.
     """
-    spellings = {"python": "None", "javascript": "null", "typescript": "null", "ruby": "nil", "go": "nil"}
+    spellings = {"python": "None", "javascript": "null", "typescript": "null", "ruby": "nil", "go": "nil", "rust": "Ok(crate::Json::Null)"}
     for language in dispatch.languages():
         assert language in spellings, "%s has a generator but no wrong-answer spelling" % language
         missing = dispatch.source(language, DISPATCH, mutant=0)
@@ -153,7 +153,7 @@ def test_the_mutants_differ_from_each_other():
     assert len(sources) == len(ATTEMPTS), "the mutation attempts are not distinct"
 
 
-@pytest.mark.parametrize("language", ["rust", "c", "cpp", "java"])
+@pytest.mark.parametrize("language", ["c", "cpp", "java"])
 def test_a_language_without_a_dispatcher_refuses_loudly(language):
     """Silence here is what produced Python source in a file named `subject.rs`.
 
@@ -186,7 +186,7 @@ def test_the_dispatcher_covers_every_operation_it_was_given():
             # the SAME package as the dispatcher (all files in one directory, no per-file namespace),
             # so the symbol is called unqualified -- the module line is part of the import machinery
             # it does not use. Demanding the dotted module on Go would fail a correct dispatcher.
-            if language == "go":
+            if language in ("go", "rust"):
                 continue
             assert module in source or module.replace(".", "/") in source, (
                 "%s dispatcher omits module %s in any spelling" % (language, module))
@@ -235,7 +235,7 @@ def test_the_emitted_package_task_gets_a_dispatcher_in_its_own_language():
         assert subject == shims.TEMPLATES[language].subject
         assert marker in text, "%s task did not get a %s dispatcher: %s" % (language, language, subject)
 
-    for language in ("rust", "java", "cpp"):
+    for language in ("java", "cpp"):
         with pytest.raises(dispatch.Unsupported):
             emitted(language)
 
