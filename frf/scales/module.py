@@ -21,7 +21,7 @@ import os
 import shutil
 import subprocess
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..core import integrity
 from ..core.scale import Candidate, Spec
@@ -82,6 +82,13 @@ class Material:
     description: str
     schema: Schema
     forbidden: tuple = ()
+    # WHAT A STATIC SHIM NEEDS AND `schema` CANNOT CARRY. A bridge has to declare variables of the
+    # subject's OWN types, and `Schema.from_json` keeps only what a probe can be drawn from: `[]int`
+    # and `[]int32` both arrive as `int_array`, so the source's spelling is gone by then. This holds
+    # the miner's raw entries -- kind AND spelling -- plus what the function returns and the package
+    # its file declared. Empty for a language whose shim binds a symbol itself, which is why
+    # `materialise` takes it as an option rather than a requirement.
+    binding: dict = field(default_factory=dict)
 
 
 class ProbeSource:
@@ -156,7 +163,8 @@ class Observer:
         repair loop to look at the wire.
         """
         build, argv = shims.materialise(self.workspace, spec.language,
-                                        self.material.source_path, self.material.symbol)
+                                        self.material.source_path, self.material.symbol,
+                                        binding=self.material.binding)
         if spec.language.lower() in ("typescript", "ts") and self._backend is None:
             raise BuildFailed("TypeScript call subjects require a sandbox backend; refusing host build")
         if self._backend is not None and getattr(self._backend, "name", "") != "local-process":
@@ -260,8 +268,15 @@ class Observer:
             handle.write(mutate(original, self.material.language, self.material.symbol,
                                 attempt))
 
+        # THE MUTANT NEEDS ITS OWN BRIDGE. This is a fresh directory holding a perturbed copy of the
+        # subject, and the bridge is a separate file: without it the room has a subject and a shim and
+        # no `Entry`, so every mutant would fail to build and E3 would score the perturbation as
+        # "detected" without the probe having judged anything. Same binding as the real subject --
+        # same symbol, same types -- pointed at perturbed source, which is exactly the comparison E3
+        # is for.
         build, argv = shims.materialise(room, self.material.language, perturbed,
-                                        self.material.symbol)
+                                        self.material.symbol,
+                                        binding=self.material.binding)
         if self._backend is not None and getattr(self._backend, "name", "") != "local-process":
             remote = "/tmp/frf-mutant-%s" % uuid.uuid4().hex[:12]
             self._backend.push(room, remote)
@@ -403,7 +418,15 @@ class Module:
             source_path=detail["source_path"], symbol=detail["symbol"],
             description=detail.get("description", ""),
             schema=Schema.from_json(detail["schema"]),
-            forbidden=tuple(detail.get("forbidden", ())))
+            forbidden=tuple(detail.get("forbidden", ())),
+            # THE RAW SCHEMA, not the parsed one. `Schema.from_json` keeps what a probe can be drawn
+            # from and discards the source's own type spelling, which is precisely what a generated
+            # bridge needs in order to declare a variable the real function will accept. Only the
+            # static readers supply `result`/`declared_package`; for the others this stays a dict of
+            # params that nothing reads, because their shims bind a symbol themselves.
+            binding={"params": (detail["schema"] or {}).get("params", ()),
+                     "result": detail.get("result") or {},
+                     "package": detail.get("declared_package", "")})
 
 
 def _task_name(material: Material) -> str:

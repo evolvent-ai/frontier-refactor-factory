@@ -339,6 +339,12 @@ def _to_candidate(function, *, root: str, full_name: str, commit: str,
             "source_path": function.path,
             "symbol": function.symbol,
             "schema": function.schema,
+            # WHAT A GENERATED BRIDGE NEEDS, and only the static readers set it. A dynamic shim binds
+            # a symbol at run time and needs neither; a static one has to be handed source that
+            # declares the right package and a variable of the right type to hold the answer. Absent
+            # for python/javascript/typescript, so both are read with a default downstream.
+            "result": getattr(function, "result", None),
+            "declared_package": getattr(function, "declared_package", ""),
             # The whole checkout, so checkout-native emission keeps local imports and fixtures
             # exactly as the repository published them.
             "root": root,

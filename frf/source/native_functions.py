@@ -27,6 +27,12 @@ from __future__ import annotations
 import os
 from types import SimpleNamespace
 
+# WHICH KINDS CAN CARRY A MUTATION, taken from the vocabulary that defines them rather than restated.
+# A void function is observed through what it writes into its arguments, so this file needs to know
+# which of them are writable -- and a second copy of that tuple would be a second thing to update
+# when a kind is added.
+from ..observe.probes.schema import ARRAY_KINDS
+
 # What a native type is worth as a probe schema. Keyed by the source spelling with whitespace and
 # `const`/`&` removed, so a table entry covers the several ways one type is written.
 #
@@ -100,6 +106,13 @@ _GRAMMARS = {
         "param_name_field": "name",
         "type_field": "type",
         "types": _GO_TYPES,
+        # Where this language writes what a function GIVES BACK. A probe schema does not need it --
+        # the corpus only describes inputs -- but the generated bridge does: it has to declare a
+        # variable of the real type to hold the result, and Go says nothing at all where a function
+        # returns nothing. An absent field is void, which is a third of the supply, not an edge case.
+        "result_field": "result",
+        # The declaration a generated bridge has to agree with, when the language has one.
+        "package_node": "package_clause",
         "skip_dirs": {"vendor", "testdata", ".git"},
         "skip_files": ("_test.go",),
     },
@@ -113,6 +126,10 @@ _GRAMMARS = {
         "param_name_field": "pattern",
         "type_field": "type",
         "types": _RUST_TYPES,
+        "result_field": "return_type",
+        # Rust has no package clause a bridge must match: the shim reaches the subject as
+        # `mod subject`, so the file's own name is the declaration.
+        "package_node": "",
         "skip_dirs": {"target", "tests", ".git"},
         "skip_files": (),
     },
@@ -126,6 +143,12 @@ _GRAMMARS = {
         "param_name_field": "name",
         "type_field": "type",
         "types": _JAVA_TYPES,
+        # Java spells a method's return type in the same `type` field a parameter uses, and says
+        # `void` explicitly rather than leaving it out.
+        "result_field": "type",
+        # The bridge is generated as class `Subject`, which the shim reflects for; a package
+        # declaration in the mined file would put the real symbol somewhere else, so it is read.
+        "package_node": "package_declaration",
         "skip_dirs": {"target", "build", "test", ".git"},
         "skip_files": ("Test.java",),
     },
@@ -139,6 +162,10 @@ _GRAMMARS = {
         "param_name_field": "declarator",
         "type_field": "type",
         "types": _CPP_TYPES,
+        # C++ puts the return type in the same `type` field as a parameter's, and spells `void`.
+        "result_field": "type",
+        # A namespace, if the file opens one, is part of the name the bridge has to call.
+        "package_node": "namespace_definition",
         "skip_dirs": {"build", "test", "tests", ".git", "third_party"},
         "skip_files": (),
     },
@@ -210,9 +237,21 @@ def _parameters(function, spec: dict, source: bytes) -> list | None:
 
     None for the WHOLE function rather than a shortened list: a subject called with the wrong number
     of arguments fails on every probe, and that failure would be charged to the material.
+
+    Each entry also carries `native`: the parameter's type AS THE SOURCE SPELLS IT. The schema kind
+    says what a probe may DRAW, and several spellings collapse onto one kind -- `[]int`, `[]int32` and
+    `[]int64` are all `int_array`. A generated bridge has to declare the real type to call the real
+    function, so the spelling cannot be recovered from the kind and is kept beside it. `scan` splits
+    the two apart; `Param.from_json` would drop this key anyway.
     """
     holder = function.child_by_field_name(spec["params_field"])
     if holder is None:
+        return None
+    # A METHOD IS NOT CALLABLE WITHOUT ITS RECEIVER, and nothing here can construct one. Rust hides
+    # this the worst: `self_parameter` is not in `param_nodes`, so `fn add(&mut self, cost: f64)` was
+    # mined as a free function of one argument -- a bridge generated from that cannot compile, and the
+    # failure would be charged to the material. Go marks it with a `receiver` field; both are refused.
+    if any(child.type == "self_parameter" for child in holder.children):
         return None
     params = _find(holder, spec["param_nodes"])
     schema = []
@@ -220,15 +259,77 @@ def _parameters(function, spec: dict, source: bytes) -> list | None:
         type_node = param.child_by_field_name(spec["type_field"])
         if type_node is None:
             return None
-        described = _param_schema(_text(source, type_node), spec["types"])
+        spelling = _text(source, type_node)
+        described = _param_schema(spelling, spec["types"])
         if described is None:
             return None
         name_node = param.child_by_field_name(spec["param_name_field"])
         # A C++ declarator is `&s` or `*p`; the sigil belongs to the type, not the name.
         described["name"] = (_text(source, name_node).lstrip("&*").strip()
                              if name_node is not None else "") or "arg%d" % len(schema)
+        described["native"] = " ".join(spelling.split())
         schema.append(described)
     return schema
+
+
+def _result(function, spec: dict, source: bytes) -> dict | None:
+    """What the function gives back: `{}` for void, a described type, or None if it cannot cross.
+
+    NOT PART OF THE PROBE SCHEMA, which describes inputs only. It is needed the moment a bridge has
+    to declare a variable to hold the answer and hand it to a JSON encoder.
+
+    Described with the SAME table the parameters use, so that "which spellings this factory can carry"
+    has one definition. The bridge then only needs to know how to turn a KIND into code -- were it to
+    re-derive kinds from spellings, that would be the second copy of a mapping this file already owns,
+    and the second copy is the one that goes stale.
+
+    VOID IS `{}` AND IS NOT AN ERROR. About a third of the Go functions in the checkouts on hand
+    return nothing, because sorting an array in place is how a lot of real code is written -- and an
+    in-place sort over a drawable array is exactly what the kernel scale wants. Go says so by omitting
+    the field; Java and C++ spell `void`. Whether such a function can be OBSERVED is a further
+    question, answered in `scan`: the mutation of an argument is the answer, so some argument has to
+    be able to carry one.
+
+    None means the function returns something real that this wire cannot express -- a Rust
+    `AppxDbscanParams<F, CommonNearestNeighbour>`, a builder, a handle. Refused whole, for the same
+    reason an untypeable parameter is: a value that cannot be encoded would arrive at the comparator
+    as a failure charged to the candidate.
+    """
+    field = spec.get("result_field") or ""
+    if not field:
+        return {}
+    node = function.child_by_field_name(field)
+    if node is None:
+        return {}
+    spelling = " ".join(_text(source, node).split())
+    if spelling in ("void", ""):
+        return {}
+    described = _param_schema(spelling, spec["types"])
+    if described is None:
+        return None
+    described["native"] = spelling
+    return described
+
+
+def _declared_package(tree, spec: dict, source: bytes) -> str:
+    """The package or namespace the mined file declares, or "" when it declares none.
+
+    A generated bridge has to AGREE with this. The first Go batch refused every candidate with
+    `found packages main (serve.go) and dynamic (subject.go)`: the shim is `package main` and the
+    material was `package dynamic`, and nothing had looked at the second name in order to reconcile
+    them.
+    """
+    wanted = spec.get("package_node") or ""
+    if not wanted:
+        return ""
+    for node in _find(tree.root_node, (wanted,)):
+        name = node.child_by_field_name("name")
+        if name is not None:
+            return _text(source, name).strip()
+        # Go's package_clause has no named field: the text is `package dynamic`.
+        text = _text(source, node).strip().rstrip("{").strip()
+        return text.split()[-1] if text.split() else ""
+    return ""
 
 
 def _symbol(function, spec: dict, source: bytes) -> str:
@@ -245,6 +346,12 @@ def scan(root: str, package: str = "", version: str = "", *, language: str = "")
 
     Deliberately the same contract as `functions.scan` and `javascript_functions.scan` -- the miner
     should not care which reader found a function.
+
+    TWO FIELDS BEYOND THAT SHAPE, and only a bridge generator reads them: `result` (what the function
+    gives back, as the source spells it, "" for void) and `declared_package` (the package or namespace
+    the file opens). Neither describes an input, so neither belongs in the probe schema; both are
+    required to generate code that COMPILES against the real symbol. The dynamic readers do not set
+    them because their shims need no bridge, so a caller reads them with a default.
     """
     spec = _GRAMMARS.get(language)
     if spec is None:
@@ -275,7 +382,13 @@ def scan(root: str, package: str = "", version: str = "", *, language: str = "")
             except Exception:                               # noqa: BLE001 -- a grammar can reject
                 continue
             module = os.path.relpath(path, root)
+            # Read once per FILE, not per function: a package clause is a property of the file.
+            declared = _declared_package(tree, spec, source)
             for function in _find(tree.root_node, spec["functions"]):
+                # A METHOD NEEDS A RECEIVER and nothing here can build one. Go marks it with a
+                # `receiver` field; Rust's `self_parameter` is caught in `_parameters`.
+                if function.child_by_field_name("receiver") is not None:
+                    continue
                 symbol = _symbol(function, spec, source)
                 if not symbol or symbol.startswith("_"):
                     continue
@@ -283,8 +396,20 @@ def scan(root: str, package: str = "", version: str = "", *, language: str = "")
                 # No parameters means nothing to sample, so no corpus can distinguish anything.
                 if not schema:
                     continue
+                result = _result(function, spec, source)
+                # Returns something this wire cannot carry. See `_result`.
+                if result is None:
+                    continue
+                # A VOID FUNCTION IS OBSERVED THROUGH WHAT IT MUTATES, so there has to be something
+                # mutable to observe. An in-place sort taking `[]int` is ideal material; a void
+                # function of scalars only has copied its arguments and left no evidence anywhere, so
+                # every probe would return the same nothing and no corpus could distinguish an
+                # implementation from a stub.
+                if not result and not any(p["kind"] in ARRAY_KINDS for p in schema):
+                    continue
                 found.append(SimpleNamespace(
                     package=package, version=version, module=module, symbol=symbol,
-                    path=path, schema={"params": schema}, doc=""))
+                    path=path, schema={"params": schema}, doc="",
+                    result=result, declared_package=declared))
     found.sort(key=lambda item: (item.module, item.symbol))
     return found

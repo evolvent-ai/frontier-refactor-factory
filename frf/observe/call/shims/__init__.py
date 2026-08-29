@@ -50,6 +50,10 @@ class Shim:
     run: tuple                     # argv that starts the server
     build: tuple = ()              # argv lists run once, in the workspace, before serving
     tool: str = ""                 # the executable that must exist for any of this to work
+    # Where a GENERATED BRIDGE is written, for a shim that cannot bind a mined symbol itself. Empty
+    # for the dynamic shims, which need none. A language that needs one also has to name `{bridge}`
+    # in its build argv, or the file would be written and never compiled.
+    bridge: str = ""
     # WHETHER THIS SHIM CAN BIND A MINED FUNCTION BY ITSELF. The third thing a call seam needs, and
     # the one that is easy to miss because two of them are so visible.
     #
@@ -84,9 +88,23 @@ class Shim:
                  "module": os.path.splitext(self.subject)[0],
                  "symbol": symbol,
                  "binary": os.path.join(workdir, "serve.bin"),
+                 # Present even when this shim needs no bridge, so that `format` cannot raise
+                 # KeyError on a template that mentions it. A shim with no bridge never names it.
+                 "bridge": os.path.join(workdir, self.bridge or "bridge.unused"),
                  "workdir": workdir}
-        build = tuple([part.format(**slots) for part in argv] for argv in self.build)
-        return build, [part.format(**slots) for part in self.run]
+        # A BRIDGE IS COMPILED ONLY IF THERE IS ONE. The build argv names `{bridge}` because a mined
+        # symbol needs it, but a subject that already declares the shim's entry point itself -- a
+        # hand-written one in a test, or any subject written for this wire -- is materialised without
+        # a binding and so has no bridge file. Naming a file that was never written fails the build
+        # with a message about a missing path, which says nothing about either the subject or the
+        # bridge. Present, it is compiled; absent, it is dropped from the command.
+        bridge_path = slots["bridge"]
+        build = []
+        for argv in self.build:
+            resolved = [part.format(**slots) for part in argv]
+            build.append([part for part in resolved
+                          if part != bridge_path or os.path.exists(bridge_path)])
+        return tuple(build), [part.format(**slots) for part in self.run]
 
 
 # Language -> how it is served. One table so that "which languages can be a subject" is a question
@@ -119,8 +137,12 @@ TEMPLATES = {
     # (alias one name; no types are needed) where a static language's is not, but it is still a
     # bridge, and until one exists ruby cannot serve mined material either.
     "ruby": Shim("serve.rb", "subject.rb", ("ruby", "{entry}"), tool="ruby"),
-    "go": Shim("serve.go", "subject.go", ("{binary}",), tool="go",
-               build=(("go", "build", "-o", "{binary}", "{entry}", "{subject}"),)),
+    # THREE FILES, not two: the shim, the mined subject, and the generated bridge that declares the
+    # `Entry` serve.go calls and converts JSON arguments into the subject's own types. Naming
+    # `{bridge}` in the build argv is what makes it compile; writing it and forgetting that is a file
+    # on disk the linker never sees, which fails as `undefined: Entry`.
+    "go": Shim("serve.go", "subject.go", ("{binary}",), tool="go", bridge="bridge.go",
+               build=(("go", "build", "-o", "{binary}", "{entry}", "{bridge}", "{subject}"),)),
     "rust": Shim("serve.rs", "subject.rs", ("{binary}",), tool="rustc",
                  # The subject is reached as `mod subject;` from the shim, so only the shim is named
                  # to the compiler and the subject is found beside it.
@@ -185,22 +207,52 @@ def source(shim: Shim) -> str:
 
 
 def materialise(workdir: str, language: str, subject_path: str,
-                symbol: str = "entry") -> tuple:
+                symbol: str = "entry", *, binding: dict | None = None) -> tuple:
     """Put a subject and its shim in one directory. -> (build argv lists, run argv).
 
     One implementation because there are two callers -- serving a subject and measuring its
     coverage -- and a second copy of "what the subject file is called" is exactly the kind of
     duplication that goes out of step and is then diagnosed as a compiler problem.
+
+    `binding` is what a STATIC shim needs in order to reach a mined symbol at all: the parameter
+    schema, what the function returns, and the package its file declared. Given one, a bridge is
+    generated beside the subject and the subject is reconciled so the two can compile together.
+    Omitted -- and it always is for python/javascript/typescript, whose shims bind a symbol
+    themselves -- nothing extra is written and the behaviour is exactly as before.
     """
     shim = load(language)
     os.makedirs(workdir, exist_ok=True)
+    if binding and shim.bridge:
+        # Imported here rather than at module scope: `bridge` is a sibling in this package and only
+        # this branch needs it, so a shim table with no static language stays importable on its own.
+        from .. import bridge as bridges
+        with open(os.path.join(workdir, shim.bridge), "w", encoding="utf-8") as handle:
+            handle.write(bridges.source(language, symbol=symbol,
+                                        params=binding.get("params") or (),
+                                        result=binding.get("result") or {},
+                                        package=str(binding.get("package") or "")))
     destination = os.path.join(workdir, shim.subject)
+    if shim.bridge:
+        # A STATIC SUBJECT IS RECONCILED, NOT JUST COPIED. Go requires every file in a directory to
+        # declare one package, and mined material declares its own -- `package sort` beside the
+        # shim's `package main` fails the build with `found packages main (serve.go) and sort
+        # (subject.go)`, which is what refused every candidate of the first Go kernel batch. A repo
+        # that ships a program also has its own `func main`, which collides with the shim's.
+        #
+        # Read-then-write rather than copyfile, and it is deliberately safe for the mutant path,
+        # which materialises a file that is ALREADY at the destination: the text is fully read before
+        # anything is written, and `reconcile` is idempotent, so reconciling twice is reconciling.
+        from .. import bridge as bridges
+        with open(subject_path, encoding="utf-8", errors="surrogateescape") as handle:
+            text = handle.read()
+        with open(destination, "w", encoding="utf-8", errors="surrogateescape") as handle:
+            handle.write(bridges.reconcile(language, text))
     # A source that is ALREADY where it needs to be is not an error. It happens whenever the file
     # is conventionally named -- `subject.py` served as python -- and most of all in the mutant
     # path, which writes a perturbed copy into a scratch directory under exactly this name and then
     # asks to have it materialised. `copyfile` raises SameFileError for that, which subclasses
     # OSError and so escapes the build-failure handling below it, taking E3 down with it.
-    if not (os.path.exists(destination) and os.path.samefile(subject_path, destination)):
+    elif not (os.path.exists(destination) and os.path.samefile(subject_path, destination)):
         shutil.copyfile(subject_path, destination)
     with open(os.path.join(workdir, shim.template), "w", encoding="utf-8") as handle:
         handle.write(source(shim))
