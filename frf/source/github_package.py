@@ -15,6 +15,7 @@ import subprocess
 import warnings
 
 from ..core.scale import Candidate
+from .function_miner import canonical
 
 CLONE_TIMEOUT = 300.0
 PER_REPOSITORY = 4
@@ -62,8 +63,9 @@ class GitHubPackages:
         url = str(detail.get("repository") or "")
         commit = str(detail.get("commit") or "")
         identity = str(detail.get("identity") or "")
-        language = repository.language.lower()
-        if not url or not commit or language not in ("python", "javascript", "typescript"):
+        language = canonical(repository.language)
+        from .package_adapters import operations as _operations, supported as _adapters_supported
+        if not url or not commit or not _adapters_supported(language):
             self.rejection_counts["unsupported-or-unpinned"] = self.rejection_counts.get("unsupported-or-unpinned", 0) + 1
             return None
         root = self._materialise(url, commit)
@@ -74,8 +76,13 @@ class GitHubPackages:
         if not package_root or not package_name:
             self.rejection_counts["no-package-root"] = self.rejection_counts.get("no-package-root", 0) + 1
             return None
-        dispatch = (_public_dispatch(root, package_root, package_name) if language == "python"
-                    else _javascript_dispatch(root, package_root, package_name))
+        # THE DISPATCHER CONTRACT IS ONE THING, AND THIS WAS THE SECOND COPY OF IT. The old line was
+        # `_public_dispatch(...) if python else _javascript_dispatch(...)`, so ruby -- which has a
+        # registered adapter in package_adapters.py -- fell through to the JAVASCRIPT branch and came
+        # out empty rather than errored. `operations()` is the same function `Package._locate` uses,
+        # so the source cannot describe a surface the locate side then fails to read. (For python the
+        # answer is identical to the old local helper; verified before rerouting.)
+        dispatch = _operations(root, language, package_name, package_root)
         # The call seam is JSON-only. Do not ask the model to invent an encoding for bytes, paths,
         # handles, or other non-JSON arguments; retain only operations the adapter proved safe.
         dispatch = [entry for entry in dispatch if bool(entry.get("json_safe", True))]
@@ -134,6 +141,28 @@ def _find_package_root(root: str, language: str = "python"):
                     return root, name
             except (OSError, ValueError, TypeError):
                 return "", ""
+        return "", ""
+    # A RUBY GEM IS A GEMFILE + lib/<something>.rb. `_ruby` walks `package_root` for `.rb` files and
+    # expects them under it; the source tree can be a whole repo, so `lib/` is the package root. The
+    # name is the gemspec's declared name, or the directory name when no gemspec is present -- the
+    # surrounding repo's name is a fine key when the repo IS the gem.
+    if language == "ruby":
+        import glob
+        gemspecs = glob.glob(os.path.join(root, "*.gemspec"))
+        name = ""
+        if gemspecs:
+            try:
+                import re as _re
+                spec_text = open(gemspecs[0], encoding="utf-8", errors="replace").read()
+                match = _re.search(r"\.name\s*=\s*[\"']([^\"']+)[\"']", spec_text)
+                name = match.group(1) if match else ""
+            except OSError:
+                name = ""
+        if not name:
+            name = os.path.basename(root.rstrip("/\\"))
+        lib = os.path.join(root, "lib")
+        if os.path.isdir(lib) and any(f.endswith(".rb") for f in os.listdir(lib)):
+            return lib, name
         return "", ""
     candidates = []
     for directory, dirs, files in os.walk(root):

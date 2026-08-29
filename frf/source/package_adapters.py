@@ -42,6 +42,20 @@ _ADAPTER_NAMES = {
 }
 
 
+def supported(language: str) -> bool:
+    """Whether this module can discover a package surface for `language`.
+
+    ONE truth for "which languages can be package subjects" on the SOURCING side. The gate in
+    `github_package._inspect` used to keep its own list, and the two disagreed: the registry declared
+    ruby's package scale and the adapter registered, while the source refused every ruby row as
+    `unsupported-or-unpinned` before the adapter was ever consulted -- a 742-second package/ruby batch
+    sourced zero candidates for that reason. A gate derived from this answer cannot drift from the
+    adapter table, for the same reason `dispatch.languages()` is derived from its generators.
+    """
+    key = (language or "").strip().lower()
+    return key in _ADAPTER_NAMES and globals().get(_ADAPTER_NAMES[key]) is not None
+
+
 def _python(root, package_name, package_root):
     result, seen = [], set()
     for directory, dirs, files in os.walk(package_root):
@@ -133,7 +147,20 @@ def _ruby(root, package_name, package_root):
         for filename in files:
             if filename.endswith(".rb"):
                 text = open(os.path.join(directory, filename), encoding="utf-8", errors="replace").read()
-                module = package_name + "." + os.path.relpath(os.path.join(directory, filename), root)[:-3].replace(os.sep, ".")
+                # RELATIVE TO THE REPO ROOT, WITH NO PACKAGE-NAME PREFIX. The dispatcher's
+                # `require_relative` resolves against the directory holding subject.rb, which is the
+                # room root after `_serve_package_here`'s copytree of `material.root` -- so the path
+                # the runtime sees is `<room>/lib/algo/sorting.rb`, and the module has to be
+                # `lib.algo.sorting` for `require_relative "lib/algo/sorting"` to find it.
+                #
+                # Prefixed with the package name -- `algo.lib.algo.sorting` -- the require path became
+                # `algo/lib/algo/sorting`, which `_serve_package_here` never creates: copytree only
+                # puts `material.root`'s own subtree there, and `lib/` is already inside it. Every
+                # ruby package task would have failed E7 with LoadError after passing every earlier
+                # gate. Because a ruby gem has no import-time package prefix -- the load path is the
+                # directory -- the correct module is the file path, not a dotted namespace.
+                rel_file = os.path.relpath(os.path.join(directory, filename), root)[:-3]
+                module = rel_file.replace(os.sep, ".")
                 for match in re.finditer(r"^[ \t]*def\s+([a-zA-Z_]\w*[!?=]?)", text, re.M):
                     symbol = match.group(1)
                     if symbol.startswith("_"):

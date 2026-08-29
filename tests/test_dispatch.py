@@ -232,3 +232,72 @@ def test_the_emitted_package_task_gets_a_dispatcher_in_its_own_language():
     for language in ("go", "rust", "java", "cpp"):
         with pytest.raises(dispatch.Unsupported):
             emitted(language)
+
+
+def test_a_ruby_package_task_reaches_its_operations_in_the_emitted_layout():
+    """The dispatched operation has to load in the room `_serve_package_here` creates.
+
+    THE MODULE PATH AND THE EMITTED LAYOUT ARE THE SAME FACT, and they disagreed for ruby. A gem at
+    `<repo>/lib/algo/sorting.rb` produces a dispatcher whose `require_relative` resolves against the
+    directory holding subject.rb -- the room root, which holds `material.root`'s subtree after the
+    copytree. So the module must be `lib.algo.sorting` for `require_relative "lib/algo/sorting"` to
+    reach the file.
+
+    It used to be `algo.lib.algo.sorting` -- the package name prefixed onto a path already rooted at
+    the repo. The require path became `algo/lib/algo/sorting`, which no copytree ever creates:
+    `material.root` already contains `lib/`, and there is no `<room>/algo/`. Every ruby package task
+    would pass every gate then fail E7 as `cannot load such file`. Verified against real ruby.
+
+    `_serve_package_here` uses the real chain, so the adapter's module and the emitted layout are
+    checked as one thing rather than as two strings that might agree by accident.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    from frf.observe.call import package as emit, shims
+    from frf.source import github_package as gp, package_adapters as pa
+
+    if not shims.usable("ruby"):
+        pytest.skip("ruby is not installed on this host")
+
+    repo = tempfile.mkdtemp()
+    os.makedirs(os.path.join(repo, "lib", "algo"))
+    with open(os.path.join(repo, "algo.gemspec"), "w") as handle:
+        handle.write("Gem::Specification.new { |s| s.name = 'algo' }\n")
+    with open(os.path.join(repo, "lib", "algo.rb"), "w") as handle:
+        handle.write("")
+    with open(os.path.join(repo, "lib", "algo", "sorting.rb"), "w") as handle:
+        handle.write("def quick_sort(xs)\n  return xs if xs.length <= 1\n  xs.sort\nend\n")
+
+    root, name = gp._find_package_root(repo, "ruby")
+    ops = pa.operations(repo, "ruby", name, root)
+    assert ops, "the gem's own function must be found"
+
+    # Emit like the pipeline does, into a room that receives material.root's subtree.
+    room = tempfile.mkdtemp()
+    shutil.copytree(repo, room, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns(".git", "tests", "test", "docs"))
+
+    # The class body is its own namespace, so values are read from enclosing locals.
+    root_path, package_root_path = repo, root
+
+    class Material:
+        package_name = name
+        package_root = package_root_path
+        symbol = "entry"
+        dispatch = ops
+        root = root_path
+
+    material = Material()
+    shim = shims.TEMPLATES["ruby"]
+    emit._serve_package_here(room, shim, material, language="ruby")
+
+    served = subprocess.run(
+        ["ruby", "serve.rb", "entry"],
+        cwd=room, input='{"id":1,"op":"run","args":["quick_sort",[3,1,2]]}\n',
+        capture_output=True, text=True, timeout=30)
+    assert served.returncode == 0, served.stderr
+    assert '"value":[1,2,3]' in served.stdout, (
+        "the dispatched operation did not load in the emitted layout: %s" % served.stderr)
