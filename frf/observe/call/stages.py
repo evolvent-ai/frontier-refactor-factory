@@ -21,6 +21,7 @@ is reached through the same interfaces the process seam will use.
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -103,6 +104,14 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
     new to the submission at the moment it is timed.
     """
     inputs = {"probe-%04d" % i: args for i, args in enumerate(source.draw(source.count))}
+    # TEMPORARY DIAGNOSTIC: record the exact probe corpus a freeze consumes, so the E2B-vs-local
+    # disagreement can be checked probe by probe. Removed once the mystery is closed.
+    try:
+        with open(os.environ.get("FRF_PROBE_DUMP", "/tmp/frf-probes.jsonl"), "a", encoding="utf-8") as handle:
+            for pid, args in inputs.items():
+                handle.write(json.dumps({"probe": pid, "args": args}) + "\n")
+    except Exception:  # noqa: BLE001 - diagnostics must never fail the freeze
+        pass
     observed: dict = {probe_id: [] for probe_id in inputs}
     try:
         max_seconds = float(os.environ.get("FRF_FREEZE_MAX_SECONDS", "3600"))

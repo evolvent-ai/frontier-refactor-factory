@@ -164,7 +164,7 @@ TEMPLATES = {
     # `{bridge}` in the build argv is what makes it compile; writing it and forgetting that is a file
     # on disk the linker never sees, which fails as `undefined: Entry`.
     "go": Shim("serve.go", "subject.go", ("{binary}",), tool="go", bridge="bridge.go",
-               build=(("go", "build", "-o", "{binary}", "{entry}", "{bridge}", "{subject}"),)),
+               build=(("env", "GOPROXY=off", "GOSUMDB=off", "go", "build", "-o", "{binary}", "{entry}", "{bridge}", "{subject}"),)),
     # THE BRIDGE IS THE SUBJECT FILE, because rustc is handed only the shim and reaches the subject as
     # `mod subject;` -- a third file would be invisible to the compiler. So the generated `entry` is
     # APPENDED to the mined source, which also puts the mined function in scope under its plain name.
