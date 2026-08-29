@@ -1,11 +1,27 @@
 # Serve a Ruby subject over the wire. Written into the task; not required by the factory.
 #
-# The subject supplies `entry(...)` in subject.rb, raising to refuse; its parameters are the
-# wire's `args`, splatted. Everything else is this file.
+# The subject supplies the function named on the command line, in subject.rb, raising to refuse; its
+# parameters are the wire's `args`, splatted. Everything else is this file.
 
 require 'json'
 
 require_relative 'subject'
+
+# WHICH FUNCTION, from the command line -- exactly as serve.py takes it. This file used to call a
+# method literally named `entry`, so it could only serve a subject somebody had written for the
+# occasion; the material this factory mines is real code where the function is called `two_sum`.
+# Being a dynamic language is not the same as binding a symbol: the splat was already general, the
+# NAME was not, so a mined `two_sum` raised NameError and ruby needed no bridge to fix -- only this.
+ENTRY = (ARGV[0] || 'entry').to_sym
+
+# A top-level `def` in subject.rb becomes a private method on Object, and `send` reaches a private
+# method where a plain call on an explicit receiver would not. Checked once, here, rather than per
+# call: a missing entry point is our layout being wrong, not the subject refusing, and answering
+# ok:false to every probe would freeze that mistake into an expectation as though it were behaviour.
+unless respond_to?(ENTRY, true)
+  $stderr.puts "serve: subject.rb defines no method #{ENTRY}"
+  exit 1
+end
 
 # The class and the message, never the backtrace: a backtrace carries absolute paths from the
 # machine that produced it, and those would be frozen into an expectation nothing else can match.
@@ -48,7 +64,7 @@ def handle(request)
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     repeats.times do
       begin
-        entry(*args)
+        send(ENTRY, *args)
       rescue StandardError => e
         failure = e
         break
@@ -60,9 +76,9 @@ def handle(request)
   end
 
   begin
-    # Splatted: `args` is the argument LIST, so `entry(a, b)` receives two arguments. See
-    # the contract in protocol.py.
-    value = entry(*args)
+    # Splatted: `args` is the argument LIST, so a two-parameter subject receives two arguments. See
+    # the contract in protocol.py. `send` because a top-level def is a private method on Object.
+    value = send(ENTRY, *args)
   rescue StandardError => e
     # A REFUSAL IS AN ANSWER. How the subject rejects bad input is behaviour a reimplementation has
     # to reproduce, so it is reported rather than raised, and the loop carries on reading.

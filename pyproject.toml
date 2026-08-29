@@ -44,6 +44,10 @@ sourcing = [
     "tree_sitter_rust>=0.24,<0.25",
     "tree_sitter_java>=0.23,<0.24",
     "tree_sitter_cpp>=0.23,<0.24",
+    # Ruby's grammar is read for STRUCTURE, not for types -- the language writes none. It answers the
+    # one question a regex cannot: whether a `def` is top-level, and so reachable by the `send` in
+    # serve.rb, or a method on some class that no amount of splatting will find.
+    "tree_sitter_ruby>=0.23,<0.24",
 ]
 sandbox = ["e2b>=1.0"]
 dev = ["pytest>=8", "pyflakes>=3"]

@@ -31,6 +31,7 @@ import time
 import ast
 from .javascript_functions import scan as scan_javascript
 from . import native_functions as scan_native
+from . import ruby_functions as scan_ruby
 
 from ..core.scale import Candidate
 from .functions import scan
@@ -146,6 +147,11 @@ def _scanner(language: str):
         return scan
     if key in ("javascript", "typescript"):
         return scan_javascript
+    # Ruby is its own reader: it has no parameter types in the language, so the types come from a
+    # written `@param`, and reachability has to come from a real parse -- `serve.rb` sends to the main
+    # object, so only a top-level `def` can be served.
+    if key == "ruby" and scan_ruby.supported():
+        return scan_ruby.scan
     native = _NATIVE_ALIASES.get(key, key)
     if scan_native.supported(native):
         return lambda root, stem, commit: scan_native.scan(root, stem, commit, language=native)

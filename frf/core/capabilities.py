@@ -67,19 +67,32 @@ _REGISTRY: dict[str, LanguageCapability] = {
     # What is missing is a per-candidate GENERATED BRIDGE: declare the package and entry the shim
     # expects, unpack the JSON arguments into concrete types, call the real symbol. Until it exists
     # these stay repo-capable, where the process seam needs no bridge because it runs a whole program.
-    "go": LanguageCapability("go", "repo-capable", "go", ("repo",),
-                             reason="mined symbols need a generated call bridge"),
+    # GO HAS ALL THREE, and it is the language the bridge was built for and proved on. Both claims are
+    # backed: MECHANISM by `observe/call.servable`, EVIDENCE by an attested kernel/go subject --
+    # go-Knapsack, `func Knapsack(maxWeight int, weights, values []int) int` mined from a real
+    # repository, bridged, built in E2B, frozen over 57 probes and replayed out of the emitted package.
+    #
+    # `package` is absent: that scale fans one entry point out to many symbols and needs a generated
+    # static dispatcher, which `observe/call/dispatch.py` does not have for Go and refuses loudly
+    # rather than guessing.
+    "go": LanguageCapability("go", "call-capable", "go", ("kernel", "module", "repo")),
     "rust": LanguageCapability("rust", "repo-capable", "rust", ("repo",),
                                reason="mined symbols need a generated call bridge"),
     "java": LanguageCapability("java", "repo-capable", "java", ("repo",),
                                reason="mined symbols need a generated call bridge"),
     "cpp": LanguageCapability("cpp", "repo-capable", "cpp", ("repo",),
                               reason="mined symbols need a generated call bridge"),
-    # Ruby is missing TWO of the three: no miner (`native_functions._GRAMMARS` has no ruby entry) and
-    # no binding (serve.rb splats any arity but hard-codes the name `entry`, and is passed no symbol,
-    # so a mined `coin_change` raises NameError). Being dynamic is not the same as binding.
-    "ruby": LanguageCapability("ruby", "repo-capable", "ruby", ("repo",),
-                               reason="no miner, and serve.rb binds no symbol"),
+    # RUBY HAS ALL THREE, and needed no bridge for the third -- only the symbol. serve.rb splatted any
+    # arity from the start but hard-coded the name `entry`, which was true of the file and not of the
+    # language: a dynamic runtime resolves a name, so `send(ENTRY, *args)` and one argv slot replaced
+    # what would have been a generated bridge. Its reader is its own, because Ruby writes no parameter
+    # types at all: they come from an `@param` comment, and the grammar is read for STRUCTURE -- only a
+    # top-level `def` is reachable by that `send`.
+    #
+    # `package` is absent: no dispatcher. Supply is thin and that is a fact about Ruby rather than
+    # about this reader -- 1884 definitions across the checkouts on hand carried 4 type annotations
+    # between them, and an untyped parameter is refused rather than guessed at.
+    "ruby": LanguageCapability("ruby", "call-capable", "ruby", ("kernel", "module", "repo")),
 }
 
 

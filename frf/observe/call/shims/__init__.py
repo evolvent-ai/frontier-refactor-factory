@@ -135,12 +135,14 @@ TEMPLATES = {
                        build=(("tsc", "--target", "ES2022", "--module", "commonjs",
                                "--skipLibCheck", "--outDir", "{workdir}", "{subject}"),),
                        tool="tsc", binds_symbol=True),
-    # RUBY IS DYNAMIC AND STILL DOES NOT BIND, which is why this flag is not just "is the language
-    # dynamic". `serve.rb` splats -- `entry(*args)` takes any arity -- but the NAME is hard-coded and
-    # `run` passes no `{symbol}`, so a mined `coin_change` raises NameError. Its bridge is cheap
-    # (alias one name; no types are needed) where a static language's is not, but it is still a
-    # bridge, and until one exists ruby cannot serve mined material either.
-    "ruby": Shim("serve.rb", "subject.rb", ("ruby", "{entry}"), tool="ruby"),
+    # RUBY NEEDED NO BRIDGE, ONLY THE SYMBOL. It was briefly recorded as unable to bind, which was
+    # true of the file and not of the language: the splat was always general, but the NAME was
+    # hard-coded to `entry` and no `{symbol}` was passed, so a mined `two_sum` raised NameError. A
+    # dynamic runtime can look a method up by name -- `send` -- so the fix is one argv slot and a
+    # `send`, not a generated bridge with concrete types. That is what separates it from go/rust/
+    # java/cpp, whose compilers need the types written out.
+    "ruby": Shim("serve.rb", "subject.rb", ("ruby", "{entry}", "{symbol}"), tool="ruby",
+                 binds_symbol=True),
     # THREE FILES, not two: the shim, the mined subject, and the generated bridge that declares the
     # `Entry` serve.go calls and converts JSON arguments into the subject's own types. Naming
     # `{bridge}` in the build argv is what makes it compile; writing it and forgetting that is a file
