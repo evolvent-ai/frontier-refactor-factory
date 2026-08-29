@@ -13,8 +13,17 @@ license = { text = "Apache-2.0" }
 # The factory itself has no third-party runtime dependency, and that is worth keeping. Everything it
 # needs -- subprocesses, JSON, hashing, statistics -- is in the standard library, so a task package
 # it emits can vendor its verifier without dragging an install behind it.
+# Harbor is the exception, and it is not a convenience: `core/harbor.py` does not write task.toml as
+# text, it constructs a real `harbor.models.task.config.TaskConfig` and serialises it. The emitted
+# format IS whichever harbor is installed, which is the point -- the factory cannot drift from the
+# published schema because it never restates it.
+#
+# BOUNDED ABOVE for that same reason. Unbounded, a harbor release changes the format of every task
+# this factory emits, and the change is first noticed partway through a batch rather than at install
+# time -- two runs a month apart would emit different formats into one corpus. Widening this is a
+# deliberate act: read what moved, run a batch, then raise the ceiling.
 dependencies = [
-    "harbor>=0.21.0",
+    "harbor>=0.22,<0.23",
 ]
 
 [project.scripts]
