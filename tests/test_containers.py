@@ -166,7 +166,14 @@ def test_every_call_to_the_remote_api_is_bounded_on_the_wire():
 
     # The SDK entry points that cross the network. `Sandbox.create` is spelled as an attribute call on
     # a name, the rest hang off `self._sandbox`.
-    wanted = {"create", "run", "write", "read"}
+    #
+    # `kill` IS IN THIS SET BECAUSE IT WAS LEFT OUT ONCE, and the omission cost a second batch after
+    # the first four call sites were fixed: a kernel/java run finished its work and then sat in
+    # teardown for eleven minutes with a live socket to the API. Its `except Exception` looked like
+    # cover and was not -- a call that never returns never raises. TEARDOWN counts as crossing the
+    # network, so it belongs here; the lesson is that this set must name every SDK method, not the
+    # ones that felt important.
+    wanted = {"create", "run", "write", "read", "kill"}
     unbounded = []
     for node in ast.walk(remote):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):

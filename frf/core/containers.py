@@ -66,6 +66,11 @@ TRANSFER_TIMEOUT = 300
 # for what is really a slow compile. This adds headroom rather than replacing the caller's figure.
 TRANSPORT_HEADROOM = 120
 
+# Killing a sandbox is bounded SHORT, because failing it costs nothing: an unkilled sandbox expires on
+# its own, which is what the handler in `close` already relies on. Waiting is the expensive outcome
+# here, not giving up -- a batch whose work was finished sat in teardown for eleven minutes.
+TEARDOWN_TIMEOUT = 30
+
 
 def _tar_bytes(local_dir: str, exclude: set | None = None) -> bytes:
     """A directory as a tar stream, with the host left out of it.
@@ -283,7 +288,13 @@ class Remote:
 
     def close(self) -> None:
         try:
-            self._sandbox.kill()
+            # BOUNDED LIKE EVERY OTHER REMOTE CALL, and this one needed saying twice: the `except`
+            # below looks like it covers anything teardown can do wrong, and it does not cover the
+            # thing that actually happens. An unbounded call does not raise, it WAITS -- so a batch
+            # that had finished its work sat in cleanup with a live socket to the API and no output,
+            # and the handler underneath never ran. TEARDOWN_TIMEOUT is short on purpose, because
+            # failing it is harmless: an unkilled sandbox expires on its own.
+            self._sandbox.kill(request_timeout=TEARDOWN_TIMEOUT)
         except Exception:                                     # noqa: BLE001 -- teardown, not a run
             # A sandbox that cannot be killed will expire on its own. Raising here would turn a
             # successful build into a failure during cleanup, which is the worst kind of false
