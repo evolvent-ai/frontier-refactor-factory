@@ -211,7 +211,8 @@ def _run_command(args) -> int:
                               freeze_runs=cfg.freeze_runs,
                               ledger_file=cfg.ledger_file,
                               candidate_workers=max(1, cfg.max_concurrent // max(1, len(cfg.jobs))),
-                              target_emitted=True, max_attempts=job.max_attempts)
+                              target_emitted=True, max_attempts=job.max_attempts,
+                              max_per_repository=job.max_per_repository)
             return job, report, None
         except Exception as exc:
             detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))

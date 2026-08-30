@@ -277,3 +277,41 @@ def test_the_inplace_form_is_untouched_by_the_cross_language_guard():
             object(), "module", automation.TaskForm.INPLACE, "")
     except automation.FormNotHonoured:
         pytest.fail("the guard fired on an inplace run, which is the form that works")
+
+
+def test_repository_concentration_is_configurable_per_job():
+    """A corpus mostly from one project is not a diverse corpus, and the right cap differs by scale.
+
+    module can fill a batch from a handful of generous repositories and wants a tight cap; a
+    14%-yield scale spreads far wider than the number suggests, because the cap counts ATTEMPTS
+    rather than emitted tasks, and tightening it there only starves the batch.
+    """
+    from frf.config import JobConfig, RunConfig
+
+    cfg = RunConfig.from_dict({"jobs": [
+        {"scale": "module", "form": "inplace", "budget": 25, "max_per_repository": 2},
+        {"scale": "repo", "form": "inplace", "budget": 25},
+    ]})
+    assert cfg.jobs[0].max_per_repository == 2
+    assert cfg.jobs[1].max_per_repository == 4, "the default must survive being unspecified"
+
+    with pytest.raises(ValueError, match="max_per_repository"):
+        JobConfig(scale="module", form="inplace", max_per_repository=0)
+
+    # It has to survive the round trip, or a run cannot be reproduced from its own provenance.
+    written = RunConfig.from_dict(
+        {"jobs": [{"scale": "module", "form": "inplace", "max_per_repository": 2}]}).to_yaml()
+    assert "max_per_repository: 2" in written, written
+
+
+def test_the_diversity_cap_actually_bounds_one_repository():
+    """The policy keyed by repository, not by candidate: many functions from one repo are one source."""
+    from frf.core.diversity import DiversityPolicy, repository_key
+
+    assert repository_key("github:owner/repo@abc123#src/a.py.fn") == "github:owner/repo"
+
+    policy = DiversityPolicy(max_per_repository=2)
+    taken = [policy.accept("github:o/r@c#src/f%d.py.fn" % i) for i in range(5)]
+    assert taken == [True, True, False, False, False], taken
+    # A different repository is unaffected by the first one's cap.
+    assert policy.accept("github:o/other@c#src/f.py.fn") is True

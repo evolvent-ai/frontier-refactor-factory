@@ -24,6 +24,18 @@ class JobConfig:
     # In configured roll mode, budget is the number of fully emitted tasks. This bounds how much
     # unsuitable material may be consumed while trying to reach that target.
     max_attempts: int = 0          # 0 = max(budget, budget * 10)
+    # HOW CONCENTRATED ONE JOB'S OUTPUT MAY BE. A repository is allowed this many ATTEMPTS before
+    # the job stops drawing from it, so a corpus cannot come mostly from one project however
+    # generous that project is with mineable functions.
+    #
+    # THE COUNTER IS PER JOB, which is the part worth knowing before configuring a batch: asking
+    # for 25 tasks in ONE job holds the cap across all 25, while five jobs of five reset it five
+    # times and can legitimately take the cap from the same repository each time. Concentration is
+    # bounded by what a single job asks for, not by what a session asks for in total.
+    #
+    # Attempts rather than emissions, so a low-yield scale spreads much wider than this number
+    # suggests: at a 14% yield a cap of 4 contributes well under one task per repository.
+    max_per_repository: int = 4
     index: str = ""             # which source index to use; "" = auto
     subset: str = ""            # index-specific filter
 
@@ -38,6 +50,9 @@ class JobConfig:
             raise ValueError("max_attempts must be non-negative")
         if self.max_attempts and self.max_attempts < self.budget:
             raise ValueError("max_attempts cannot be smaller than the emitted-task budget")
+        if self.max_per_repository < 1:
+            raise ValueError("max_per_repository must be at least 1, got %d"
+                             % self.max_per_repository)
 
 
 @dataclass
@@ -94,6 +109,7 @@ class RunConfig:
                 target_language=j.get("target_language", ""),
                 budget=int(j.get("budget", 10)),
                 max_attempts=int(j.get("max_attempts", 0)),
+                max_per_repository=int(j.get("max_per_repository", 4)),
                 index=j.get("index", ""),
                 subset=j.get("subset", ""),
             ))
@@ -142,6 +158,8 @@ class RunConfig:
                                      "budget": job.budget}
             if job.max_attempts:
                 entry["max_attempts"] = job.max_attempts
+            if job.max_per_repository != 4:
+                entry["max_per_repository"] = job.max_per_repository
             if job.source_language:
                 entry["source_language"] = job.source_language
             if job.target_language:
@@ -172,6 +190,7 @@ class RunConfig:
                     "target_language": j.target_language,
                     "budget": j.budget,
                     "max_attempts": j.max_attempts,
+                    "max_per_repository": j.max_per_repository,
                     "index": j.index,
                     "subset": j.subset,
                 }.items() if v or k in ("scale", "form", "budget")}

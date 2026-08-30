@@ -191,7 +191,8 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         freeze_runs: int = pipeline.FREEZE_RUNS, candidates=None,
         candidate_workers: int = 1, ledger_file: str = "", harbor_check: bool = False,
         harbor_repair: bool = True, harbor_max_repairs: int = 1,
-        target_emitted: bool = False, max_attempts: int = 0) -> BatchReport:
+        target_emitted: bool = False, max_attempts: int = 0,
+        max_per_repository: int = 4) -> BatchReport:
     """Run one scale from an automatically selected enumerable index.
 
     The returned report separates the pipeline summary from elapsed wall time. The call/process
@@ -247,7 +248,12 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         attempt_limit = max_attempts or max(target, target * 10)
         source_index = _index(index_name, subset=subset, scale=name)
         source_scale = _scale(name, source_index, backend=None, workspace=scratch.mkdtemp(prefix="frf-source-%s-" % name))
-        diversity = DiversityPolicy(max_per_repository=4)
+        # CONFIGURABLE, because the right concentration differs by scale. A high-yield
+        # scale like module can fill a corpus from a handful of generous repositories
+        # and wants a tight cap; a 14%-yield scale spreads far wider than the number
+        # suggests, because the cap counts ATTEMPTS, and tightening it there only
+        # starves the batch.
+        diversity = DiversityPolicy(max_per_repository=max_per_repository)
         started = time.perf_counter()
         reports = []
         seen = set()
