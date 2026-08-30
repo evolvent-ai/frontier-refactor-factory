@@ -152,3 +152,33 @@ def test_freeze_honours_its_budget_on_the_batched_path_too(monkeypatch):
     assert corpus.usable is False
     assert "freeze timeout" in (corpus.unusable_reason or "")
     assert Batched.runs == 0, "the budget was already spent; no run should have been started"
+
+
+def test_a_freeze_timeout_is_not_reported_as_an_unstable_reference():
+    """Running out of time is not disagreeing with yourself.
+
+    A freeze that hits its budget was filed as `will-not-repeat-itself`, which asserts the reference
+    contradicted itself across runs. It did not -- it never finished being asked. A real java
+    candidate produced exactly that record, and a reader counting unstable references would have
+    counted it.
+
+    Still MATERIAL: a subject too slow to answer inside the budget cannot be graded, which is the
+    verdict PROBE_TIMEOUT already makes for the same reason.
+    """
+    import pytest
+
+    from frf.core import pipeline
+    from frf.observe.call.stages import Corpus
+
+    timed_out = Corpus(usable=False, unusable_is_timeout=True, discard_rate=1.0,
+                       unusable_reason="freeze timeout after 1800s")
+    with pytest.raises(pipeline.Stage) as caught:
+        pipeline._check_corpus(timed_out)
+    assert caught.value.reason == "too-slow-to-freeze", caught.value.reason
+    assert caught.value.fault is pipeline.Fault.MATERIAL
+
+    # An ordinary unstable reference keeps its own, different verdict.
+    unstable = Corpus(usable=False, discard_rate=1.0)
+    with pytest.raises(pipeline.Stage) as caught:
+        pipeline._check_corpus(unstable)
+    assert caught.value.reason == "will-not-repeat-itself", caught.value.reason

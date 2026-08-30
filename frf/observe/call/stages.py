@@ -66,6 +66,12 @@ class Corpus:
     # mid-push taught us nothing about the candidate, and filing it as bad material inflates the
     # refusal record with our own outages.
     unusable_is_ours: bool = False
+    # Whether the freeze ran out of TIME rather than out of agreement. Still the material's fault --
+    # a subject too slow to answer inside the budget cannot be graded, which is the same verdict
+    # `PROBE_TIMEOUT` already makes -- but a different finding, and the ledger should say which.
+    # Without this a timeout is filed as `will-not-repeat-itself`, which asserts that the reference
+    # disagreed with itself. It did not; it never finished being asked.
+    unusable_is_timeout: bool = False
     adequacy_note: str = ""
     adequacy: dict = field(default_factory=dict)
     timed: list = field(default_factory=list)
@@ -120,6 +126,7 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
             # around the whole process.
             if time.monotonic() >= deadline:
                 return Corpus(inputs=inputs, discard_rate=1.0, usable=False,
+                              unusable_is_timeout=True,
                               unusable_reason="freeze timeout after %.0fs" % max_seconds)
             with observer.subject(spec) as subject:
                 items = list(inputs.items())
@@ -136,6 +143,7 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
                               (run_index + 1, runs, probe_index, len(inputs)), flush=True)
                     if time.monotonic() >= deadline:
                         return Corpus(inputs=inputs, discard_rate=1.0, usable=False,
+                                      unusable_is_timeout=True,
                                       unusable_reason="freeze timeout after %.0fs" % max_seconds)
                     observed[probe_id].append(subject.call("run", args))
     except SubjectFailed as failure:

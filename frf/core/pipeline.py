@@ -488,6 +488,14 @@ def _check_corpus(report) -> None:
         if getattr(report, "unusable_is_ours", False):
             raise Stage("freeze", "subject-unreachable", Fault.FACTORY,
                         given or "the subject could not be staged in a sandbox")
+        # RUNNING OUT OF TIME IS NOT DISAGREEING WITH YOURSELF. A freeze that hits its budget was
+        # filed as `will-not-repeat-itself`, which asserts the reference contradicted itself across
+        # runs; it did not, it never finished being asked. Still the material's fault -- a subject
+        # too slow to answer inside the budget cannot be graded, which is the verdict PROBE_TIMEOUT
+        # already makes -- but a reader counting unstable references should not be counting this.
+        if getattr(report, "unusable_is_timeout", False):
+            raise Stage("freeze", "too-slow-to-freeze", Fault.MATERIAL,
+                        given or "the freeze did not finish inside its budget")
         raise Stage("freeze", "will-not-repeat-itself", Fault.MATERIAL,
                     given or
                     "%.0f%% of probes were discarded because the reference did not reproduce them; "
