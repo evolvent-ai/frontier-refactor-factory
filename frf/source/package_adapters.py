@@ -176,8 +176,14 @@ def _go(root, package_name, package_root):
         if fn.symbol in seen:
             continue
         seen.add(fn.symbol)
+        # A FILE IN THE MODULE ROOT HAS NO SUBDIRECTORY, and `relpath` spells that "." -- which
+        # concatenates into `github.com/gookit/goutil/.`, and Go refuses it: `malformed import
+        # path: invalid path element "."`. The trailing-slash strip cannot catch it, because the
+        # offending element is the dot rather than the separator. Repositories that expose their
+        # API from the module root are ordinary, so this is not a rare shape.
         rel_dir = os.path.relpath(os.path.dirname(fn.path), root)
-        import_path = (module_path + "/" + rel_dir.replace(os.sep, "/")).rstrip("/") if module_path else ""
+        suffix = "" if rel_dir in (".", "") else "/" + rel_dir.replace(os.sep, "/")
+        import_path = (module_path + suffix) if module_path else ""
         signature = "(%s)" % ", ".join(str(p["native"]) for p in fn.schema["params"])
         result.append(Operation(fn.symbol, import_path, fn.symbol, signature, "go",
                                 klass=fn.declared_package,

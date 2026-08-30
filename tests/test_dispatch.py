@@ -373,3 +373,32 @@ def test_a_ruby_class_method_is_reached_through_reflection():
         capture_output=True, text=True, timeout=30)
     assert served.returncode == 0, served.stderr
     assert "newer_than?" in served.stdout, served.stdout
+
+
+def test_a_go_package_at_the_module_root_gets_a_legal_import_path():
+    """`relpath` spells "the root itself" as ".", and Go refuses that inside an import path.
+
+    A repository whose API lives in the module root is ordinary -- gookit/goutil is one -- and the
+    concatenation produced `github.com/gookit/goutil/.`, which the compiler rejects with
+    `malformed import path: invalid path element "."`. The whole candidate then refused at build
+    as though the material would not compile, when it was the dispatcher's import that was wrong.
+    """
+    import os
+    import tempfile
+
+    from frf.source import package_adapters as pa
+
+    repo = tempfile.mkdtemp()
+    with open(os.path.join(repo, "go.mod"), "w", encoding="utf-8") as handle:
+        handle.write("module github.com/example/goutil\n\ngo 1.21\n")
+    # One exported function in the ROOT, one in a subdirectory: the two shapes must both be legal.
+    with open(os.path.join(repo, "strutil.go"), "w", encoding="utf-8") as handle:
+        handle.write("package goutil\n\nfunc Upper(s string) string { return s }\n")
+    os.makedirs(os.path.join(repo, "mathutil"))
+    with open(os.path.join(repo, "mathutil", "calc.go"), "w", encoding="utf-8") as handle:
+        handle.write("package mathutil\n\nfunc Add(a int, b int) int { return a + b }\n")
+
+    paths = {o["name"]: o["module"] for o in pa.operations(repo, "go", "goutil", repo)}
+    assert paths.get("Upper") == "github.com/example/goutil", paths
+    assert paths.get("Add") == "github.com/example/goutil/mathutil", paths
+    assert not any("/." in path for path in paths.values()), paths
