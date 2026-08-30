@@ -553,22 +553,16 @@ def _refuse_a_form_nothing_will_honour(implementation, name: str, task_form, tar
         raise FormNotHonoured(
             "form 'cross' needs a target_language: a cross-language task names the language the "
             "submission must be written in, and without one there is nothing to enforce.")
-    # The scales that thread a target language into their material. Named rather than probed,
-    # because "has the attribute" is true everywhere -- it was just assigned above -- and that is
-    # the bug rather than the test for it.
-    if name not in _SCALES_THAT_CARRY_A_TARGET_LANGUAGE:
+    # THE SCALE DECLARES IT, beside the `specify` that honours it. Not "has the attribute" --
+    # `_target_language` was just assigned above and is true everywhere, which is the bug rather
+    # than a test for it. `supports_cross_language` is a class attribute a scale sets only when its
+    # `specify` copies the language onto the Spec, so the claim sits next to the mechanism and a
+    # later edit that drops the copy has to delete a visible declaration to keep passing.
+    if not getattr(implementation, "supports_cross_language", False):
         raise FormNotHonoured(
-            "the %s scale drops target_language before it reaches a task: it is set on the scale, "
-            "and the only readers are on the checkout index, which _index() never gives one. A run "
-            "would emit %s tasks reporting cross_language = false. Refusing rather than shipping "
-            "the wrong form as though it were the right one." % (name, target_language))
-
-
-# Empty ON PURPOSE, and it is the honest value today. Repo reads `material.target_language` and
-# `Checkouts` sets it, but nothing in `run()` constructs a `Checkouts` with one -- so listing repo
-# here would restore exactly the silent success this refusal exists to stop. A scale joins this
-# tuple when a test shows a task.toml coming out with `cross_language = true`, not before.
-_SCALES_THAT_CARRY_A_TARGET_LANGUAGE: tuple = ()
+            "the %s scale does not carry target_language onto its Spec, so a run would emit "
+            "same-language tasks reporting cross_language = false. Refusing rather than shipping "
+            "the wrong form as though it were the right one." % name)
 
 
 def _scale(name: str, idx, *, backend=None, workspace=""):

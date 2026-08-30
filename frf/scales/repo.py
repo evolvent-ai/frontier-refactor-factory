@@ -925,6 +925,11 @@ class Repo:
 
     name = "repo"
 
+    # See Module.supports_cross_language. This scale is where DESIGN.md puts the form: the
+    # process seam watches four channels that name no language, so "reimplement this in Go"
+    # is enforced by shipping an image without the original toolchain rather than by a rule.
+    supports_cross_language = True
+
     def __init__(self, *, index=None, backend=None, harvest=None) -> None:
         self._index = index
         self._backend = backend
@@ -987,7 +992,14 @@ class Repo:
         material = self._material
         spec = Spec(name=_task_name(material), scale=self.name, language=material.language,
                     description=material.description, build=list(material.build),
-                    invoke=list(material.invoke), target_language=material.target_language,
+                    invoke=list(material.invoke),
+                    # CONFIGURED FIRST, MATERIAL SECOND. The material carries a target language only
+                    # when the index put one there, and `automation._index()` never does -- so
+                    # reading the material alone made a `form: cross` run emit a same-language task
+                    # and report success. The material's value still wins when nothing was
+                    # configured, which is how a checkout that already knows its target keeps it.
+                    target_language=(getattr(self, "_target_language", "")
+                                     or material.target_language),
                     environment={"exclude": list(material.exclude)},
                     task_form=task_form)
         self._spec = spec

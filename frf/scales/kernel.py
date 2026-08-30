@@ -26,7 +26,7 @@ and removing temporaries are all measurable without a card.
 """
 from __future__ import annotations
 
-from ..core.scale import Candidate, Spec
+from ..core.scale import Candidate, Spec, TaskForm
 from ..observe.probes.schema import ARRAY_KINDS
 from .module import Module
 
@@ -40,13 +40,18 @@ class Kernel(Module):
 
     name = "kernel"
 
-    def specify(self, candidate: Candidate) -> Spec:
+    def specify(self, candidate: Candidate, *,
+                task_form: TaskForm = TaskForm.INPLACE) -> Spec:
         """The module specification, plus what makes this one numeric.
 
         `cost` travels in the environment so the timing layer can honour it without this scale
         reaching into timing -- the same reason every other cross-stage decision is data.
+
+        REBUILDING A SPEC MEANS RESTATING EVERY FIELD. This method constructs a second `Spec` to
+        add the timing environment, and a field left out of that call is silently dropped however
+        carefully the parent filled it in -- which is what happened to `task_form`.
         """
-        spec = super().specify(candidate)
+        spec = super().specify(candidate, task_form=task_form)
         detail = candidate.detail or {}
         environment = dict(spec.environment)
         environment.update({
@@ -58,6 +63,7 @@ class Kernel(Module):
         enriched = Spec(name=spec.name, scale=self.name, language=spec.language,
                     description=spec.description, build=spec.build, invoke=spec.invoke,
                     entry=spec.entry, target_language=spec.target_language,
+                    task_form=spec.task_form,
                     environment=environment, notes=spec.notes)
         self._spec = enriched
         return enriched

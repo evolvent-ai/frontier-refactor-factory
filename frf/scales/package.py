@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 
 from ..core import integrity
 from ..core.contract import PackageContract, PackageOperation, Provenance
-from ..core.scale import Candidate, Spec
+from ..core.scale import Candidate, Spec, TaskForm
 from ..observe import coverage
 from ..observe.call import dispatch as call_dispatch
 from ..observe.call import shims
@@ -216,6 +216,10 @@ class Package:
 
     name = "package"
 
+    # See Module.supports_cross_language: declared beside the `specify` that honours it, so
+    # `automation.run` can refuse a cross-language run that nothing would carry through.
+    supports_cross_language = True
+
     def __init__(self, index=None, workspace: str = "", *, observer=None,
                  run_generator=None, backend=None) -> None:
         self._index = index
@@ -247,7 +251,14 @@ class Package:
         page_size = 4 if getattr(self._index, "name", "") == "github-packages" else 20
         return sourcing.walk(self._index, budget, page_size=page_size)
 
-    def specify(self, candidate: Candidate) -> Spec:
+    def specify(self, candidate: Candidate, *,
+                task_form: TaskForm = TaskForm.INPLACE) -> Spec:
+        """One package -> what to install and how to dispatch into it.
+
+        `target_language` prefers the configured value over the material's. The material carries one
+        only when the index put it there, and `_index()` never does -- so reading the material alone
+        is how a `form: cross` run emitted same-language tasks while reporting success.
+        """
         self._material = self._locate(candidate)
         # A new candidate means a new subject, so the cached observer is stale. Not
         # resetting it would serve the previous candidate for the rest of a batch --
@@ -257,7 +268,9 @@ class Package:
         return Spec(name=_task_name(material), scale=self.name, language=material.language,
                     description=material.description, build=list(material.install),
                     invoke=["serve"], entry="entry",
-                    target_language=material.target_language,
+                    target_language=(getattr(self, "_target_language", "")
+                                     or material.target_language),
+                    task_form=task_form,
                     environment={"comparison": "structural",
                                  "entry_points": list(material.entry_points),
                                  "forbidden": list(material.forbidden)})

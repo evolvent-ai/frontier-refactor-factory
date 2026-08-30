@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from ..core import integrity
-from ..core.scale import Candidate, Spec
+from ..core.scale import Candidate, Spec, TaskForm
 from ..observe.call.perturb import MUTATION_ATTEMPTS, mutate
 from ..observe import coverage
 from ..observe.call import shims
@@ -331,6 +331,12 @@ class Module:
 
     name = "module"
 
+    # DECLARED BESIDE THE CODE THAT HONOURS IT. `specify` below copies the configured target
+    # language onto the Spec; without that line a `form: cross` run emits a same-language task and
+    # calls it a success. `automation.run` refuses a cross-language run unless the scale says this,
+    # so the claim and the mechanism cannot drift apart in the direction that ships wrong tasks.
+    supports_cross_language = True
+
     def __init__(self, index=None, workspace: str = "", *, observer=None, backend=None) -> None:
         self._index = index
         self._workspace = workspace or os.path.join("work", "module")
@@ -362,8 +368,20 @@ class Module:
         page_size = 4 if getattr(self._index, "name", "") == "github-functions" else 50
         return sourcing.walk(self._index, budget, page_size=page_size)
 
-    def specify(self, candidate: Candidate) -> Spec:
-        """One candidate -> what to build and how to call it."""
+    def specify(self, candidate: Candidate, *,
+                task_form: TaskForm = TaskForm.INPLACE) -> Spec:
+        """One candidate -> what to build and how to call it.
+
+        `task_form` and the target language are CARRIED ONTO THE SPEC, which for a long time they
+        were not. Everything downstream of here was already built for a cross-language task --
+        `Spec` has both fields, `core/statement.py` renders "Reimplement the reference (python) in
+        javascript" from them, and `pipeline` copies `spec.target_language` into the attestation --
+        and this method simply never filled them in. A run configured `form: cross` therefore
+        emitted a same-language task and reported success, which is why every task.toml on disk
+        said `cross_language = false`.
+
+        The target language comes off the scale, where `automation.run` puts the configured value.
+        """
         self._material = self._locate(candidate)
         # A new candidate means a new subject, so the cached observer is stale. Not
         # resetting it would serve the previous candidate for the rest of a batch --
@@ -373,6 +391,8 @@ class Module:
         return Spec(name=_task_name(material), scale=self.name, language=material.language,
                     description=material.description,
                     invoke=["serve", material.symbol], entry=material.symbol,
+                    target_language=getattr(self, "_target_language", ""),
+                    task_form=task_form,
                     environment={"subject_path": os.path.join(
                                      self._workspace, shims.load(material.language).subject),
                                  "forbidden": list(material.forbidden)})

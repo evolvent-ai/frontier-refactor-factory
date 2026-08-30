@@ -71,3 +71,30 @@ def test_a_same_language_task_asks_for_speed_in_place():
     text = render(_facts(target_language=""))
     assert "Make this program **faster**" in text
     assert "optimise it in place" in text
+
+
+def test_a_cross_language_spec_asks_for_a_reimplementation():
+    """The instruction has to SAY the language, or the task is same-language with a label.
+
+    Both halves are required: `task_form` and `target_language`. Carrying only one leaves
+    `is_cross` false and renders the ordinary "make it faster" goal, which is what shipped while
+    `specify()` filled in neither -- every task.toml on disk said `cross_language = false`.
+
+    This pins the end of the chain the scales feed: config -> Spec -> instruction.
+    """
+    from frf.core.scale import Spec, TaskForm
+    from frf.core.statement import _fallback_instruction
+
+    cross = _fallback_instruction(Spec(
+        name="x", scale="module", language="python", description="d",
+        invoke=["serve", "f"], entry="f",
+        target_language="javascript", task_form=TaskForm.CROSS_LANGUAGE))
+    assert "Reimplement the reference (python) in javascript" in cross, cross
+    assert "stay in javascript" in cross, cross
+
+    # The same spec WITHOUT the form is the ordinary optimisation task, not a mislabelled rewrite.
+    same = _fallback_instruction(Spec(
+        name="x", scale="module", language="python", description="d",
+        invoke=["serve", "f"], entry="f"))
+    assert "Reimplement" not in same, same
+    assert "faster" in same, same

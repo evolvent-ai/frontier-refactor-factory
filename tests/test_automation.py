@@ -212,27 +212,50 @@ def test_every_scale_walks_more_than_one_topic_by_default():
     assert "|" in repo.name and "|" in funcs.name
 
 
-def test_a_cross_language_run_refuses_rather_than_emitting_the_same_language():
+def test_a_scale_that_would_drop_the_target_language_refuses_the_run():
     """Asking for cross-language and getting same-language is the worst kind of success.
 
-    `_target_language` is assigned to the SCALE, and the only readers of that attribute are on the
-    checkout index -- a different object, which `_index()` never gives one. A real batch configured
-    `form: cross, source_language: python, target_language: javascript` therefore emitted two
-    Python tasks, each carrying `target_language = ""` and `cross_language = false`, and reported
-    `target_met: true, trustworthy: true`.
+    `_target_language` is assigned to the SCALE, and for a long time no `specify()` copied it onto
+    the Spec. A real batch configured `form: cross, source_language: python, target_language:
+    javascript` emitted two Python tasks -- each `target_language = ""`, `cross_language = false`
+    -- and reported `target_met: true, trustworthy: true`. All 136 task.toml on disk at that point
+    carried an empty target_language: the form had never once been produced, while DESIGN.md
+    recorded it as proved.
 
-    All 136 task.toml on disk before that batch carried an empty target_language too: the form has
-    never once been produced, while DESIGN.md records it as proved.
+    OVER A LONG RUN THAT IS THE EXPENSIVE FAILURE. Each task looks fine alone and the yield looks
+    healthy, so hundreds of same-language tasks get filed as cross-language and the mistake shows
+    up only in a field nobody reads.
 
-    OVER A LONG RUN THAT IS THE EXPENSIVE FAILURE. Each task looks fine on its own and the yield
-    looks healthy, so hundreds of same-language tasks get filed as cross-language and the mistake
-    is only visible in a field nobody reads. Refusing up front costs one message.
+    The guard asks the SCALE, not the attribute: `_target_language` is set on every scale by
+    `run()`, so its presence is the bug rather than a test for it.
     """
     from frf import automation
 
-    with pytest.raises(automation.FormNotHonoured, match="target_language"):
-        automation.run("module", budget=1, form="cross", target_language="javascript",
-                       backend="local-process")
+    class Unwired:
+        """A scale whose specify() would ignore the target language, as all of them once did."""
+
+    with pytest.raises(automation.FormNotHonoured, match="does not carry target_language"):
+        automation._refuse_a_form_nothing_will_honour(
+            Unwired(), "unwired", automation.TaskForm.CROSS_LANGUAGE, "javascript")
+
+
+def test_every_shipped_scale_now_carries_the_target_language():
+    """The four scales declare support beside the `specify` that copies the language onto the Spec.
+
+    Asserted together so that adding a scale, or dropping the copy from one, is a visible edit
+    rather than a silent return to emitting the wrong form.
+    """
+    from frf import automation
+    from frf.scales.kernel import Kernel
+    from frf.scales.module import Module
+    from frf.scales.package import Package
+    from frf.scales.repo import Repo
+
+    for scale in (Module, Kernel, Package, Repo):
+        assert getattr(scale, "supports_cross_language", False), scale.name
+        # And the declaration is not enough on its own: the guard must accept it.
+        automation._refuse_a_form_nothing_will_honour(
+            scale, scale.name, automation.TaskForm.CROSS_LANGUAGE, "javascript")
 
 
 def test_cross_without_a_target_language_says_what_is_missing():
