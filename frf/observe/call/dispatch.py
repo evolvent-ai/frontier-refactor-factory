@@ -134,15 +134,20 @@ def _static_go(dispatch: dict, wrong: str | None) -> str:
     # THE OPERATION'S MODULE IS A REAL GO IMPORT PATH (`github.com/x/y/graph`), and its klass is the
     # declared package name (`graph`). A Go dispatcher imports the package and calls `graph.Func`.
     # Unique imports only -- duplicate import paths are a compile error.
-    imports = []
-    for _n, (module, _s, klass, _p, _r) in sorted(dispatch.items()):
-        if module and module not in imports:
-            imports.append(module)
-    imports = ["fmt", "encoding/base64" if needs_base64 else None, *imports]
+    # ALIASED IMPORTS, because two packages in one module legitimately share a name: a Go repo can
+    # have `search/` and `strings/search/`, both `package search`, and importing both unaliased is
+    # `search redeclared in this block`. Each import path gets a generated alias, and calls use it,
+    # so a name collision cannot happen however the module is laid out.
+    aliases: dict = {}
+    for _n, (module, _s, _klass, _p, _r) in sorted(dispatch.items()):
+        if module and module not in aliases:
+            aliases[module] = "frfp%d" % len(aliases)
     import_lines = ["import ("]
-    for path in imports:
-        if path:
-            import_lines.append('\t"%s"' % path)
+    import_lines.append('\t"fmt"')
+    if needs_base64:
+        import_lines.append('\t"encoding/base64"')
+    for path, alias in aliases.items():
+        import_lines.append('\t%s "%s"' % (alias, path))
     import_lines.append(")")
     lines = ["package main", "", "\n".join(import_lines), ""]
     used: list = []
@@ -201,7 +206,8 @@ def _static_go(dispatch: dict, wrong: str | None) -> str:
         # A PACKAGE SUBJECT COMPILES INTO THE SAME PACKAGE as the dispatcher (all files in one
         # directory), so the symbol is called unqualified -- no module prefix. Go has no per-file
         # namespace; that is the module import's job, and it is not one here.
-        pkg = klass if klass else ""
+        # The ALIAS, not the declared package name -- see the aliased-imports note above.
+        pkg = aliases.get(_module, "")
         qualified = ("%s." % pkg) if pkg else ""
         lines.append("\t\treturn %s%s(%s), nil" % (qualified, symbol, ", ".join(call_args)))
     lines.append("\t}")

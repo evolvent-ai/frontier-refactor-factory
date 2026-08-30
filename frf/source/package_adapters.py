@@ -159,6 +159,20 @@ def _go(root, package_name, package_root):
     found = native.scan(root, package_name, "1.0", language="go")
     seen = set()
     for fn in found:
+        # ONLY EXPORTED FUNCTIONS CROSS A PACKAGE BOUNDARY. Go hides a lowercase name inside its
+        # own package, so a dispatcher importing `problem13` and calling `add` fails to compile:
+        # `name add not exported by package problem13`. E2B reported eleven of these in one build,
+        # and because a failed build's error text carries a per-run random path, freeze read the
+        # five runs as five different answers and discarded 100% of probes as unstable material.
+        if not fn.symbol[:1].isupper():
+            continue
+        # A VOID FUNCTION CANNOT BE THE VALUE OF AN EXPRESSION. `NextPermutation(x)` returns
+        # nothing, and the generated `return NextPermutation(arg0), nil` is a compile error:
+        # `(no value) used as value`. The package seam has no way to observe a Go mutation
+        # (arguments arrive decoded from JSON, so a slice write is invisible to the caller), so
+        # these are refused rather than mis-generated.
+        if not (fn.result or {}):
+            continue
         if fn.symbol in seen:
             continue
         seen.add(fn.symbol)
