@@ -335,3 +335,31 @@ def test_a_refusal_crosses_the_wire_as_a_refusal():
             refused = served.call("entry", "not-a-list")
             assert not refused.ok, "a raising subject was reported as a success"
             assert refused.error, "a refusal crossed the wire with no reason attached"
+
+
+def test_a_batched_call_cannot_outlive_the_sandbox_holding_it():
+    """`timeout * len(requests)` is the honest worst case and a useless deadline.
+
+    120s per probe times 57 probes is 114 minutes for ONE freeze run, and freeze does five. A
+    kernel/java candidate sat in exactly that: the timeout it had been given could not fire before
+    the sandbox expired underneath it, so the failure arrived as a vanished container rather than
+    as a batch that took too long.
+
+    THE ORDERING IS THE POINT, and it is the same one `containers.SANDBOX_LIFETIME` states from the
+    other side: an inner deadline must be strictly inside every outer one. Asserted against the
+    sandbox lifetime and the freeze budget rather than against a literal, so raising one of those
+    later cannot quietly re-create the inversion.
+    """
+    import os
+
+    from frf.core import containers
+    from frf.observe.call.runner import BATCH_TIMEOUT_CEILING, _batch_timeout
+
+    freeze_budget = float(os.environ.get("FRF_FREEZE_MAX_SECONDS", "3600"))
+    assert BATCH_TIMEOUT_CEILING < freeze_budget
+    assert BATCH_TIMEOUT_CEILING < containers.SANDBOX_LIFETIME
+
+    # A big batch is clamped; a small one still gets a tight, proportional bound.
+    assert _batch_timeout(120.0, 200) == BATCH_TIMEOUT_CEILING
+    assert _batch_timeout(120.0, 2) == 240.0
+    assert _batch_timeout(120.0, 0) == 120.0

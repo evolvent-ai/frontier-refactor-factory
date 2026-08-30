@@ -11,6 +11,7 @@ than aspirational -- there is nothing to extend when a new one arrives.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
@@ -221,6 +222,34 @@ class Subject:
         return reply.seconds if reply.seconds > 0 else (time.perf_counter() - started)
 
 
+# The ceiling on ONE batched call, however many probes it carries.
+#
+# `self.timeout * len(requests)` is the honest worst case -- the probes run one after another inside
+# the sandbox -- and as a deadline it is useless: 120s x 57 probes is 114 minutes for a single
+# freeze run, and freeze does five. A kernel/java candidate sat in exactly that, and the timeout it
+# was given could not have fired before the sandbox holding it expired.
+#
+# THE ORDERING THAT HAS TO HOLD, and this is the same one `containers.SANDBOX_LIFETIME` states from
+# the other side: an inner deadline must be strictly inside every outer one, or the outer one is
+# what the caller actually gets. Here the outer bounds are the freeze budget and the sandbox
+# lifetime, so a batch is capped below the smaller of them and a stuck subject is reported as a
+# failed batch rather than as a container that vanished.
+#
+# The multiplication is kept BELOW the cap because a small batch should still get a tight bound;
+# only the runaway case is clamped.
+BATCH_TIMEOUT_CEILING = float(os.environ.get("FRF_BATCH_TIMEOUT_CEILING", "900"))
+
+
+def _batch_timeout(per_probe: float, count: int) -> float:
+    """How long one batched call may take. -> seconds, bounded.
+
+    Bounded rather than proportional: see BATCH_TIMEOUT_CEILING. A batch that needs longer than the
+    ceiling is one whose probes are individually slow, and splitting it is the caller's decision --
+    silently waiting past the sandbox's own lifetime is not.
+    """
+    return min(max(per_probe, per_probe * max(1, count)), BATCH_TIMEOUT_CEILING)
+
+
 class RemoteSubject:
     """A subject served INSIDE the sandbox, speaking the same line protocol.
 
@@ -314,7 +343,7 @@ class RemoteSubject:
         argv = self._argv_in_sandbox()
         shell = "%s < %s/requests.jsonl" % (" ".join(argv), inbox)
         result = self._backend.run(["sh", "-c", shell], workdir=self._remote,
-                                   timeout=self.timeout * max(1, len(requests)))
+                                   timeout=_batch_timeout(self.timeout, len(requests)))
         if not result.ok and not (result.stdout or "").strip():
             raise SubjectFailed("the subject exited without answering. stderr: %s"
                                 % (_last_error(result.stderr or "").strip() or "(empty)"))
