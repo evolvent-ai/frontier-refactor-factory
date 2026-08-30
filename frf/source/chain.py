@@ -42,12 +42,25 @@ class Chain:
         # in a way that looks like it is working.
         self._positions: dict = {0: (0, 0)}
 
+    # HOW MANY LINKS ARE WORTH ASKING. Each `total()` below is a network call, and a chain built
+    # from an unfiltered walk is seven languages by nine topics -- sixty-three searches spent on a
+    # denominator before one candidate is drawn. GitHub allows thirty searches a minute, so that
+    # does not merely cost time: it exhausts the budget the paging then needs, and a real batch sat
+    # at zero attempts for twenty minutes because kernel and package were starving there.
+    #
+    # Past this many links the total is reported UNKNOWN, which this module already treats as
+    # honest and usable -- `Coverage` prints it as unknown rather than inventing one. A denominator
+    # nobody can afford to compute is worth less than the walk it prevented.
+    MAX_LINKS_TO_SUM = 8
+
     def total(self) -> int | None:
-        """The sum over links, or None when any link will not say.
+        """The sum over links, or None when any link will not say -- or when there are too many.
 
         None is honest and supported; a total that quietly skipped the links which do not publish
         one would understate the supply and make every yield computed against it too high.
         """
+        if len(self._links) > self.MAX_LINKS_TO_SUM:
+            return None
         running = 0
         for link in self._links:
             one = link.total()
@@ -115,6 +128,9 @@ class QuotaChain:
         self._retired: set[int] = set()
 
     def total(self) -> int | None:
+        """As Chain.total: unknown rather than sixty-three searches. See Chain.MAX_LINKS_TO_SUM."""
+        if len(self._links) > Chain.MAX_LINKS_TO_SUM:
+            return None
         running = 0
         for link in self._links:
             one = link.total()

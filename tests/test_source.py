@@ -356,3 +356,40 @@ def test_live_a_404_raises_rather_than_returning_empty():
     """The transport's contract, against the real thing."""
     with pytest.raises(NotFound):
         Http().json("https://pypi.org/pypi/this-package-does-not-exist-frf/json")
+
+
+def test_a_wide_chain_reports_its_total_as_unknown_rather_than_paying_for_it():
+    """Each link's `total()` is a network call, and an unfiltered walk builds sixty-three links.
+
+    GitHub allows thirty searches a minute, so summing them does not merely cost time -- it
+    exhausts the budget the paging then needs. A real batch sat at zero attempts for twenty minutes
+    with kernel and package starving exactly there, while module (whose chain is narrower) ran fine.
+
+    Unknown is already the honest answer in this module: `Coverage` prints it as unknown rather
+    than inventing a denominator.
+    """
+    from frf.source.chain import Chain, QuotaChain
+
+    class Link:
+        name = "link"
+        asked = 0
+
+        def total(self):
+            Link.asked += 1
+            return 10
+
+        def page(self, number, *, size=20):
+            return []
+
+    narrow = Chain([Link() for _ in range(3)])
+    assert narrow.total() == 30
+    assert Link.asked == 3, "a narrow chain still reports a real denominator"
+
+    Link.asked = 0
+    wide = Chain([Link() for _ in range(63)])
+    assert wide.total() is None, "a chain this wide must not be summed"
+    assert Link.asked == 0, "and must not have asked a single link"
+
+    Link.asked = 0
+    assert QuotaChain([Link() for _ in range(63)]).total() is None
+    assert Link.asked == 0
