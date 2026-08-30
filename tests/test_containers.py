@@ -188,3 +188,32 @@ def test_every_call_to_the_remote_api_is_bounded_on_the_wire():
     assert not unbounded, (
         "these remote calls can wait forever, which stalls a batch instead of failing it: %s"
         % unbounded)
+
+
+def test_a_sandbox_outlives_the_longest_stage_that_runs_inside_it():
+    """A container's lifetime must EXCEED the work it is asked to hold, not equal it.
+
+    `Remote.__init__` defaulted to 3600 seconds -- the same number as `FRF_FREEZE_MAX_SECONDS`. So a
+    freeze permitted to take its full hour was racing the sandbox holding it, and the sandbox won:
+    `The sandbox was not found: This error is likely due to sandbox timeout`, after 3616 seconds, on
+    the one Go candidate that reached freeze in a real batch.
+
+    The package scale is where an equality like this turns into a failure, because compiling the
+    subject inside the sandbox -- a step this scale only recently started doing at all -- puts real
+    minutes into each of the five freeze runs.
+
+    ASSERTED AS AN ORDERING, not as two constants. Pinning the literals would pass while somebody
+    raised the freeze budget to meet the lifetime, which is the same bug with different numbers.
+    """
+    import inspect
+    import os
+
+    from frf.observe.call import stages
+
+    freeze_budget = float(os.environ.get("FRF_FREEZE_MAX_SECONDS", "3600"))
+    assert containers.SANDBOX_LIFETIME > freeze_budget, (
+        "a sandbox that expires at or before its freeze budget kills the freeze it is holding: "
+        "lifetime %s, freeze %s" % (containers.SANDBOX_LIFETIME, freeze_budget))
+    # The freeze reads that same environment variable, so the two figures are about one clock.
+    assert "FRF_FREEZE_MAX_SECONDS" in inspect.getsource(stages.freeze)
+

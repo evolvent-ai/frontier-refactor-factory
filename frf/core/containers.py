@@ -71,6 +71,23 @@ TRANSPORT_HEADROOM = 120
 # here, not giving up -- a batch whose work was finished sat in teardown for eleven minutes.
 TEARDOWN_TIMEOUT = 30
 
+# HOW LONG A SANDBOX STAYS ALIVE, and it has to exceed the longest stage that runs inside one.
+#
+# It did not. This defaulted to 3600 -- exactly `FRF_FREEZE_MAX_SECONDS` -- so a freeze allowed to
+# take its full hour was racing the very sandbox holding it, and the sandbox always won: the freeze
+# still had work to do when its container expired underneath it. The package scale is where that
+# bites, because compiling the subject in the sandbox (which this scale only started doing at all
+# recently) put real minutes into every one of the five runs.
+#
+# WHAT IT LOOKED LIKE, and why the equality was easy to miss: `The sandbox was not found: This error
+# is likely due to sandbox timeout` after 3616 seconds. Not a crash, not the material -- a deadline
+# that was set equal to the work instead of around it. The candidate is charged to FACTORY, which is
+# right, but the fix is ordering rather than attribution.
+#
+# The headroom is the same idea as TRANSPORT_HEADROOM: an inner bound must be strictly inside the
+# outer one, or the outer one is what the caller actually gets.
+SANDBOX_LIFETIME = float(os.environ.get("FRF_SANDBOX_LIFETIME", "5400"))
+
 
 def _tar_bytes(local_dir: str, exclude: set | None = None) -> bytes:
     """A directory as a tar stream, with the host left out of it.
@@ -248,7 +265,7 @@ class Remote:
 
     name = "remote"
 
-    def __init__(self, template: str = "", *, timeout: float = 3600.0) -> None:
+    def __init__(self, template: str = "", *, timeout: float = SANDBOX_LIFETIME) -> None:
         try:
             from e2b import Sandbox                                        # noqa: PLC0415
         except ImportError as exc:
