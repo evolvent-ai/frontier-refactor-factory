@@ -44,6 +44,12 @@ class LedgerRecord:
     # that batch meant guessing from the repository names, which is how a sourcing bug stayed
     # invisible: every row read as ordinary unusable material.
     detail: str = ""
+    # WHAT THE CANDIDATE COST. Seconds alone does not say whether a long roll is affordable, and
+    # the gateway reports usage on every reply. Counted from the replies themselves rather than
+    # from a billing API, so it needs no admin key and no knowledge of prices.
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    model_calls: int = 0
 
     def __post_init__(self) -> None:
         if len(self.detail) > DETAIL_LIMIT:

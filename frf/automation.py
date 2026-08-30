@@ -29,6 +29,7 @@ from .core.diversity import DiversityPolicy
 from .core.capabilities import capability
 from .core.harbor import Package as HarborPackage
 from .core import pipeline
+from .core import model as model_usage
 from .core.scale import TaskForm
 
 _E2B_ACTIVE_LIMIT = max(1, int(os.environ.get("FRF_E2B_MAX_ACTIVE", "8")))
@@ -302,6 +303,10 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
 
     # Worker concurrency and active sandbox concurrency are separate controls. Keep many workers
     # queued for throughput, but cap live E2B sandboxes to the account/template memory envelope.
+    # One candidate's spend, counted from here. Each roll worker runs `run()` on its own thread and
+    # writes its own ledger row, so resetting at the top of the call is what keeps one candidate's
+    # generator out of another's total.
+    model_usage.reset_usage()
     e2b_slot = backend == "remote"
     if e2b_slot:
         _E2B_SLOTS.acquire()
@@ -417,6 +422,7 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
                                            if getattr(item, "path", "") not in failed_paths]
                 summary["emitted"] = len(result.batch.emitted)
         if ledger_file:
+            spent = model_usage.usage_so_far()
             ledger = BatchLedger(ledger_file)
             for outcome in result.batch.emitted + result.batch.refused:
                 ledger.append(LedgerRecord(
@@ -428,7 +434,8 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
                     # The particular failure, not just its category. `reason` says
                     # `could-not-specify`; this says what could not be specified.
                     detail=str(getattr(outcome, "detail", "") or ""),
-                    seconds=round(elapsed_so_far / max(1, summary.get("attempted", 0)), 3)))
+                    seconds=round(elapsed_so_far / max(1, summary.get("attempted", 0)), 3),
+                    **spent))
         coverage = getattr(idx, "last_coverage", None)
         if coverage is not None:
             summary["sourcing"] = coverage.to_json()

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import json
+import threading
 import urllib.error
 import urllib.request
 import time
@@ -103,6 +104,50 @@ def _wait(delay: float, deadline: float) -> bool:
         return False
     time.sleep(delay)
     return True
+
+
+# WHAT EACH CANDIDATE COST, accumulated where the spending happens.
+#
+# A batch already records seconds per candidate and had no idea what it spent in tokens, which is
+# the number that decides whether a long roll is affordable. The gateway returns `usage` on every
+# reply and this module was discarding it along with the rest of the envelope.
+#
+# THREAD-LOCAL because candidates run concurrently in a pool and each writes its own ledger row; a
+# module-level counter would blend one candidate's generator into another's. Nothing here reaches
+# for a billing API: token counts come from the reply itself, so this works without an admin key
+# and without knowing the gateway's prices.
+_SPEND = threading.local()
+
+
+def reset_usage() -> None:
+    """Start counting again. Called once per candidate, before any asking."""
+    _SPEND.prompt = 0
+    _SPEND.completion = 0
+    _SPEND.calls = 0
+
+
+def usage_so_far() -> dict:
+    """What this thread has spent since `reset_usage`. -> prompt/completion/calls."""
+    return {"prompt_tokens": getattr(_SPEND, "prompt", 0),
+            "completion_tokens": getattr(_SPEND, "completion", 0),
+            "model_calls": getattr(_SPEND, "calls", 0)}
+
+
+def _record_usage(payload: dict) -> None:
+    """Add one reply's usage to this thread's running total.
+
+    Absent or malformed usage is counted as a call with no tokens rather than raising: a batch must
+    not fail because a gateway omitted an accounting field.
+    """
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    _SPEND.calls = getattr(_SPEND, "calls", 0) + 1
+    if not isinstance(usage, dict):
+        return
+    for key, field in (("prompt", "prompt_tokens"), ("completion", "completion_tokens")):
+        try:
+            setattr(_SPEND, key, getattr(_SPEND, key, 0) + int(usage.get(field) or 0))
+        except (TypeError, ValueError):
+            pass
 
 
 class ModelError(RuntimeError):
@@ -187,6 +232,7 @@ def ask(prompt: str, *, system: str = "", temperature: float = 0.2,
     else:
         raise ModelError("the model request exceeded its %.1fs total timeout" % float(timeout))
 
+    _record_usage(payload)
     try:
         return payload["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError) as error:

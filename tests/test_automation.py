@@ -315,3 +315,42 @@ def test_the_diversity_cap_actually_bounds_one_repository():
     assert taken == [True, True, False, False, False], taken
     # A different repository is unaffected by the first one's cap.
     assert policy.accept("github:o/other@c#src/f.py.fn") is True
+
+
+def test_a_candidate_records_what_it_spent_in_tokens():
+    """Seconds alone does not say whether a long roll is affordable.
+
+    The gateway reports `usage` on every reply and `model.ask` was discarding it with the rest of
+    the envelope, so a batch knew its wall time and nothing about its cost. Counted from the replies
+    themselves, which needs no billing API, no admin key and no knowledge of prices.
+
+    Thread-local because candidates run concurrently and each writes its own ledger row.
+    """
+    import threading
+
+    from frf.core import ledger, model
+
+    model.reset_usage()
+    model._record_usage({"usage": {"prompt_tokens": 100, "completion_tokens": 20}})
+    model._record_usage({"usage": {"prompt_tokens": 5, "completion_tokens": 1}})
+    model._record_usage({})                      # a gateway that omitted the field
+    assert model.usage_so_far() == {"prompt_tokens": 105, "completion_tokens": 21,
+                                    "model_calls": 3}
+
+    # Another thread's spending must not land on this candidate's row.
+    seen = {}
+
+    def other():
+        model.reset_usage()
+        model._record_usage({"usage": {"prompt_tokens": 9999, "completion_tokens": 9999}})
+        seen["theirs"] = model.usage_so_far()
+
+    worker = threading.Thread(target=other)
+    worker.start()
+    worker.join()
+    assert seen["theirs"]["prompt_tokens"] == 9999
+    assert model.usage_so_far()["prompt_tokens"] == 105, "another thread's spend leaked in"
+
+    row = ledger.LedgerRecord(identity="x", scale="module", status="emitted",
+                              **model.usage_so_far())
+    assert row.prompt_tokens == 105 and row.model_calls == 3
