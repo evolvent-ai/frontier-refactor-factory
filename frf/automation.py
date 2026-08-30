@@ -474,8 +474,20 @@ def _index(name: str, *, subset: str, scale: str = ""):
         # measured returning 608 repositories: 84 Rust plus all 524 Python ones, so six candidates
         # in seven were the language the caller had explicitly not asked for. Python stays the
         # default only when nothing was requested, which is where kernel evidence exists today.
-        if scale == "kernel" and not language:
-            language = "python"
+        # NO LANGUAGE MEANS NO LANGUAGE, for kernel as for every other scale.
+        #
+        # This used to force python whenever a kernel run named none, on the grounds that kernel
+        # evidence existed only there. That stopped being true: kernel now carries attested tasks
+        # in cpp, rust, go, javascript and typescript as well. What the default did instead was
+        # narrow an unfiltered kernel walk to a ninth of the pond the other scales draw from -- a
+        # measured batch got ONE candidate in twelve minutes while module, on the same index and
+        # the same topics, got fifteen.
+        #
+        # The hazard the old comment describes is real but different: naming a language HERE as
+        # well as on the inner `GitHub` sends two `language:` qualifiers, and GitHub reads repeats
+        # as OR, so `--source rust` returned 84 Rust repositories plus all 524 Python ones. That is
+        # a reason not to add a second qualifier, not a reason to invent one when the caller asked
+        # for none -- `_query_for` omits the qualifier entirely when the language is empty.
         github = _chain_of_topics(source.GitHub, FUNCTION_TOPICS, language, scale="module", quota=2)
         return cls(github, scale=scale, log=lambda message: print("[source] " + message, flush=True))
 

@@ -164,8 +164,17 @@ def test_a_requested_language_is_never_widened_back_to_python():
     assert "language:python" not in rust, rust
     assert rust.count("language:") == 1, "two qualifiers mean OR, which widens rather than narrows"
 
-    # Python remains the default when nothing was requested -- that is where kernel evidence exists.
-    assert "language:python" in query_of("kernel", "")
+    # AND NO LANGUAGE MEANS NO LANGUAGE. This line used to assert the opposite -- that kernel
+    # defaults to python when nothing is requested -- on the stated grounds that kernel evidence
+    # existed only there. It no longer does: kernel carries attested tasks in cpp, rust, go,
+    # javascript and typescript. The default was narrowing an unfiltered kernel walk to a ninth of
+    # the pond, and a measured batch got one candidate in twelve minutes where module, on the same
+    # index and topics, got fifteen.
+    #
+    # The property above is what actually guards the open-world design: a REQUESTED language must
+    # not be joined by a second qualifier. Inventing one when none was asked for is a different act
+    # and defends nothing.
+    assert "language:" not in query_of("kernel", "")
     # Module asks for no language of its own, so an unconstrained walk stays open-world.
     assert "language:" not in query_of("module", "")
 
@@ -354,3 +363,35 @@ def test_a_candidate_records_what_it_spent_in_tokens():
     row = ledger.LedgerRecord(identity="x", scale="module", status="emitted",
                               **model.usage_so_far())
     assert row.prompt_tokens == 105 and row.model_calls == 3
+
+
+def test_an_unfiltered_kernel_walk_is_not_narrowed_to_one_language():
+    """Naming no language must mean no language, at kernel as at every other scale.
+
+    A forced python default survived from when kernel evidence existed only there; kernel now
+    carries attested tasks in cpp, rust, go, javascript and typescript. What the default did was
+    narrow an unfiltered kernel walk to a ninth of the pond the other scales draw from -- measured,
+    one candidate in twelve minutes against module's fifteen on the same index and topics.
+
+    The hazard it was defending against is real but different: naming a language here AND on the
+    inner GitHub index sends two `language:` qualifiers, which GitHub reads as OR. That is a reason
+    not to add a second, not a reason to invent one when the caller asked for none.
+    """
+    from frf.automation import _index
+
+    for scale in ("kernel", "module"):
+        index = _index("github-functions", subset="", scale=scale)
+        inner = getattr(index, "_index", None) or getattr(index, "index", None)
+        assert inner is not None, scale
+        for link in getattr(inner, "_links", []):
+            for leaf in getattr(link, "_links", [link]):
+                assert not getattr(leaf, "_language", ""), (
+                    "%s with no requested language must not pin one: %r"
+                    % (scale, getattr(leaf, "_language", "")))
+
+    # An explicitly requested language still reaches the query, and only once.
+    pinned = _index("github-functions", subset="rust", scale="kernel")
+    inner = getattr(pinned, "_index", None)
+    leaves = [leaf for link in getattr(inner, "_links", [])
+              for leaf in getattr(link, "_links", [link])]
+    assert leaves and all(getattr(leaf, "_language", "") == "rust" for leaf in leaves)
