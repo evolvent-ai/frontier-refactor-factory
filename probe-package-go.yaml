@@ -1,0 +1,31 @@
+# Probe batch 1 of 3: does package/go work at all?
+#
+# The five static package cells (go, rust, java, cpp, ruby) have never produced a task. Every Go
+# candidate refused at freeze with "will-not-repeat-itself" -- charged to the material -- until
+# 92febf0 found the cause: `Observer.build` never compiled anything at this scale, so RemoteSubject
+# executed a serve.bin nothing had produced. Five runs, five per-run /tmp paths in the error text,
+# five different answers, 100% discarded.
+#
+# That is fixed and verified in E2B by hand. What is NOT known is whether a real batch gets through
+# the rest of the pipeline: package_adapters captures a signature as a regex STRING, and a static
+# dispatcher needs typed params. Whether that path is wired is answerable only by running it.
+#
+# budget 3 with max_attempts 12: enough candidates to tell "the mechanism works" from "one lucky
+# repository", small enough to cost under an hour.
+output_dir: /data/evolvent/shijian-workdir/ffr-results/test
+# Beside the tasks rather than in the repo root, so one probe run's evidence stays together. Both
+# volumes are /data; this is about keeping the three probe batches separable, not about space.
+ledger_file: /data/evolvent/shijian-workdir/ffr-results/test/probe-package-go.ledger.jsonl
+checkpoint_file: /data/evolvent/shijian-workdir/ffr-results/test/probe-package-go.checkpoint.json
+freeze_runs: 5
+max_concurrent: 4
+e2b_max_active: 8
+llm_max_concurrent: 4
+llm_calls_per_minute: 60
+sandboxed: true
+jobs:
+  - scale: package
+    form: inplace
+    source_language: go
+    budget: 3
+    max_attempts: 12
