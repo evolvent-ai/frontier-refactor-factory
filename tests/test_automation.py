@@ -2,6 +2,7 @@ from frf.automation import BatchReport, _index, _scale, _merge_reports
 from frf.config import JobConfig, RunConfig
 from frf.core.diversity import DiversityPolicy, repository_key
 import hashlib
+import pytest
 
 
 def test_diversity_policy_limits_one_repository_without_losing_identity():
@@ -209,3 +210,47 @@ def test_every_scale_walks_more_than_one_topic_by_default():
     repo = _chain_of_topics(_Index, TRANSFORMER_TOPICS, "go", scale="repo")
     funcs = _chain_of_topics(_Index, FUNCTION_TOPICS, "typescript", scale="module")
     assert "|" in repo.name and "|" in funcs.name
+
+
+def test_a_cross_language_run_refuses_rather_than_emitting_the_same_language():
+    """Asking for cross-language and getting same-language is the worst kind of success.
+
+    `_target_language` is assigned to the SCALE, and the only readers of that attribute are on the
+    checkout index -- a different object, which `_index()` never gives one. A real batch configured
+    `form: cross, source_language: python, target_language: javascript` therefore emitted two
+    Python tasks, each carrying `target_language = ""` and `cross_language = false`, and reported
+    `target_met: true, trustworthy: true`.
+
+    All 136 task.toml on disk before that batch carried an empty target_language too: the form has
+    never once been produced, while DESIGN.md records it as proved.
+
+    OVER A LONG RUN THAT IS THE EXPENSIVE FAILURE. Each task looks fine on its own and the yield
+    looks healthy, so hundreds of same-language tasks get filed as cross-language and the mistake
+    is only visible in a field nobody reads. Refusing up front costs one message.
+    """
+    from frf import automation
+
+    with pytest.raises(automation.FormNotHonoured, match="target_language"):
+        automation.run("module", budget=1, form="cross", target_language="javascript",
+                       backend="local-process")
+
+
+def test_cross_without_a_target_language_says_what_is_missing():
+    """`form: cross` alone names no language, so there is nothing for an image to enforce."""
+    from frf import automation
+
+    with pytest.raises(automation.FormNotHonoured, match="needs a target_language"):
+        automation.run("module", budget=1, form="cross", backend="local-process")
+
+
+def test_the_inplace_form_is_untouched_by_the_cross_language_guard():
+    """The guard must not cost the form that actually works -- it is the whole current supply."""
+    from frf import automation
+
+    # No exception: reaching sourcing (and failing there, or not) is out of scope. What is asserted
+    # is that the guard itself does not fire.
+    try:
+        automation._refuse_a_form_nothing_will_honour(
+            object(), "module", automation.TaskForm.INPLACE, "")
+    except automation.FormNotHonoured:
+        pytest.fail("the guard fired on an inplace run, which is the form that works")

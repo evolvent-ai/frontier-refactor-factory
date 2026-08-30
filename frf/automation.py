@@ -318,6 +318,7 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
     implementation._task_form = task_form
     if target_language:
         implementation._target_language = target_language
+    _refuse_a_form_nothing_will_honour(implementation, name, task_form, target_language)
     factory.register(implementation)
 
     # SEAM SELECTION, and the writer belongs to the SEAM rather than to the scale.
@@ -514,6 +515,60 @@ def _index(name: str, *, subset: str, scale: str = ""):
         return cls()
 
     return cls()
+
+
+class FormNotHonoured(RuntimeError):
+    """A cross-language run was asked for and nothing downstream would have produced one.
+
+    Separate from a refusal, which is a fact about material. This is a fact about US, and it is
+    raised BEFORE any candidate is sourced so that no E2B time is spent producing the wrong thing.
+    """
+
+
+def _refuse_a_form_nothing_will_honour(implementation, name: str, task_form, target_language: str):
+    """Fail loudly when the requested form cannot reach the emitted task.
+
+    THE FAILURE THIS PREVENTS IS SILENT SUCCESS. `_target_language` is set on the SCALE above, and
+    the only readers of that attribute live on `source/checkout.py`'s index -- a different object.
+    `_index()` takes no target language and never passes one on. So a run configured with
+    `form: cross` and `target_language: javascript` sourced Python, emitted Python, and reported
+    `target_met: true, trustworthy: true` with `cross_language = false` in every task.toml.
+
+    That was measured, not deduced: a module/cross python->javascript batch emitted two tasks and
+    both carried `target_language = ""`. All 136 task.toml on disk before it did too, so no
+    cross-language task has ever been produced -- while DESIGN.md records the form as proved.
+
+    WHY REFUSING BEATS QUIETLY DOWNGRADING, which is the whole ethic `core/capabilities.py` is
+    built on: a batch that emits the wrong form still emits, so its yield looks healthy and its
+    tasks look fine one at a time. Over a long unattended run that is hundreds of same-language
+    tasks filed as cross-language, and the error is only visible by reading a field nobody reads.
+
+    The check is that the emitted spec would CARRY the language, not that some attribute was
+    assigned -- assignment is exactly what already happens and exactly what does not work.
+    """
+    wants_cross = task_form is TaskForm.CROSS_LANGUAGE or bool(target_language)
+    if not wants_cross:
+        return
+    if not target_language:
+        raise FormNotHonoured(
+            "form 'cross' needs a target_language: a cross-language task names the language the "
+            "submission must be written in, and without one there is nothing to enforce.")
+    # The scales that thread a target language into their material. Named rather than probed,
+    # because "has the attribute" is true everywhere -- it was just assigned above -- and that is
+    # the bug rather than the test for it.
+    if name not in _SCALES_THAT_CARRY_A_TARGET_LANGUAGE:
+        raise FormNotHonoured(
+            "the %s scale drops target_language before it reaches a task: it is set on the scale, "
+            "and the only readers are on the checkout index, which _index() never gives one. A run "
+            "would emit %s tasks reporting cross_language = false. Refusing rather than shipping "
+            "the wrong form as though it were the right one." % (name, target_language))
+
+
+# Empty ON PURPOSE, and it is the honest value today. Repo reads `material.target_language` and
+# `Checkouts` sets it, but nothing in `run()` constructs a `Checkouts` with one -- so listing repo
+# here would restore exactly the silent success this refusal exists to stop. A scale joins this
+# tuple when a test shows a task.toml coming out with `cross_language = true`, not before.
+_SCALES_THAT_CARRY_A_TARGET_LANGUAGE: tuple = ()
 
 
 def _scale(name: str, idx, *, backend=None, workspace=""):
