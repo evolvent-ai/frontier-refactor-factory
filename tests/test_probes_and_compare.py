@@ -112,3 +112,43 @@ def test_a_mismatch_says_where_it_was():
     verdict = values.structural({"outer": {"inner": [1, 2, 3]}}, {"outer": {"inner": [1, 9, 3]}})
     assert not verdict.same
     assert "outer.inner[1]" in verdict.detail, verdict.detail
+
+
+def test_freeze_honours_its_budget_on_the_batched_path_too(monkeypatch):
+    """The deadline lived inside the per-probe loop, which the batched path skips.
+
+    `call_many` is how every REMOTE freeze runs, and it `continue`s past the loop holding the
+    check -- so the budget was declared and never applied on the one path that matters in
+    production. Five runs against a subject that answers slowly could then outlast the stated hour
+    with only the outer process wrapper to stop them.
+    """
+    import time
+
+    from frf.observe.call import stages
+
+    monkeypatch.setenv("FRF_FREEZE_MAX_SECONDS", "0")
+
+    class Batched:
+        runs = 0
+
+        def call_many(self, name, args_list):
+            Batched.runs += 1
+            return {i: object() for i, _ in enumerate(args_list)}
+
+    class Observer:
+        def subject(self, spec):
+            class Ctx:
+                def __enter__(self_inner): return Batched()
+                def __exit__(self_inner, *_): return False
+            return Ctx()
+
+    class Source:
+        count = 2
+
+        def draw(self, n):
+            return [[1], [2]][:n]
+
+    corpus = stages.freeze(object(), Observer(), Source(), runs=5)
+    assert corpus.usable is False
+    assert "freeze timeout" in (corpus.unusable_reason or "")
+    assert Batched.runs == 0, "the budget was already spent; no run should have been started"

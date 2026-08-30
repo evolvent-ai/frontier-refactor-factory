@@ -112,6 +112,15 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
 
     try:
         for run_index in range(runs):
+            # CHECKED HERE TOO, and this is the branch that needed it. The deadline below sits
+            # inside the per-probe loop, which the batched path skips entirely with its `continue`
+            # -- so on the remote seam, the path EVERY sandboxed batch takes, the freeze budget was
+            # declared and never applied. Five runs of a subject that answers slowly could then run
+            # for hours against a stated hour, and the batch's only real bound was the wrapper
+            # around the whole process.
+            if time.monotonic() >= deadline:
+                return Corpus(inputs=inputs, discard_rate=1.0, usable=False,
+                              unusable_reason="freeze timeout after %.0fs" % max_seconds)
             with observer.subject(spec) as subject:
                 items = list(inputs.items())
                 if hasattr(subject, "call_many"):
