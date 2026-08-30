@@ -363,3 +363,47 @@ def test_a_batched_call_cannot_outlive_the_sandbox_holding_it():
     assert _batch_timeout(120.0, 200) == BATCH_TIMEOUT_CEILING
     assert _batch_timeout(120.0, 2) == 240.0
     assert _batch_timeout(120.0, 0) == 120.0
+
+
+def test_a_batched_call_is_bounded_as_a_whole_not_only_per_chunk():
+    """A failing chunk is absorbed and the loop continues, so per-chunk bounds SUM.
+
+    For a 60-probe module freeze that is four chunks, each already carrying a transport retry --
+    a total that outlasts the freeze budget it sits inside. A java candidate spent hours there.
+    Once the whole call has spent its deadline the remaining chunks are recorded as unanswered
+    without being sent, because the subject was not going to answer them either.
+    """
+    from frf.observe.call.runner import (BATCH_TIMEOUT_CEILING, RemoteSubject, SubjectFailed,
+                                         _call_many_budget)
+
+    # The overall budget must be far below the sum of the per-chunk ones it replaces.
+    assert _call_many_budget(120.0, 64) < 4 * BATCH_TIMEOUT_CEILING
+
+    class Hanging(RemoteSubject):
+        """Every chunk burns the whole remaining budget, as a dead subject does."""
+
+        def __init__(self):
+            self.timeout = 120.0
+            self._next_id = 0
+            self.sent = 0
+
+        def ask(self, requests):
+            self.sent += 1
+            raise SubjectFailed("the subject never answered")
+
+    subject = Hanging()
+    # Patch the clock so the test does not actually wait: the first ask consumes the budget.
+    import frf.observe.call.runner as runner
+    real = runner.time.monotonic
+    ticks = iter([0.0] + [10_000.0] * 50)
+    runner.time.monotonic = lambda: next(ticks, 10_000.0)
+    try:
+        answers = subject.call_many("entry", [[i] for i in range(64)])
+    finally:
+        runner.time.monotonic = real
+
+    assert len(answers) == 64, "every probe must get a recorded outcome"
+    assert all(not obs.ok for obs in answers.values())
+    assert subject.sent <= 1, (
+        "chunks after the deadline must not be sent; sent %d" % subject.sent)
+    assert any("overall deadline" in (obs.error or "") for obs in answers.values())

@@ -240,6 +240,16 @@ class Subject:
 BATCH_TIMEOUT_CEILING = float(os.environ.get("FRF_BATCH_TIMEOUT_CEILING", "900"))
 
 
+def _call_many_budget(per_probe: float, count: int) -> float:
+    """How long ALL the chunks of one batched call may take together. -> seconds.
+
+    Deliberately not `chunks x BATCH_TIMEOUT_CEILING`: that is the sum this exists to refuse. One
+    ceiling, plus a small allowance so a healthy call whose last chunk is slow is not cut off just
+    for being last.
+    """
+    return BATCH_TIMEOUT_CEILING + _batch_timeout(per_probe, min(count, 16))
+
+
 def _batch_timeout(per_probe: float, count: int) -> float:
     """How long one batched call may take. -> seconds, bounded.
 
@@ -385,6 +395,17 @@ class RemoteSubject:
         # Package freeze sends many small JSON requests. Sixteen keeps one pathological request
         # from monopolising a command while reducing E2B process round-trips by ~4x.
         chunk_size = 16
+        # AND A BOUND ON THE WHOLE CALL, not only on each chunk. A failing chunk is absorbed below
+        # and the loop moves to the next one, so a subject that never answers costs the per-chunk
+        # deadline ONCE PER CHUNK -- and each of those already includes a transport retry. For a
+        # 60-probe module freeze that is four chunks x two attempts x the batch ceiling, which
+        # outlasts the freeze budget it sits inside and turned a single java candidate into hours.
+        #
+        # This is the same shape as SANDBOX_LIFETIME and the freeze budget: an inner bound that does
+        # not compose into an outer one leaves the outer one decorative. Once the whole call has
+        # spent its deadline the remaining chunks are recorded as unanswered WITHOUT being sent,
+        # which is the honest result -- the subject was not going to answer them either.
+        deadline = time.monotonic() + _call_many_budget(self.timeout, len(items))
         for start in range(0, len(items), chunk_size):
             requests = []
             ids = []
@@ -392,6 +413,12 @@ class RemoteSubject:
                 self._next_id += 1
                 ids.append(self._next_id)
                 requests.append(Request(self._next_id, name, args))
+            if time.monotonic() >= deadline:
+                for rid in ids:
+                    results[rid] = Observation(
+                        False, error="the batched call exceeded its overall deadline before this "
+                                     "chunk was sent")
+                continue
             try:
                 replies = self.ask(requests)
             except SubjectFailed as failure:
