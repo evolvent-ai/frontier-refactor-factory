@@ -160,3 +160,126 @@ def test_walk_can_stop_at_a_wall_clock_deadline():
     found = list(sourcing.walk(index, budget=100, max_seconds=0))
     assert found == []
     assert index.last_coverage.walked == 0
+
+
+def test_successive_finds_advance_instead_of_reserving_the_same_page():
+    """A roll asks for candidates, tries one, and asks again. It must not get the same one back.
+
+    `walk` restarts its paging at zero on every call, and an index maps page 0 to the same first
+    page for ever -- correctly, since "asking twice is a question with a stable answer" is the rule
+    this module exists to enforce. With a fresh `Memory` per call the second ask returns the first
+    ask's candidates, the roll's own seen-set filters all of them out, and the loop concludes the
+    index is spent.
+
+    MEASURED, NOT HYPOTHESISED: three cells configured `max_attempts: 15` reported `attempted: 1`
+    and were read as thin material.
+    """
+    from frf.core import sourcing
+    from frf.core.scale import Candidate
+
+    class Pages:
+        name = "pages"
+
+        def __init__(self):
+            self.fetches = 0
+
+        def total(self):
+            return 12
+
+        def page(self, number, *, size=50):
+            self.fetches += 1
+            start = number * 4
+            if start >= 12:
+                return []
+            return [Candidate(identity="c%d" % n, scale="repo", language="go", source="pages")
+                    for n in range(start, min(start + 4, 12))]
+
+    class Scale:
+        """Stands in for a real scale: one index, reused across find() calls."""
+
+        def __init__(self):
+            self._index = Pages()
+
+        def find(self, budget):
+            return sourcing.walk(self._index, budget, page_size=4,
+                                 memory=sourcing.batch_memory(self))
+
+    scale = Scale()
+    first = [c.identity for c in scale.find(4)]
+    second = [c.identity for c in scale.find(4)]
+    third = [c.identity for c in scale.find(4)]
+
+    assert first == ["c0", "c1", "c2", "c3"], first
+    assert not set(first) & set(second), "the second ask re-served the first ask's candidates"
+    assert not (set(first) | set(second)) & set(third), third
+    assert len(set(first) | set(second) | set(third)) == 12
+
+
+def test_a_scale_without_the_shared_memory_repeats_itself():
+    """The failing behaviour, pinned, so the fix above cannot be quietly undone.
+
+    Same index, same asks, no shared memory -- and the second call hands back exactly what the
+    first did. This is what made a fifteen-attempt roll stop after one.
+    """
+    from frf.core import sourcing
+    from frf.core.scale import Candidate
+
+    class Pages:
+        name = "pages"
+
+        def total(self):
+            return 8
+
+        def page(self, number, *, size=50):
+            start = number * 4
+            if start >= 8:
+                return []
+            return [Candidate(identity="c%d" % n, scale="repo", language="go", source="pages")
+                    for n in range(start, min(start + 4, 8))]
+
+    index = Pages()
+    first = [c.identity for c in sourcing.walk(index, 4, page_size=4)]
+    second = [c.identity for c in sourcing.walk(index, 4, page_size=4)]
+    assert first == second, "this test documents the old behaviour; if it changed, update the fix"
+
+
+def test_the_real_scales_advance_across_successive_finds():
+    """The shipped scales, not a stand-in: each must page forward on the second ask.
+
+    The stub above proves the mechanism; this proves the three classes actually use it. Without it
+    a scale could quietly drop `memory=` and every test here would still pass while a roll went
+    back to making one attempt out of fifteen.
+    """
+    from frf.core.scale import Candidate
+    from frf.scales.module import Module
+    from frf.scales.package import Package
+    from frf.scales.repo import Repo
+
+    def index_for(scale_name):
+        class Pages:
+            name = "pages"
+
+            def total(self):
+                return 8
+
+            def page(self, number, *, size=50):
+                start = number * 4
+                if start >= 8:
+                    return []
+                return [Candidate(identity="c%d" % n, scale=scale_name, language="go",
+                                  source="pages",
+                                  # repo's `keep` reads these; absent, it refuses every row and the
+                                  # test would pass for the wrong reason.
+                                  detail={"size_kb": 1, "commit": "a" * 40,
+                                          "facts": {"version": "a" * 40, "name": "n",
+                                                    "summary": "a summary long enough to pass"}})
+                        for n in range(start, min(start + 4, 8))]
+        return Pages()
+
+    for cls, scale_name in ((Module, "module"), (Package, "package"), (Repo, "repo")):
+        scale = cls(index=index_for(scale_name))
+        first = [c.identity for c in scale.find(4)]
+        second = [c.identity for c in scale.find(4)]
+        assert first, "%s found nothing at all" % scale_name
+        assert not set(first) & set(second), (
+            "%s re-served its first page: %s then %s" % (scale_name, first, second))

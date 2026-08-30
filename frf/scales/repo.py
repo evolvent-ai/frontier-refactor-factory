@@ -979,7 +979,8 @@ class Repo:
                 return False
             return True
 
-        return sourcing.walk(self._index, budget, page_size=4, keep=keep)
+        return sourcing.walk(self._index, budget, page_size=4, keep=keep,
+                             memory=sourcing.batch_memory(self))
 
     def specify(self, candidate: Candidate, *,
                 task_form: TaskForm = TaskForm.INPLACE) -> Spec:

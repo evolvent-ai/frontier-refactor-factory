@@ -249,7 +249,8 @@ class Package:
         from ..core import sourcing
 
         page_size = 4 if getattr(self._index, "name", "") == "github-packages" else 20
-        return sourcing.walk(self._index, budget, page_size=page_size)
+        return sourcing.walk(self._index, budget, page_size=page_size,
+                             memory=sourcing.batch_memory(self))
 
     def specify(self, candidate: Candidate, *,
                 task_form: TaskForm = TaskForm.INPLACE) -> Spec:

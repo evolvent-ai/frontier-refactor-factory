@@ -121,6 +121,39 @@ class Coverage:
                 "repeats": self.repeats, "total": self.total, "remaining": self.remaining}
 
 
+def batch_memory(owner) -> Memory:
+    """The seen-set one scale reuses across successive `find()` calls. Created on first use.
+
+    WHY SUCCESSIVE CALLS NEED TO SHARE ONE. `walk` restarts its paging at zero on every call, and an
+    index maps page 0 to the same first page for ever -- correctly, since "asking twice is a
+    question with a stable answer" is the property the whole module is built on. With a fresh
+    `Memory` per call, a roll that asks for four candidates, tries one, and asks again gets THE SAME
+    FOUR back. The caller's own seen-set then filters all of them out, and the loop concludes the
+    index is spent.
+
+    That is not hypothetical. A roll configured for fifteen attempts made ONE: waves are capped at
+    the remaining target, which is 1 when the budget is 1, so each round consumed a single candidate
+    and the next round rediscovered it. Three cells reported `attempted: 1` against
+    `max_attempts: 15` and were read as thin material.
+
+    Sharing the memory makes `walk` page FORWARD past what it has already handed out, so the second
+    call returns candidates the first did not. The scale owns it rather than the batch loop because
+    `find(budget)` takes no memory argument, and threading one through three scales' signatures
+    would put the fix in the callers rather than in the thing that has the state.
+
+    NOT PERSISTED. This is per-scale-instance and dies with the batch; the file-backed `Memory.load`
+    remains what carries refusals between runs.
+    """
+    existing = getattr(owner, "_batch_memory", None)
+    if existing is None:
+        existing = Memory()
+        try:
+            owner._batch_memory = existing
+        except Exception:                                  # noqa: BLE001 -- slotted/frozen owner
+            pass
+    return existing
+
+
 def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: int = 50,
          keep: Callable[[Candidate], bool] | None = None,
          language_filter: str | None = None,

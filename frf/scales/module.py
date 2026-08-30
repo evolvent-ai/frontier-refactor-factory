@@ -366,7 +366,8 @@ class Module:
         # Widening indexes (GitHub -> functions) do real checkout and AST work per row. Keep the
         # source page close to the requested batch size so budget=1 does not expand fifty repos.
         page_size = 4 if getattr(self._index, "name", "") == "github-functions" else 50
-        return sourcing.walk(self._index, budget, page_size=page_size)
+        return sourcing.walk(self._index, budget, page_size=page_size,
+                             memory=sourcing.batch_memory(self))
 
     def specify(self, candidate: Candidate, *,
                 task_form: TaskForm = TaskForm.INPLACE) -> Spec:
