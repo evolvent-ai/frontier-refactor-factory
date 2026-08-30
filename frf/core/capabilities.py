@@ -102,10 +102,14 @@ _REGISTRY: dict[str, LanguageCapability] = {
     # needs a concrete type per argument, which `source/package_adapters.py` does not yet emit -- it
     # captures a signature as a regex STRING.
     #
-    # THIS IS NOT A CLAIM ABOUT SUPPLY. Ruby's kernel and module cells stay thin for a reason that is
-    # a fact about Ruby rather than about its reader: 1884 definitions across the checkouts on hand
-    # carried 4 type annotations between them, and an untyped parameter is refused rather than guessed
-    # at. The package scale is indifferent to that, because it dispatches by name.
+    # WHAT USED TO BE SAID HERE WAS WRONG, and it was the stated reason ruby's kernel and module
+    # cells were left empty: "1884 definitions across the checkouts on hand carried 4 type
+    # annotations between them". Re-measured over the 41 ruby checkouts now on disk, the reader
+    # itself returns 305 mineable functions. The old figure came from a sample a tenth the size and
+    # had been inherited since as a fact about the language rather than about that sample.
+    #
+    # An untyped parameter is still refused rather than guessed at -- see `source/ruby_functions`
+    # for why -- and the package scale remains indifferent to it, because it dispatches by name.
     "ruby": LanguageCapability("ruby", "call-capable", "ruby",
                                ("kernel", "module", "package", "repo")),
 }

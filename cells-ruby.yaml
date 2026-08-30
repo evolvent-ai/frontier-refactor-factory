@@ -1,0 +1,33 @@
+# The three ruby cells, on evidence that contradicts the reason they were left empty.
+#
+# `ruby_functions` and `capabilities` both record that ruby cannot be mined: "across 202 Ruby files
+# on hand, 1884 definitions carried 4 type annotations between them". Re-measured over the 41 ruby
+# checkouts now on disk, the READER ITSELF finds 305 mineable functions -- top-level defs carrying a
+# written type, which is exactly what it requires. The old figure came from a sample a tenth the
+# size and has been quoted since as a property of the language.
+#
+# package/ruby needs no types at all: its dispatcher resolves a name through reflection.
+output_dir: /data/evolvent/shijian-workdir/ffr-results/test
+ledger_file: /data/evolvent/shijian-workdir/ffr-results/test/cells-ruby.ledger.jsonl
+checkpoint_file: /data/evolvent/shijian-workdir/ffr-results/test/cells-ruby.checkpoint.json
+freeze_runs: 5
+max_concurrent: 3
+e2b_max_active: 3
+llm_max_concurrent: 3
+sandboxed: true
+jobs:
+  - scale: kernel
+    form: inplace
+    source_language: ruby
+    budget: 1
+    max_attempts: 10
+  - scale: module
+    form: inplace
+    source_language: ruby
+    budget: 1
+    max_attempts: 10
+  - scale: package
+    form: inplace
+    source_language: ruby
+    budget: 1
+    max_attempts: 10

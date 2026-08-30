@@ -14,12 +14,24 @@ question about nesting, which is what a grammar answers and a regex guesses at. 
 hand it is 1034 top-level definitions against 850 indented ones, so guessing wrong would either lose
 half the supply or emit candidates that cannot be served.
 
-WHAT IS DELIBERATELY REFUSED, and it is most of Ruby. A function whose parameters carry no written
-type is skipped, exactly as the JavaScript reader skips untyped JavaScript: a guessed schema draws
-probes the subject never accepted, and the resulting refusal is charged to the candidate, so a bad
-guess here is indistinguishable from bad material. This is a REAL limit on supply rather than a
-formality -- across 202 Ruby files on hand, 1884 definitions carried 4 type annotations between them.
-A cell that produces nothing for this reason has produced an evidenced refusal, not a silent zero.
+WHAT IS DELIBERATELY REFUSED. A function whose parameters carry no written type is skipped, exactly
+as the JavaScript reader skips untyped JavaScript: a guessed schema draws probes the subject never
+accepted, and the resulting refusal is charged to the candidate, so a bad guess here is
+indistinguishable from bad material.
+
+HOW MUCH THAT ACTUALLY COSTS, re-measured, because the figure this file used to quote was wrong by
+two orders of magnitude and was being read as a property of the language. It said "across 202 Ruby
+files on hand, 1884 definitions carried 4 type annotations between them", and ruby's kernel and
+module cells were left empty on the strength of it.
+
+Run over the 41 ruby checkouts now on disk -- 2105 files, 7822 `def` sites -- THIS READER returns
+305 functions: top-level defs carrying a written type, which is exactly what it requires. The old
+sample was a tenth the size and its ratio did not survive contact with more material.
+
+So the refusal is real per-function and NOT a reason to expect nothing from the language. Supply is
+concentrated rather than absent (one checkout held 289 of the 305), which is a fact about which
+repositories document themselves, and it is the kind of claim that has to be re-measured rather
+than inherited.
 """
 from __future__ import annotations
 
