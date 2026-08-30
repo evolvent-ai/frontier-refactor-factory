@@ -89,6 +89,60 @@ TEARDOWN_TIMEOUT = 30
 SANDBOX_LIFETIME = float(os.environ.get("FRF_SANDBOX_LIFETIME", "5400"))
 
 
+class _CommandTimedOut(Exception):
+    """The command outlived the deadline this process set for it.
+
+    Shaped like the SDK's own timeout so the retry below reads it the same way: no `exit_code`, and
+    a message the transport-timeout pattern matches.
+    """
+
+
+def _wait_bounded(handle, seconds: float):
+    """Wait for a backgrounded command, against a deadline WE hold. -> its `CommandResult`.
+
+    THE RESULT, NOT THE HANDLE. `CommandHandle` carries no `stdout`, `stderr` or `exit_code` --
+    those live on the `CommandResult` that `wait()` returns, which is also what the foreground
+    `run()` hands back. Returning the handle would leave every caller reading "" from `getattr`
+    and seeing a silent success for commands that printed, failed, or both.
+
+    WHY NOT `handle.wait()` ON ITS OWN. It takes no timeout -- only callbacks -- and iterates the
+    event stream until the far side ends it. The sandbox's own `timeout` normally does end it, by
+    killing the command so the stream closes, and that is the first line of defence. This is the
+    second: if the stream stalls without the command dying -- a dropped connection that never
+    resets, a sandbox that expired underneath us -- nothing in the SDK ever returns, and a batch
+    stops with no output, no error, and nothing naming the candidate that did it.
+
+    That failure has a history here. `TRANSPORT_HEADROOM` exists because a call that never returns
+    also never raises, so the retry written for it was unreachable; this is the same lesson applied
+    one layer further in.
+
+    The wait runs on a worker thread because the SDK's iteration is synchronous and cannot be
+    interrupted. On expiry the command is killed so the sandbox does not keep running work whose
+    result nobody will read; the thread is left to die with the stream it is blocked on.
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
+
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="frf-e2b-wait")
+    try:
+        future = pool.submit(handle.wait)
+        try:
+            # A non-zero exit raises CommandExitException inside the worker, and `result()`
+            # re-raises it here -- so the caller's existing translation of that exception into a
+            # Result keeps working exactly as it did on the foreground path.
+            return future.result(timeout=max(1.0, seconds))
+        except _FuturesTimeout:
+            try:
+                handle.kill()
+            except Exception:                                 # noqa: BLE001 -- best effort
+                pass
+            raise _CommandTimedOut(
+                "the sandbox command exceeded its %.0fs request timeout and was killed" % seconds)
+    finally:
+        # NOT `shutdown(wait=True)`: the worker may still be blocked in the stream, and waiting for
+        # it here would reintroduce exactly the unbounded wait this function exists to remove.
+        pool.shutdown(wait=False)
+
+
 def _tar_bytes(local_dir: str, exclude: set | None = None) -> bytes:
     """A directory as a tar stream, with the host left out of it.
 
@@ -384,7 +438,14 @@ class Remote:
                     timeout=int(timeout),
                     # Headroom over the command's own limit, so a slow build is cut off by the
                     # limit it was given and not by the wire carrying it. See TRANSPORT_HEADROOM.
-                    request_timeout=int(timeout) + TRANSPORT_HEADROOM)
+                    request_timeout=int(timeout) + TRANSPORT_HEADROOM,
+                    # START IT, DO NOT WAIT FOR IT HERE. Waiting is done below against a deadline
+                    # this process owns -- see `_wait_bounded` for why the SDK's own wait is not
+                    # enough on its own.
+                    background=True)
+                # Rebound to the RESULT -- the lines below read exit_code/stdout/stderr off it,
+                # and a CommandHandle carries none of the three.
+                handle = _wait_bounded(handle, int(timeout) + TRANSPORT_HEADROOM)
                 break
             except Exception as exc:                          # noqa: BLE001 -- the SDK's own errors
                 code = getattr(exc, "exit_code", None)

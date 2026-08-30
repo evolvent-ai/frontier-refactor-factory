@@ -217,3 +217,71 @@ def test_a_sandbox_outlives_the_longest_stage_that_runs_inside_it():
     # The freeze reads that same environment variable, so the two figures are about one clock.
     assert "FRF_FREEZE_MAX_SECONDS" in inspect.getsource(stages.freeze)
 
+
+
+def test_a_stalled_sandbox_command_is_killed_rather_than_waited_on_for_ever():
+    """`CommandHandle.wait()` takes no timeout -- only callbacks -- and iterates until the far side
+    ends the stream.
+
+    The sandbox's own `timeout` normally ends it, by killing the command so the stream closes, and
+    that is the first line of defence. This is the second: a stream that stalls without the command
+    dying returns never, and a batch stops with no output, no error, and nothing naming the
+    candidate that did it. `TRANSPORT_HEADROOM` exists because a call that never returns also never
+    raises; this is that lesson one layer further in.
+    """
+    import time
+
+    class Stalled:
+        killed = False
+
+        def wait(self):
+            time.sleep(30)                      # longer than any deadline this test sets
+
+        def kill(self):
+            Stalled.killed = True
+            return True
+
+    started = time.monotonic()
+    with pytest.raises(containers._CommandTimedOut, match="was killed"):
+        containers._wait_bounded(Stalled(), 1.0)
+    assert time.monotonic() - started < 10, "the deadline did not fire"
+    assert Stalled.killed, "a command left running holds sandbox resources nobody will read"
+
+
+def test_the_bounded_wait_returns_the_result_and_not_the_handle():
+    """A CommandHandle carries no stdout, stderr or exit_code -- CommandResult carries all three.
+
+    Returning the handle would leave every caller reading "" out of `getattr` and reporting a
+    silent success for commands that printed, failed, or both.
+    """
+    class Finished:
+        def wait(self):
+            return _FakeResult()
+
+        def kill(self):
+            raise AssertionError("a command that finished must not be killed")
+
+    class _FakeResult:
+        exit_code = 3
+        stdout = "out"
+        stderr = "err"
+
+    result = containers._wait_bounded(Finished(), 5.0)
+    assert result.exit_code == 3 and result.stdout == "out" and result.stderr == "err"
+
+
+def test_a_non_zero_exit_still_reaches_the_caller_as_an_exception():
+    """The foreground path raised CommandExitException and `run` translated it into a Result.
+
+    Backgrounding must not change that: the worker's exception has to re-raise here, or a failing
+    build would arrive looking like a success with an empty message.
+    """
+    class Failing:
+        def wait(self):
+            raise RuntimeError("CommandExitException-ish")
+
+        def kill(self):
+            raise AssertionError("a command that already failed must not be killed")
+
+    with pytest.raises(RuntimeError, match="CommandExitException-ish"):
+        containers._wait_bounded(Failing(), 5.0)
