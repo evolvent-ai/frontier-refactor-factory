@@ -163,8 +163,22 @@ TEMPLATES = {
     # `Entry` serve.go calls and converts JSON arguments into the subject's own types. Naming
     # `{bridge}` in the build argv is what makes it compile; writing it and forgetting that is a file
     # on disk the linker never sees, which fails as `undefined: Entry`.
+    # GOTOOLCHAIN=local BECAUSE THE SANDBOX HAS NO NETWORK AND SAYING SO IS CHEAPER THAN FINDING OUT.
+    # A modern go.mod may carry `toolchain go1.27.0`, and Go's default is to go and FETCH that
+    # toolchain -- which `GOPROXY=off` then blocks, after the attempt. Two candidates in a real batch
+    # refused as `go: download go1.27.0 for linux/amd64: toolchain not available`, which reads like a
+    # missing dependency and is really a repository asking for a compiler this image does not carry.
+    # `local` makes Go use what is installed and say so immediately, so the refusal is fast and names
+    # the real reason.
+    #
+    # THE IMAGE IS NOT BUMPED TO CHASE THIS. The repositories that demanded a newer toolchain were
+    # applications rather than libraries, and an offline sandbox refuses them at their dependency
+    # closure anyway -- so a newer compiler would move the refusal without preventing it. The pin in
+    # `core/shims/dockerfiles.py` is one line and worth revisiting from a host that can verify a tag
+    # exists; guessing one from here would break every Go build instead of two.
     "go": Shim("serve.go", "subject.go", ("{binary}",), tool="go", bridge="bridge.go",
-               build=(("env", "GOPROXY=off", "GOSUMDB=off", "go", "build", "-o", "{binary}", "{entry}", "{bridge}", "{subject}"),)),
+               build=(("env", "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local",
+                       "go", "build", "-o", "{binary}", "{entry}", "{bridge}", "{subject}"),)),
     # THE BRIDGE IS THE SUBJECT FILE, because rustc is handed only the shim and reaches the subject as
     # `mod subject;` -- a third file would be invisible to the compiler. So the generated `entry` is
     # APPENDED to the mined source, which also puts the mined function in scope under its plain name.
