@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 import shutil
 from dataclasses import dataclass, field
 
@@ -35,7 +36,7 @@ from ..observe import coverage
 from ..observe.call import dispatch as call_dispatch
 from ..observe.call import shims
 from ..observe.call.runner import Subject, RemoteSubject
-from .module import PROBE_TIMEOUT
+from .module import BUILD_TIMEOUT, PROBE_TIMEOUT
 
 # How many probes a corpus is drawn with. Larger than the module scale's because it has to cover a
 # whole surface rather than one function: every entry point needs inputs, and each needs at least
@@ -123,7 +124,36 @@ class Observer:
         adapter = os.path.join(destination, _subject_name(spec.language))
         with open(adapter, "w", encoding="utf-8") as handle:
             handle.write(_dispatcher_source(spec.language, dispatch))
-        _, self._argv = shims.materialise(destination, spec.language, adapter, "entry")
+        build, self._argv = shims.materialise(destination, spec.language, adapter, "entry")
+
+        # A COMPILED LANGUAGE HAS TO BE COMPILED, and this scale never did it. `Observer.build` wrote
+        # the files and stopped; `RemoteSubject` pushes a tree and executes argv. For Go that argv is
+        # `serve.bin` -- a binary nothing had produced. Every probe therefore failed to start, and
+        # because the failure text carries a per-run `/tmp/frf-subject-<uuid>`, freeze saw five
+        # different answers and discarded 100% of the corpus as unstable MATERIAL. Eight of eight Go
+        # candidates in every batch, for a build step that did not exist. The module scale has always
+        # compiled here; this is that same step, which the package scale was missing.
+        if not build:
+            return
+        if self._backend is None or getattr(self._backend, "name", "") == "local-process":
+            raise RuntimeError(
+                "%s is a compiled language and needs a sandbox to build in; refusing to compile on "
+                "the host, whose toolchain is not what the task ships with" % spec.language)
+        remote = "/tmp/frf-package-build-%s" % uuid.uuid4().hex[:12]
+        self._backend.push(self.workspace, remote)
+        # THE BUILD RUNS INSIDE THE MODULE, not at the pushed root. Go resolves `go.mod` by walking
+        # UP from the working directory, and the manifest sits in `<package_name>/` -- one level below
+        # the tree that was pushed. Building from the root reported `go.mod file not found in current
+        # directory or any parent directory` for every imported package.
+        module_root = remote + "/" + self.material.package_name
+        for command in build:
+            remote_command = [part.replace(self.workspace, remote) if isinstance(part, str) else part
+                              for part in command]
+            done = self._backend.run(remote_command, workdir=module_root, timeout=BUILD_TIMEOUT)
+            if not done.ok:
+                raise RuntimeError("%s did not build: %s" % (self.material.identity, done.tail(800)))
+        # Bring the built artefact back, so the workspace the freeze pushes carries it.
+        self._backend.pull(remote, self.workspace)
 
     def subject(self, spec: Spec | None = None, *, mutated: bool = False,
                 attempt: int = 0):
@@ -145,8 +175,14 @@ class Observer:
         return Subject(argv, cwd=room, timeout=PROBE_TIMEOUT)
 
     def _room(self) -> str:
-        """Where the servable copy lives: the package directory, beside its own manifest."""
-        return os.path.join(self.workspace, self.material.package_name)
+        """What gets pushed to the sandbox: the whole workspace.
+
+        NOT the directory the binary sits in. A Go dispatcher lives in `<package>/frfd/` and imports
+        the module's other packages, so pushing only that directory would leave go.mod and every
+        imported package behind. The argv carries absolute paths that `RemoteSubject` rewrites
+        against this root, so a deeper binary is still found.
+        """
+        return self.workspace
 
     def coverage(self):
         return coverage.backend_for(self.material.language)
@@ -336,8 +372,18 @@ class Package:
                 "labels (one of valid,error,boundary for each probe) for this public dispatch. "
                 "Each probe must be [operation_name, arg1, arg2, ...], with operation_name exactly "
                 "one of the dispatch names; the operation name is not omitted. "
-                "The dispatch below is a JSON list of objects with keys name/module/symbol/signature; "
-                "iterate those objects by entry['name'], never unpack entries as (name, cases). "
+                "The dispatch below is a JSON list of objects with keys name/module/symbol/signature "
+                "and, for a statically typed package, params; iterate those objects by "
+                "entry['name'], never unpack entries as (name, cases). "
+                # THE TYPES ARE IN THE SURFACE AND HAVE TO BE OBEYED. Without this the model guessed
+                # from the name, and a Go operation taking []byte was probed with a plain string --
+                # every probe refused with `argument 0 is not a bytes`, so a dispatcher that worked
+                # produced a corpus that could grade nothing.
+                "When an entry has params, each param has a `kind`, and argument i must match "
+                "params[i]['kind'] exactly: int -> a JSON integer; float -> a JSON number; "
+                "bool -> true/false; string -> a JSON string; bytes -> a BASE64-ENCODED STRING "
+                "(never a list of byte values); int_array/float_array -> a JSON array of numbers. "
+                "Match the arity too: pass exactly len(params) arguments after the operation name. "
                 "Example output shape: {'probes': [['op', 'x']], 'labels': ['valid']}. "
                 "Return at least 60 distinct probes even when n is smaller. "
                 "Every argument must be JSON-serializable (null, boolean, number, string, list, "
