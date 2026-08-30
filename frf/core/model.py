@@ -43,6 +43,67 @@ DEFAULT_MODEL = "gpt-5.6-terra"
 # batch. Sourcing has the same bound for the same reason.
 TIMEOUT = float(os.environ.get("FRF_LLM_TIMEOUT", "600"))
 
+# THE STATUSES THAT DESCRIBE THE GATEWAY'S MOMENT RATHER THAN OUR REQUEST. A depleted balance is
+# refilled, a rate limit window rolls over, a bad upstream recovers -- so the same body sent a
+# moment later gets a different answer, and giving up on the first one throws away a candidate for
+# a reason that had nothing to do with the candidate.
+#
+# THIS IS A THROUGHPUT PROPERTY, NOT A POLITENESS ONE. Over a long run the gateway's balance dips
+# and resets on its own schedule; without this every dip kills whatever candidates were mid-flight.
+# They are charged to `Fault.FACTORY` (pipeline.py classifies ModelError that way), so they do not
+# corrupt the material yield -- but a batch that spends its budget re-sourcing after our outages
+# measures our uptime instead of the supply.
+#
+# 402 payment required, 403 forbidden -- the balance gateways report either way; 408 request
+# timeout; 409 conflict; 429 too many requests; and the 5xx family, which is by definition the
+# gateway's own fault. Everything else -- 400 malformed, 401 bad key, 404 wrong URL -- is
+# deterministic: the identical request fails identically for ever, and retrying it burns the
+# caller's timeout to arrive at the same message three attempts later.
+RETRYABLE_STATUS = frozenset((402, 403, 408, 409, 429))
+
+# How many times one question may be asked. The real bound is the caller's `timeout`, which is a
+# TOTAL budget -- this only stops a run of instant failures from spinning. Both are needed: the
+# deadline alone would busy-loop on a gateway that refuses in a millisecond, and a count alone would
+# let three slow attempts overrun a bounded roll.
+MAX_ATTEMPTS = 6
+
+# The ceiling on one backoff. A balance that resets on its own schedule is not waited out by
+# doubling for ever; past this the caller's deadline is the thing that should decide.
+MAX_BACKOFF = 30.0
+
+
+def _retry_after(headers) -> float | None:
+    """The gateway's own instruction, in seconds, or None.
+
+    Only the delta-seconds form is read. `Retry-After` may also be an HTTP date, which is rarer from
+    JSON gateways and whose parse failure would be silently indistinguishable from absence -- so an
+    unreadable value falls back to the exponential schedule rather than being guessed at.
+    """
+    if headers is None:
+        return None
+    try:
+        return max(0.0, float(str(headers.get("Retry-After") or "").strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _delay_for(attempt: int, headers=None) -> float:
+    """How long to wait before the next attempt. Doubling, unless the gateway said otherwise."""
+    told = _retry_after(headers)
+    return min(told if told is not None else 2.0 ** attempt, MAX_BACKOFF)
+
+
+def _wait(delay: float, deadline: float) -> bool:
+    """Sleep before retrying. -> whether another attempt still fits inside the deadline.
+
+    A delay that would outlast the budget is NOT slept through: waiting out a whole timeout to
+    arrive at the same failure spends the caller's clock to learn nothing.
+    """
+    if delay >= deadline - time.monotonic():
+        return False
+    time.sleep(delay)
+    return True
+
 
 class ModelError(RuntimeError):
     """The gateway could not be reached, or answered something unusable.
@@ -86,8 +147,9 @@ def ask(prompt: str, *, system: str = "", temperature: float = 0.2,
     # once for a generator and once for repair; three full waits per call can otherwise starve a roll.
     deadline = time.monotonic() + max(0.1, float(timeout))
     last_transport = None
+    last_refusal = None
     payload = None
-    for attempt in range(3):
+    for attempt in range(MAX_ATTEMPTS):
       remaining = deadline - time.monotonic()
       if remaining <= 0:
         break
@@ -103,15 +165,23 @@ def ask(prompt: str, *, system: str = "", temperature: float = 0.2,
             pass
         # The STATUS and the body, never the key. A diagnostic that echoes the Authorization header
         # publishes the credential into whatever log the message is pasted into.
-        raise ModelError("the gateway answered %d: %s" % (error.code, detail)) from error
+        last_refusal = "the gateway answered %d: %s" % (error.code, detail)
+        if (error.code in RETRYABLE_STATUS or error.code >= 500) and attempt < MAX_ATTEMPTS - 1:
+            if _wait(_delay_for(attempt, getattr(error, "headers", None)), deadline):
+                continue
+            break
+        raise ModelError(last_refusal) from error
       except (urllib.error.URLError, TimeoutError, OSError) as error:
         last_transport = error
-        if attempt < 2:
-            time.sleep(min(2 ** attempt, max(0.0, deadline - time.monotonic())))
+        if attempt < MAX_ATTEMPTS - 1 and _wait(_delay_for(attempt), deadline):
             continue
         raise ModelError("the gateway did not answer: %s" % error) from error
     if payload is not None:
         pass
+    elif last_refusal is not None:
+        # The last thing the gateway actually said, not a timeout message. "answered 402" names
+        # something a person can act on; "exceeded its timeout" would hide it behind our own clock.
+        raise ModelError(last_refusal)
     elif last_transport is not None:
         raise ModelError("the gateway did not answer: %s" % last_transport)
     else:
