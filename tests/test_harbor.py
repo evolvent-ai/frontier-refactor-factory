@@ -206,3 +206,31 @@ def test_the_provenance_sentence_never_invents_a_number():
         said = harbor._provenance_sentence(bare)                  # noqa: SLF001
         assert "were not recorded" in said, said
         assert "0 probe" not in said, "a missing number must not be reported as zero: %s" % said
+
+
+def test_the_candidate_is_not_root_and_still_has_a_usable_home():
+    """Dropping to `nobody` without a HOME silently ends every compiled task.
+
+    `nobody`'s home is `/nonexistent`, and every compiled toolchain caches under $HOME. Verified by
+    building the generated image and running as the dropped user:
+
+        failed to initialize build cache at /nonexistent/.cache/go-build: permission denied
+
+    So the two lines belong together: a task image that drops the user and does not give it a
+    writable home is worse than one that never dropped it, because the failure looks like a broken
+    toolchain rather than a permissions decision.
+
+    The workspace and the verifier log directory are chowned for the same reason -- the candidate
+    was told to work in `/app`.
+    """
+    from frf.core.harbor import dockerfile_for
+
+    for language in ("python", "go", "rust", "javascript"):
+        text = dockerfile_for(language, "")
+        assert "USER nobody" in text, language
+        assert "ENV HOME=/home/candidate" in text, language
+        assert "/home/candidate" in text and "chown -R nobody:nogroup" in text, language
+        # HOME must be set and the directory owned BEFORE the user is dropped, or the drop lands
+        # on a home the candidate cannot write.
+        assert text.index("chown -R nobody:nogroup") < text.index("USER nobody"), language
+        assert text.index("WORKDIR /app") < text.index("USER nobody"), language

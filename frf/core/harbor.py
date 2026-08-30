@@ -203,6 +203,34 @@ def dockerfile_for(source_language: str, target_language: str,
     lines.append("WORKDIR /app")
     lines.append("")
 
+    # --- The submission does not need to be root ---
+    #
+    # Every emitted image ran the candidate as root because nothing said otherwise. On this factory
+    # that is not a hole the way it is elsewhere: the answer key lives in `tests/`, the verifier runs
+    # with `environment_mode = "separate"`, and a reviewed delivery that kept its reference in the
+    # SAME container had to defend it with chmod timing, which root defeats. Ours is defended by not
+    # being in the container at all.
+    #
+    # It is still worth dropping. Root inside the workspace lets a submission edit anything the image
+    # ships -- toolchain, interpreter, the timing harness it is measured by -- and "the reference is
+    # somewhere else" is a reason the privilege is not URGENT, not a reason to hand it out.
+    #
+    # `/app` and `/logs/verifier` are chowned first, or the candidate cannot write the workspace it
+    # was told to work in; that is the failure this ordering exists to avoid.
+    # A HOME THAT EXISTS, and this is the part that is not optional. `nobody`'s home is
+    # `/nonexistent`, and every compiled toolchain puts its cache under $HOME: dropping the user
+    # without this fails as
+    #
+    #     failed to initialize build cache at /nonexistent/.cache/go-build: permission denied
+    #
+    # which is not a permissions policy anyone chose -- it silently ends every Go, Rust and Node
+    # task. Setting HOME once covers all of them, and is why this is not a per-language ENV.
+    lines.append("RUN mkdir -p /home/candidate \\")
+    lines.append("    && chown -R nobody:nogroup /app /logs/verifier /home/candidate")
+    lines.append("ENV HOME=/home/candidate")
+    lines.append("USER nobody")
+    lines.append("")
+
     return "\n".join(lines)
 
 

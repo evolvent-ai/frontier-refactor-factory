@@ -399,3 +399,34 @@ def test_locate_raises_when_no_repository_url_and_invoke_empty():
                 or "no discoverable entry point" in str(exc))
     else:
         raise AssertionError("must raise ValueError for unresolvable candidate")
+
+
+def test_task_names_read_as_one_thing_and_carry_no_revision():
+    """A name is read, typed and compared by people; ours spelled identifiers three ways.
+
+    `gonum@8d8e8a102004-faster` put twelve hex digits of revision into the thing a person reads,
+    and `interview-BubbleSort` mixed a kebab-case repository with a camel-case symbol. The repo
+    scale had already established that the commit belongs in provenance rather than the name; the
+    package scale had missed it. The reference benchmarks this factory is measured against are
+    uniformly kebab (`cranelift-codegen-opt`, `libexpat-to-x86asm`).
+    """
+    from frf.scales import module as module_scale
+    from frf.scales import package as package_scale
+
+    package = package_scale.Material(
+        identity="github:gonum/gonum@8d8e8a102004", language="go", root="",
+        entry_points=(), description="")
+    assert package_scale._task_name(package) == "gonum-faster"
+
+    rewrite = package_scale.Material(
+        identity="github:gonum/gonum@8d8e8a102004", language="go", root="",
+        entry_points=(), description="", target_language="rust")
+    assert package_scale._task_name(rewrite) == "gonum-rewrite"
+
+    for symbol, expected in (("BubbleSort", "bubble-sort"), ("boyerMoore", "boyer-moore"),
+                             ("missing_ranges", "missing-ranges")):
+        assert module_scale._slug(symbol) == expected, symbol
+
+    # No emitted name may carry a revision or an upper-case letter.
+    for name in (package_scale._task_name(package), package_scale._task_name(rewrite)):
+        assert "@" not in name and name == name.lower(), name

@@ -498,8 +498,43 @@ def _audit_probe_contract(probes: list, dispatch: tuple, *, labels=None) -> None
 
 
 
+def _slug(text: str) -> str:
+    """A task-name fragment: lower kebab-case, no camel humps, no stray punctuation.
+
+    A NAME IS READ BY PEOPLE, and half of ours were not readable as one thing: `interview-BubbleSort`
+    and `librec-weightedcMean` mix a kebab-case repository with a camel-case symbol, so the same
+    corpus spells identifiers three ways. The reference benchmarks this factory is measured against
+    are uniformly kebab -- `cranelift-codegen-opt`, `libexpat-to-x86asm` -- and matching that costs
+    one function.
+
+    Camel humps become separators, so `BubbleSort` is `bubble-sort` and `weightedcMean` is
+    `weightedc-mean`; underscores and dots do the same. Runs of separators collapse.
+    """
+    out = []
+    for index, char in enumerate(str(text)):
+        if char in "_. /":
+            out.append("-")
+            continue
+        if char.isupper() and index and (str(text)[index - 1].islower() or str(text)[index - 1].isdigit()):
+            out.append("-")
+        out.append(char.lower())
+    joined = "".join(out)
+    while "--" in joined:
+        joined = joined.replace("--", "-")
+    return joined.strip("-")
+
+
 def _task_name(material: Material) -> str:
-    stem = material.identity.rsplit("/", 1)[-1].replace("_", "-").lower()
+    """The package, and what is being asked of it. Not the revision.
+
+    THE COMMIT DOES NOT BELONG IN A NAME, which the repo scale already established and this one
+    missed: `gonum@8d8e8a102004-faster` is what a person has to read, type and compare, and two
+    revisions of one package produce names differing by twelve hex digits for no gain. The revision
+    is pinned in provenance, where it is exact and nobody has to read it.
+    """
+    stem = material.identity.rsplit("/", 1)[-1]
+    stem = stem.split("@", 1)[0] or stem
+    stem = _slug(stem)
     return "%s-rewrite" % stem if material.target_language else "%s-faster" % stem
 
 def _subject_name(language: str) -> str:
