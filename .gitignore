@@ -16,10 +16,15 @@ work/
 tasks/
 *.tar.gz
 
-# Run logs/checkpoints and local roll configs
+# Run logs/checkpoints and local roll configs.
+# Batch configs are per-run scratch: they name an output directory, a ledger and a language, and a
+# repository full of them says nothing a reader needs. `example-run.yaml` is the one that is kept,
+# because the README points at it.
 *.log
 *.jsonl
-run_*.yaml
+*.yaml
+!example-run.yaml
+!.github/**/*.yaml
 jobs/
 .frf-*/
 .harbor/

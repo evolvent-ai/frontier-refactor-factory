@@ -41,6 +41,8 @@ E2B_API_KEY=    GITHUB_TOKEN=          # GITHUB_TOKENS=a,b for a rotation pool
 
 ## Running
 
+Copy `example-run.yaml` — every other `*.yaml` here is gitignored, because a run config is scratch.
+
 ```yaml
 output_dir: /path/to/results
 ledger_file: /path/to/results/run.ledger.jsonl
@@ -130,8 +132,9 @@ imports a scale — but the absence of branches is a property nothing currently 
 
 ### Corpus quality
 
-- [ ] Difficulty and domain spread have no measure. Topic chains are algorithm-heavy, so a large
-      roll can be many tasks of one shape while every task is individually attested.
+- [ ] Domain spread has no measure. Topic chains are algorithm-heavy, so a large roll can be many
+      tasks of one shape while every task is individually attested. `max_per_repository` bounds how
+      much comes from one project; nothing bounds how much comes from one kind of code.
 - [ ] Verify checkpoint/resume under a multi-hour, high-concurrency soak.
 
 ### Done recently

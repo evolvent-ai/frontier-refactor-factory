@@ -1,0 +1,42 @@
+# The one batch config kept in the repository. Copy it, do not edit it in place -- every other
+# *.yaml here is gitignored, because a run config names one output directory and one language and
+# is scratch the moment the run ends.
+#
+#   .venv/bin/frf run --config my-run.yaml --dry-run
+#   .venv/bin/frf run --config my-run.yaml
+
+output_dir: /path/to/results
+ledger_file: /path/to/results/run.ledger.jsonl
+checkpoint_file: /path/to/results/run.checkpoint.json
+
+freeze_runs: 5              # 5 in production; the gate assumes it
+e2b_max_active: 8           # live sandboxes at once
+max_concurrent: 8           # candidate workers
+llm_max_concurrent: 4
+sandboxed: true             # local-process is development only
+
+jobs:
+  # One job per cell. Ask for the whole target in ONE job: `max_per_repository` counts per job, so
+  # five jobs of five reset it five times and may take the cap from the same repository each time.
+  - scale: module
+    form: inplace
+    source_language: python
+    budget: 25              # tasks to EMIT, not candidates to try
+    max_attempts: 250       # ceiling; exhausting it reports target_met: false
+    max_per_repository: 2   # ATTEMPTS per repository -- tighten only for high-yield cells
+
+  - scale: repo
+    form: inplace
+    source_language: go
+    budget: 25
+    max_attempts: 250
+    # Left at the default 4: at this scale's yield, four attempts contribute well under one task,
+    # and tightening it starves the batch instead of diversifying it.
+
+  # Cross-language needs both a form and a target. The requirement is enforced by shipping an image
+  # without the source toolchain, not by inspecting the submission.
+  # - scale: module
+  #   form: cross
+  #   source_language: python
+  #   target_language: javascript
+  #   budget: 10
