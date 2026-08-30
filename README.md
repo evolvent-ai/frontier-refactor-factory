@@ -122,6 +122,24 @@ imports a scale — but the absence of branches is a property nothing currently 
       a gem whose closure is pure stdlib.
 - [ ] `package/{typescript,rust,cpp}`: dispatchers exist and were never hit by usable material.
 
+### Delivery standard
+
+Audited against an external SWE/agent dataset delivery standard whose one hard rule is that a
+delivered task must build under `docker build --network=none`. Findings are from our own emitted
+tasks, not from reading the code.
+
+- [ ] **The emitted Dockerfile needs the network to build.** It runs `apt-get update`, `npm install
+      -g` and `curl https://sh.rustup.rs | sh`, so `--network=none` fails. `core/harbor.py` already
+      copies toolchains from a stage "to avoid outbound HTTP" — the same treatment has to reach the
+      apt and rustup steps, which means maintaining base images that carry them.
+- [ ] **Base images are pinned by tag, not digest.** `golang:1.23-bookworm`,
+      `python:3.12.8-slim-bookworm` and four others. A tag drifts, so a task that built last month
+      can fail with no change on our side.
+- [ ] **The candidate runs as root.** No emitted Dockerfile sets `USER`. Changing it is a runtime
+      behaviour change and needs a live task to validate, not just a line.
+- [x] Host paths no longer ship: `RepoSurvey.to_json()` was writing the sourcing machine's scratch
+      directory into `tests/environment.json`.
+
 ### Throughput
 
 - [ ] `sourcing.walk` restarts paging at 0 on every call. The shared batch memory makes it correct,

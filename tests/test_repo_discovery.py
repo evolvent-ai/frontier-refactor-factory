@@ -76,3 +76,30 @@ def test_a_taskfile_task_is_discovered():
             handle.write("version: '3'\ntasks:\n  run:\n    cmds:\n      - python main.py\n")
         _build, invoke = _taskfile_command(root) or (None, None)
         assert invoke is not None and "task" in invoke[0], invoke
+
+
+def test_a_survey_does_not_carry_the_host_path_into_a_task():
+    """`tests/environment.json` is shipped, and it was carrying an absolute host path.
+
+    `RepoSurvey.to_json()` included `root` -- `/…/work/scratch/frf-repo-h6gn63uu` on the machine
+    that did the sourcing. Two emitted repo tasks were found carrying it, which told a reader the
+    workspace layout, the directory naming and the account that produced the task.
+
+    Nothing downstream reads it: the emitted verifier resolves against the candidate root it is
+    handed. Delivery review treats a workspace absolute path in an outbound artefact as blocking on
+    its own, so this is asserted rather than left to a reviewer to notice.
+    """
+    import json
+
+    from frf.source.repo_survey import RepoSurvey
+
+    survey = RepoSurvey(root="/data/somebody/workdir/work/scratch/frf-repo-abcd1234",
+                        languages=("go",), build_markers=("go.mod",))
+    shipped = survey.to_json()
+
+    assert "root" not in shipped, shipped
+    blob = json.dumps(shipped)
+    assert "/data/somebody" not in blob and "frf-repo-abcd1234" not in blob, blob
+    # The parts the verifier actually needs survive.
+    assert shipped["languages"] == ["go"]
+    assert shipped["build_markers"] == ["go.mod"]

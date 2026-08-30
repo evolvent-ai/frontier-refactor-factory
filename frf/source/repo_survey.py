@@ -35,7 +35,21 @@ class RepoSurvey:
         return bool(self.input_files or self.benchmark_dirs or self.corpus_dirs or self.test_dirs)
 
     def to_json(self) -> dict:
-        return {"root": self.root, "languages": list(self.languages),
+        """The survey, as it travels into an emitted task.
+
+        `root` IS DELIBERATELY ABSENT. It is an absolute path on the machine that did the sourcing
+        -- `/…/work/scratch/frf-repo-h6gn63uu` -- and this dict is written verbatim into the
+        shipped `tests/environment.json`, where it told a reader the workspace layout, the
+        directory naming and the account of whoever produced the task.
+
+        Nothing downstream reads it: the emitted verifier resolves paths against the candidate root
+        it is handed, not against the machine the task was built on. So it was pure outbound
+        leakage of a host path, which delivery review treats as blocking on its own.
+
+        The other fields are relative paths and counts describing the repository itself, which is
+        what the verifier actually needs.
+        """
+        return {"languages": list(self.languages),
                 "build_markers": list(self.build_markers), "binaries": list(self.binaries),
                 "test_dirs": list(self.test_dirs), "corpus_dirs": list(self.corpus_dirs),
                 "benchmark_dirs": list(self.benchmark_dirs), "input_files": list(self.input_files),
