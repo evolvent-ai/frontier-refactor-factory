@@ -11,8 +11,6 @@ than aspirational -- there is nothing to extend when a new one arrives.
 """
 from __future__ import annotations
 
-import json
-import os
 import shutil
 import subprocess
 import time
@@ -379,14 +377,6 @@ class RemoteSubject:
                                 if reply and reply.ok else
                                 Observation(False, error=(reply.error if reply else
                                                           "no reply for request %d" % rid)))
-                if os.environ.get("FRF_REPLY_DUMP"):
-                    try:
-                        with open(os.environ["FRF_REPLY_DUMP"], "a", encoding="utf-8") as f:
-                            f.write(json.dumps({"rid": rid, "ok": results[rid].ok,
-                                                "value": results[rid].value,
-                                                "error": results[rid].error}) + "\n")
-                    except Exception:  # noqa: BLE001 - diagnostics must not fail the freeze
-                        pass
         return results
 
     def time(self, name: str, args: list, *, repeats: int = 1) -> float:
