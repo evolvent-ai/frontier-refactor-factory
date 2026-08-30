@@ -159,6 +159,17 @@ _GRAMMARS = {
         # instance method would need a constructor this factory cannot know how to call, and the
         # generated bridge would not compile.
         "require_static": True,
+        # AND REACHABLE FROM ANOTHER CLASS, which `static` alone does not make it. The bridge is
+        # generated as class `Subject` and calls `Owner.method(...)`; a `private static` method
+        # satisfies the check above and still refuses to compile -- `getLCA(int,int,int[],int[])
+        # has private access in LCA`. Two of TheAlgorithms/Java's candidates failed exactly that
+        # way in a real batch, charged to the material, and java has never emitted a task.
+        #
+        # This is Go's exported-name rule wearing Java's spelling: the miner must not offer a
+        # symbol the generated caller is not allowed to name. Package-private (no modifier at all)
+        # is refused for the same reason -- `Subject` carries the mined file's own package
+        # declaration only when it has one, so same-package access cannot be relied on.
+        "require_public": True,
         # Which class owns the method, so the bridge can name it.
         "owner_nodes": ("class_declaration",),
         "skip_dirs": {"target", "build", "test", ".git"},
@@ -384,9 +395,15 @@ def _reachable(function, spec: dict, source: bytes) -> bool:
             if parent.type in forbidden:
                 return False
             parent = parent.parent
-    if spec.get("require_static"):
+    if spec.get("require_static") or spec.get("require_public"):
         modifiers = next((child for child in function.children if child.type == "modifiers"), None)
-        if modifiers is None or "static" not in _text(source, modifiers).split():
+        words = _text(source, modifiers).split() if modifiers is not None else []
+        if spec.get("require_static") and "static" not in words:
+            return False
+        # `public` is required EXPLICITLY rather than inferred from the absence of `private`.
+        # Java's default is package-private, which is a third state that reads like public in the
+        # source and compiles like private from `Subject`.
+        if spec.get("require_public") and "public" not in words:
             return False
     return True
 

@@ -376,3 +376,29 @@ def test_both_sides_of_the_wall_are_laid_out_identically(tmp_path):
     reference, environment = out / "tests" / "reference", out / "environment"
     for name in ("subject.go", "bridge.go", "serve.go", "run.sh"):
         assert (reference / name).read_text() == (environment / name).read_text(), name
+
+
+def test_a_mined_cpp_program_does_not_bring_a_second_main():
+    """`serve.c` defines `main`; a mined .cpp from a runnable program defines another.
+
+    `multiple definition of 'main'; serve.o:serve.c: first defined here` refused a real candidate
+    (huihut/interview's CountSort.cpp), charged to the material. Go has renamed its own collision
+    since the first kernel batch and C++ never did, which is one reason cpp has never emitted a
+    task.
+
+    Renamed rather than deleted, for the reason Go's does it: cutting a span truncates the file
+    mid-expression, and an uncalled function is legal. Nothing calls a `main` in a served subject.
+    """
+    from frf.observe.call import bridge
+
+    out = bridge._reconcile_cpp(
+        "#include <iostream>\n"
+        "int main(int argc, char** argv) { return 0; }\n"
+        "int mainLoop(int x) { return x; }\n"
+        "int domain(int x) { return x; }\n")
+
+    assert "int frfUnusedMain(int argc, char** argv)" in out, out
+    assert "int main(" not in out, "the mined main must not survive beside the shim's"
+    # A name that merely CONTAINS main is a different function and must be left alone.
+    assert "int mainLoop(int x)" in out, out
+    assert "int domain(int x)" in out, out

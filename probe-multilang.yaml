@@ -1,0 +1,39 @@
+# Probe 5: multi-language breadth on the call seam.
+#
+# This session has proved python (module) and go (package, repo). The matrix census names cpp and
+# java as "registered but no output at all" -- they have a shim, a tree-sitter miner and a generated
+# bridge, and have never produced a graded task. javascript and rust have attested history but none
+# of it under this week's changes.
+#
+# One budget each, run as separate jobs so a language that fails does not consume another's
+# attempts and so the ledger keeps four separable denominators. kernel is the cheapest scale on the
+# call seam, which is what makes four languages affordable in one batch.
+output_dir: /data/evolvent/shijian-workdir/ffr-results/test
+ledger_file: /data/evolvent/shijian-workdir/ffr-results/test/probe-multilang.ledger.jsonl
+checkpoint_file: /data/evolvent/shijian-workdir/ffr-results/test/probe-multilang.checkpoint.json
+freeze_runs: 5
+max_concurrent: 4
+e2b_max_active: 8
+llm_max_concurrent: 4
+sandboxed: true
+jobs:
+  - scale: kernel
+    form: inplace
+    source_language: rust
+    budget: 1
+    max_attempts: 6
+  - scale: kernel
+    form: inplace
+    source_language: java
+    budget: 1
+    max_attempts: 6
+  - scale: module
+    form: inplace
+    source_language: javascript
+    budget: 1
+    max_attempts: 6
+  - scale: kernel
+    form: inplace
+    source_language: cpp
+    budget: 1
+    max_attempts: 6

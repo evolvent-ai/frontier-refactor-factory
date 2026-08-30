@@ -902,10 +902,37 @@ def _reconcile_cpp(text: str) -> str:
     needs anyway also gives a mined header the declarations its includer would have provided. Include
     guards make the repetition free, and prepending cannot change the meaning of code that already
     included them.
+
+    A SECOND `main`, exactly as Go has. `serve.c` defines one, and a mined `.cpp` from a repository
+    that ships a runnable program defines another: `multiple definition of 'main'; serve.o:serve.c:
+    first defined here`. Go has renamed its collision since the first kernel batch; C++ never did,
+    and it refused a real candidate (huihut/interview's CountSort.cpp) the same way. Renamed rather
+    than deleted, for Go's reason: cutting a span truncates a file mid-expression, and an uncalled
+    function is legal. Nothing calls a `main` here, so the function under test is unaffected.
     """
+    text = _rename_cpp_main(text)
     if _CPP_HOISTED in text:
         return text
     return "%s\n%s" % (_CPP_HOISTED, text)
+
+
+def _rename_cpp_main(text: str) -> str:
+    """`int main(` -> `int frfUnusedMain(`, so a mined program links beside the shim's own main.
+
+    Line-based and conservative, like `_reconcile_go`. The name must be followed by its parameter
+    list, so `mainLoop(` and `domain(` are untouched, and a leading return type is required so that
+    a call to `main(...)` -- which real code does not contain -- is not rewritten either.
+    """
+    out = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        for opener in ("int main(", "int main (", "void main(", "auto main("):
+            if stripped.startswith(opener):
+                head, _, rest = opener.partition("main")
+                line = line.replace(opener, head + "frfUnusedMain" + rest, 1)
+                break
+        out.append(line)
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 
 # Hoisted above a mined C++ file: the standard headers the bridge itself uses, and the `using` that a

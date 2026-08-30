@@ -253,3 +253,35 @@ def test_an_unregistered_language_is_not_silently_empty():
     assert native.scan(tempfile.mkdtemp(), language="cobol") == []
     for language in sorted(SOURCES):
         assert native.supported(language), "%s should be registered" % language
+
+
+def test_a_private_java_method_is_not_offered_to_the_bridge():
+    """`static` does not make a method reachable; the generated `Subject` must be allowed to name it.
+
+    The bridge is emitted as class `Subject` and calls `Owner.method(...)`. A `private static`
+    method passes the static check and then refuses to compile -- `getLCA(int,int,int[],int[]) has
+    private access in LCA` -- which is charged to the material and is really the miner offering a
+    symbol the caller cannot use. Two TheAlgorithms/Java candidates failed that way in one batch,
+    and java has never emitted a task.
+
+    Package-private (no modifier) is refused too: Java's default is a third state that reads like
+    public in the source and compiles like private from another package.
+    """
+    import os
+    import tempfile
+
+    from frf.source import native_functions as native
+
+    root = tempfile.mkdtemp()
+    with open(os.path.join(root, "Mixed.java"), "w", encoding="utf-8") as handle:
+        handle.write(
+            "public class Mixed {\n"
+            "    public static int Visible(int a, int b) { return a + b; }\n"
+            "    private static int Hidden(int a, int b) { return a - b; }\n"
+            "    static int PackagePrivate(int a, int b) { return a * b; }\n"
+            "}\n")
+
+    names = {fn.symbol for fn in native.scan(root, "mixed", "1.0", language="java")}
+    assert "Visible" in names, names
+    assert "Hidden" not in names, "a private method cannot be called from the generated Subject"
+    assert "PackagePrivate" not in names, "package-private is not reachable either"
