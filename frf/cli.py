@@ -210,7 +210,18 @@ def _run_command(args) -> int:
                               # asked for a different number of freeze passes silently got five.
                               freeze_runs=cfg.freeze_runs,
                               ledger_file=cfg.ledger_file,
-                              candidate_workers=max(1, cfg.max_concurrent // max(1, len(cfg.jobs))),
+                              # EVERY JOB MAY ASK FOR THE WHOLE POOL, because the pool is not what
+                              # bounds concurrency -- `configure_e2b_slots` does, with a semaphore
+                              # every candidate must hold. Dividing the workers between jobs instead
+                              # left slots idle whenever one scale was slower than another: a batch
+                              # where module finished first dropped from eight live sandboxes to
+                              # six, and the three scales still working could not use the rest.
+                              #
+                              # Oversubscribing the threads is safe for the same reason it is
+                              # useful: a worker that cannot get a slot waits on the semaphore
+                              # rather than opening a sandbox, so the live-sandbox ceiling is
+                              # exactly `e2b_max_active` however many jobs are queued behind it.
+                              candidate_workers=max(1, cfg.max_concurrent),
                               target_emitted=True, max_attempts=job.max_attempts,
                               max_per_repository=job.max_per_repository)
             return job, report, None

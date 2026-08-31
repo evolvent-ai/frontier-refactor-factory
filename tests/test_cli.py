@@ -80,3 +80,27 @@ def test_configured_run_targets_emitted_tasks_with_a_finite_attempt_limit(monkey
                      "--max-attempts", "7"]) == 0
     assert received[0]["target_emitted"] is True
     assert received[0]["max_attempts"] == 7
+
+
+def test_every_job_may_ask_for_the_whole_worker_pool():
+    """Dividing workers between jobs leaves E2B slots idle when one scale is slower.
+
+    Concurrency is bounded by `configure_e2b_slots` -- a semaphore every candidate must hold --
+    not by the thread pool. Splitting `max_concurrent` across jobs meant a batch whose module job
+    finished first dropped from eight live sandboxes to six, and the three scales still working
+    could not use the difference.
+
+    Oversubscribing is safe for the reason it helps: a worker that cannot get a slot waits on the
+    semaphore instead of opening a sandbox, so the ceiling stays exactly `e2b_max_active`.
+    """
+    import inspect
+
+    from frf import cli
+
+    source = inspect.getsource(cli._run_command) if hasattr(cli, "_run_command") else ""
+    if not source:
+        import re
+        source = re.search(r"def _run_command.*?(?=\ndef )", inspect.getsource(cli), re.S).group(0)
+    assert "candidate_workers=max(1, cfg.max_concurrent)" in source, (
+        "each job should be able to ask for the whole pool; the semaphore is the real bound")
+    assert "cfg.max_concurrent // max(1, len(cfg.jobs))" not in source
