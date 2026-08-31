@@ -325,9 +325,19 @@ class GitHubFunctions:
             # Kernel is module plus the array vocabulary. Filter before the per-repository
             # cap; slicing first silently discarded later numeric routines whenever a repository
             # sorted scalar helpers ahead of its array functions.
+            before = len(found)
             found = [function for function in found
                      if any(param.get("kind") in ("int_array", "float_array", "complex_array")
                             for param in function.schema.get("params", ()))]
+            # COUNTED, because this is kernel's largest filter and it was invisible. The
+            # `no-drawable-functions` tally above runs BEFORE this one, so a repository whose
+            # functions were all scalar was dropped here with no reason recorded at all -- and the
+            # rejection record is the only thing that says where a scale's supply goes. A live
+            # batch had kernel at zero attempts beside module's twenty, with nothing in the counts
+            # to say why.
+            if before and not found:
+                self.rejection_counts["no-array-functions"] = \
+                    self.rejection_counts.get("no-array-functions", 0) + 1
         found = found[:self._per_repository]
         return [_to_candidate(function, root=root, full_name=full_name,
                               commit=commit, scale=self._scale, language=language)

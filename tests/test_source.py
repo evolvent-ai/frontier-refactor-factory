@@ -531,3 +531,22 @@ def test_head_lookups_spend_the_whole_token_pool():
     source = inspect.getsource(GitHub._head_of)
     assert "self._pool.get_token()" in source, "head lookups must draw from the pool"
     assert "report_rate_limit" in source, "and report what the response said about the limit"
+
+
+def test_kernels_array_filter_is_counted_like_every_other_refusal():
+    """The rejection record is the only thing that says where a scale's supply goes.
+
+    `no-drawable-functions` is tallied before the kernel array filter, so a repository whose
+    functions were all scalar was dropped with no reason recorded at all. A live batch had kernel at
+    zero attempts beside module's twenty on the same index, and nothing in the counts said why.
+    """
+    import inspect
+
+    from frf.source.function_miner import GitHubFunctions
+
+    body = inspect.getsource(GitHubFunctions._widen)
+    array_at = body.index('param.get("kind") in ("int_array"')
+    counted_at = body.index('"no-array-functions"')
+    assert counted_at > array_at, "the count must record what the array filter removed"
+    assert "if before and not found:" in body, (
+        "only a repository emptied BY this filter is charged to it")
