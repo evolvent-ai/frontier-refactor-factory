@@ -285,7 +285,20 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         # Candidates lost to our own infrastructure rather than to the pipeline's gates.
         # Surfaced in the summary so a thin batch cannot be read as thin material.
         infrastructure_failures = 0
-        requested = min(attempt_limit, max(4, target * 3))
+        # ASK FOR WHAT A WAVE CAN ACTUALLY USE. This asked for three times the target and then filled
+        # a wave capped at the target, so two candidates in three were sourced and dropped -- and
+        # `walk` remembers every candidate it hands out, in a seen-set that persists, so those two
+        # were spent for ever without ever being attempted. The pond drained three times faster than
+        # the corpus grew and no restart could go back for them.
+        #
+        # It is also the latency: nothing enters the pipeline until the whole wave is materialised,
+        # so a job with a target of ten waited on thirty candidates' worth of search requests before
+        # its first sandbox started. Ten job threads sat on the search gate with the pipeline empty
+        # while ninety-six repositories had already been mined.
+        #
+        # The loop below still grows this when a wave comes back fully filtered, so asking for less
+        # costs nothing when the supply is thin -- it only stops paying for supply nobody wanted.
+        requested = min(attempt_limit, max(4, target))
         attempted = 0
         while (sum(r.summary.get("emitted", 0) for r in reports) < target
                and attempted < attempt_limit):

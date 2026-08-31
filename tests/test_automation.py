@@ -515,3 +515,35 @@ def test_a_job_that_attempted_nothing_is_not_trustworthy():
     merged = _merge_reports([], "github-functions", 45.0).summary
     assert merged["attempted"] == 0
     assert merged["trustworthy"] is False, "nothing was measured, so nothing is trusted"
+
+
+def test_a_wave_does_not_source_candidates_it_will_never_attempt(monkeypatch, tmp_path):
+    """`walk` remembers every candidate it hands out, and that memory persists.
+
+    Asking for three times the target and filling a wave capped at the target spent two candidates
+    in three for ever without attempting them: the pond drained three times faster than the corpus
+    grew, and no restart could go back for them. It is also the latency -- nothing enters the
+    pipeline until the whole wave is materialised, so a job with a target of ten waited on thirty
+    candidates' worth of gated search requests before its first sandbox started.
+    """
+    from frf import automation
+
+    asked: list = []
+
+    class _Scale:
+        name = "module"
+
+        def find(self, budget):
+            asked.append(budget)
+            return []
+
+    monkeypatch.setattr(automation, "_index", lambda *a, **k: object())
+    monkeypatch.setattr(automation, "_scale", lambda *a, **k: _Scale())
+
+    # `max_attempts` explicit: the default is `target * 10`, which is large enough that
+    # `min(attempt_limit, target * 3)` would not clip and the difference would be hidden.
+    automation.run("module", budget=10, index="test-index", output_dir=str(tmp_path),
+                   max_attempts=200, target_emitted=True)
+
+    assert asked, "the job never asked its source for anything"
+    assert asked[0] <= 10, "asked for %d candidates to fill a wave of 10" % asked[0]
