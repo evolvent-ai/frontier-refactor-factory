@@ -470,3 +470,35 @@ def test_a_call_seam_walk_asks_only_for_languages_it_can_read():
     # repo stays open: it needs no miner.
     repo = _index("github", subset="", scale="repo")._links[0]._query_for(None)
     assert "language:" not in repo
+
+
+def test_the_repository_cap_survives_a_scale_being_split_into_language_jobs():
+    """Two rules pulled against each other, and the advice that resolved them was unkeepable.
+
+    `max_per_repository` counted per job, so splitting a scale reset it and one repository could be
+    taken to the cap again in every job. But an unfiltered walk ranks by stars and the top of that
+    ranking is python-heavy -- a package job left open produced fourteen tasks and every one was
+    python -- so a multi-language corpus needs the split.
+
+    "Split only when you must" asked a person to hold both facts at once, which is how the next
+    batch loses one. The counter is shared instead, so the cap means what it says however the batch
+    is arranged.
+    """
+    from frf.core.diversity import reset_shared, shared_policy
+
+    reset_shared()
+    go_job = shared_policy("package", max_per_repository=2)
+    js_job = shared_policy("package", max_per_repository=2)
+    assert go_job is js_job, "jobs for one scale must share a counter"
+
+    # Four language jobs of five now bound concentration exactly as one job of twenty would.
+    taken = [go_job.accept("github:o/r@c#a"), js_job.accept("github:o/r@c#b"),
+             go_job.accept("github:o/r@c#d"), js_job.accept("github:o/r@c#e")]
+    assert taken == [True, True, False, False], taken
+
+    # A different scale keeps its own budget: the same repository serving a module task and a repo
+    # task is two subjects observed through different seams.
+    assert shared_policy("repo", max_per_repository=4).accept("github:o/r@c#f")
+
+    reset_shared()
+    assert shared_policy("package", max_per_repository=2) is not go_job

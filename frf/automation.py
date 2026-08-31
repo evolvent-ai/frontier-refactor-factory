@@ -25,7 +25,7 @@ from .observe import checkout_task
 from .core import scratch
 from .core.contract import CheckoutContract
 from .core.ledger import BatchLedger, LedgerRecord
-from .core.diversity import DiversityPolicy
+from .core.diversity import DiversityPolicy, shared_policy
 from .core.capabilities import capability
 from .core.harbor import Package as HarborPackage
 from .core import pipeline
@@ -265,7 +265,11 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         # and wants a tight cap; a 14%-yield scale spreads far wider than the number
         # suggests, because the cap counts ATTEMPTS, and tightening it there only
         # starves the batch.
-        diversity = DiversityPolicy(max_per_repository=max_per_repository)
+        #
+        # SHARED ACROSS THE JOBS OF ONE SCALE. Splitting a scale by language is how a corpus stops
+        # being 100% python, and a per-job counter silently undid the cap every time it was split.
+        # See `core/diversity.shared_policy`.
+        diversity = shared_policy(name, max_per_repository=max_per_repository)
         started = time.perf_counter()
         reports = []
         seen = set()

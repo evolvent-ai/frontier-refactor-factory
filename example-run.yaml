@@ -16,18 +16,16 @@ llm_max_concurrent: 4
 sandboxed: true             # local-process is development only
 
 jobs:
-  # TWO RULES THAT PULL AGAINST EACH OTHER, and a real batch needed both.
+  # SPLIT A SCALE BY LANGUAGE WHEN ITS CORPUS MUST BE MULTI-LANGUAGE. An unfiltered walk ranks by
+  # stars and the top of that ranking is python-heavy: a package job left open produced fourteen
+  # tasks and every one was python, while its dispatcher supports eight languages.
   #
-  # `max_per_repository` counts PER JOB, so splitting a target across jobs resets it and the cap can
-  # be taken from one repository several times. That argues for one job per scale.
+  # `max_per_repository` is shared across the jobs of one scale, so splitting no longer weakens it
+  # -- four language jobs of five bound concentration exactly as one job of twenty would.
   #
-  # But an unfiltered walk ranks by stars, and the top of that ranking is python-heavy: a package
-  # job left open produced fourteen tasks and every one was python, while its dispatcher supports
-  # eight languages. That argues for one job per LANGUAGE.
-  #
-  # So: split by language when a scale's corpus must be multi-language, and keep the per-repository
-  # cap tight in each. Do not split a scale for any other reason -- more jobs than E2B slots starves
-  # the slow ones, which is how a package job went thirty-two minutes without a single attempt.
+  # The real limit on splitting is slots: more jobs than `e2b_max_active` starves the slow ones, and
+  # a repo job sharing a pool with faster scales went two stretches of over thirty minutes without a
+  # single attempt. Give a slow scale its own config and its own slots instead.
   - scale: module
     form: inplace
     source_language: python
