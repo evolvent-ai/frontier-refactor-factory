@@ -231,6 +231,20 @@ class GitHubFunctions:
                 self._source_exhausted = True
                 break
             for repository in repositories:
+                # A REPOSITORY ALREADY DRAWN FROM IS NOT WORTH MINING AGAIN, and skipping it here is
+                # the only place the saving exists: `_widen` clones the repository and parses every
+                # file in it, while `sourcing.walk` dedups only on what comes back. With a persisted
+                # seen-set that inverts the cost -- a restarted roll spent its whole time
+                # re-downloading and re-parsing repositories it had already produced from, and made
+                # one attempt in nine minutes.
+                #
+                # Function identities extend their repository's, so a prefix answers "have we been
+                # here". `max_per_repository` already caps how many tasks one repository may
+                # contribute, so returning to one is waste even when it still holds functions.
+                if _already_drawn_from(repository.identity, getattr(self, "already_seen", None)):
+                    self.rejection_counts["already-mined"] = \
+                        self.rejection_counts.get("already-mined", 0) + 1
+                    continue
                 self.repositories_walked += 1
                 started = time.monotonic()
                 self._log("%s: widening repository %s" % (self.name, repository.identity))
@@ -385,3 +399,17 @@ def _to_candidate(function, *, root: str, full_name: str, commit: str,
             "package": full_name.rsplit("/", 1)[-1], "version": commit[:12],
             "module": function.module,
         })
+
+
+def _already_drawn_from(identity: str, spent) -> bool:
+    """Whether anything already walked came out of this repository. -> True to skip mining it.
+
+    A function identity is its repository's plus a `#path.symbol` suffix, so the repository is a
+    prefix of everything mined from it.
+    """
+    if not spent:
+        return False
+    if identity in spent:
+        return True
+    prefix = identity + "#"
+    return any(seen.startswith(prefix) for seen in spent)

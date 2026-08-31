@@ -336,7 +336,7 @@ def test_a_widening_index_is_told_what_is_already_spent():
     """
     from frf.core import sourcing
     from frf.core.scale import Candidate
-    from frf.source.functions import _already_drawn_from
+    from frf.source.function_miner import _already_drawn_from
 
     class Widening:
         name = "widening"
@@ -400,3 +400,26 @@ def test_walk_resumes_paging_instead_of_restarting_it():
 
     # A fresh index with no cursor still starts at the beginning.
     assert [c.identity for c in sourcing.walk(Index(), 2)] == ["c0", "c1"]
+
+
+def test_the_shipped_widening_index_skips_repositories_it_has_mined():
+    """The hook has to be on the index that is REGISTERED, which is `function_miner`.
+
+    An earlier attempt put it on `source/functions.py`, which defines a class of the same name that
+    nothing registers -- so the batch kept re-mining and a stack dump was what finally said where
+    the time was going. Asserted against the registry rather than against an import, because the
+    two files are easy to confuse and the wrong one passes every other test.
+    """
+    from frf import source
+    from frf.source.function_miner import GitHubFunctions, _already_drawn_from
+
+    assert source.index_for("github-functions") is GitHubFunctions
+
+    spent = {"github:a/b@c1#src/x.go.Sort"}
+    assert _already_drawn_from("github:a/b@c1", spent)
+    assert not _already_drawn_from("github:other/repo@c9", spent)
+    assert not _already_drawn_from("github:a/b@c1", None)
+
+    import inspect
+    body = inspect.getsource(GitHubFunctions.page)
+    assert "_already_drawn_from" in body, "the skip must run before _widen, not after"
