@@ -61,6 +61,14 @@ def canonical(language: str) -> str:
 CLONE_TIMEOUT = 300.0
 WIDEN_TIMEOUT = 360.0
 
+# How many repository rows one search request buys, and how many of them are mined before the
+# expanded list is re-checked. Two numbers because they are two costs: a row is a slice of one
+# gated request, and widening a repository is a clone and a full tree-sitter parse. Tying them
+# together made a search request buy four rows, which is what parked twelve job threads on the
+# search gate while four sandboxes ran.
+SEARCH_PAGE = 50
+WIDEN_AT_ONCE = 4
+
 # How many functions one repository may contribute. The same reasoning as `functions.PER_PACKAGE`:
 # a repository with four hundred serviceable functions would otherwise fill a whole batch by
 # itself, and a batch drawn from one repository measures that repository rather than the supply.
@@ -223,6 +231,7 @@ class GitHubFunctions:
         # `sourcing.walk()`, which stops on an empty page.
         self._expanded: list[Candidate] = []
         self._source_page = 0
+        self._rows: list = []
         self._source_exhausted = False
         self.rejection_counts: dict[str, int] = {}
         self.repositories_walked = 0
@@ -241,12 +250,23 @@ class GitHubFunctions:
         """
         needed = (number + 1) * size
         while len(self._expanded) < needed and not self._source_exhausted:
-            repositories = list(self._index.page(
-                self._source_page, size=max(1, min(4, needed - len(self._expanded)))))
-            self._source_page += 1
-            if not repositories:
-                self._source_exhausted = True
-                break
+            # SEARCH IN BIG PAGES, WIDEN IN SMALL ONES. These are different costs and were tied to
+            # one number: the page was sized to the candidates still wanted, capped at four, so a
+            # search request bought four repository rows. Rows are cheap -- one request either way --
+            # and widening is what is expensive, so the cap belongs on the widening and not here.
+            #
+            # It became the batch's whole throughput once search requests were serialised: twelve
+            # jobs, each needing a request per four repositories, and most of those repositories
+            # skipped as already mined. Every job thread was parked on the search gate while four
+            # sandboxes ran. Buffered rows are the fix -- widen from what one request already
+            # bought, and go back to the API only when the buffer is dry.
+            if not self._rows:
+                self._rows = list(self._index.page(self._source_page, size=SEARCH_PAGE))
+                self._source_page += 1
+                if not self._rows:
+                    self._source_exhausted = True
+                    break
+            repositories, self._rows = self._rows[:WIDEN_AT_ONCE], self._rows[WIDEN_AT_ONCE:]
             for repository in repositories:
                 # A REPOSITORY ALREADY DRAWN FROM IS NOT WORTH MINING AGAIN, and skipping it here is
                 # the only place the saving exists: `_widen` clones the repository and parses every

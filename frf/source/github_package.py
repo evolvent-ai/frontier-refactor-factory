@@ -24,6 +24,11 @@ MAX_SOURCE_FILE_BYTES = 2_000_000
 _SKIP = {"tests", "test", "testing", "docs", "examples", "benchmarks", "bench", "conftest.py", "solutions", "spider", "ci", "dev_tools", "tools"}
 
 
+# One search request buys many rows; inspecting a row is a clone. See `function_miner`.
+SEARCH_PAGE = 50
+INSPECT_AT_ONCE = 4
+
+
 class GitHubPackages:
     name = "github-packages"
 
@@ -43,6 +48,7 @@ class GitHubPackages:
         self._index = index
         self._workspace = workspace or os.path.join("work", "package-checkouts")
         self._expanded = []
+        self._rows: list = []
         self._source_page = 0
         self._exhausted = False
         self.rejection_counts: dict[str, int] = {}
@@ -53,12 +59,16 @@ class GitHubPackages:
     def page(self, number: int, *, size: int = 20):
         needed = (number + 1) * size
         while len(self._expanded) < needed and not self._exhausted:
-            rows = list(self._index.page(
-                self._source_page, size=max(1, min(4, needed - len(self._expanded)))))
-            self._source_page += 1
-            if not rows:
-                self._exhausted = True
-                break
+            # Big search pages, small inspection batches -- see `function_miner`, which carries the
+            # account. A request that bought four rows was the batch's throughput once search was
+            # serialised against GitHub's secondary rate limit.
+            if not self._rows:
+                self._rows = list(self._index.page(self._source_page, size=SEARCH_PAGE))
+                self._source_page += 1
+                if not self._rows:
+                    self._exhausted = True
+                    break
+            rows, self._rows = self._rows[:INSPECT_AT_ONCE], self._rows[INSPECT_AT_ONCE:]
             for row in rows:
                 candidate = self._inspect(row)
                 if candidate is not None:

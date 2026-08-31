@@ -586,3 +586,37 @@ def test_search_requests_are_serialised_across_the_process():
         "serial, not merely bounded: a semaphore of one is a lock spelled less clearly"
     assert github_module.SEARCH_INTERVAL * 30 > 60, \
         "spacing must keep the documented 30-a-minute quota, with headroom"
+
+
+def test_a_widening_index_buys_many_rows_per_search_request():
+    """Rows and clones are different costs and were sized by one number.
+
+    The search page was sized to the candidates still wanted, capped at four, so one request bought
+    four repository rows -- and once search requests were serialised against GitHub's secondary rate
+    limit, that became the batch's throughput: every job thread parked on the search gate while four
+    sandboxes ran. Rows are cheap; widening is not. The cap belongs on the widening.
+    """
+    from frf.source import function_miner
+    from frf.core.scale import Candidate
+
+    asked: list = []
+
+    class _Rows:
+        name = "inner"
+
+        def page(self, number, *, size):
+            asked.append(size)
+            return [Candidate("github:o/r%d@c" % (number * size + i), "module", "python", "inner")
+                    for i in range(size)]
+
+        def total(self):
+            return 1000
+
+    miner = function_miner.GitHubFunctions(_Rows(), scale="module")
+    miner._widen = lambda repository: [repository]     # mining is not what is under test
+
+    miner.page(0, size=8)
+
+    assert asked, "no search request was made at all"
+    assert asked[0] >= 25, \
+        "one search request bought %d rows; rows are cheap and the gate is not" % asked[0]
