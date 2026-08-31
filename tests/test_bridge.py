@@ -402,3 +402,30 @@ def test_a_mined_cpp_program_does_not_bring_a_second_main():
     # A name that merely CONTAINS main is a different function and must be left alone.
     assert "int mainLoop(int x)" in out, out
     assert "int domain(int x)" in out, out
+
+
+def test_a_borrowed_string_is_coerced_not_cast():
+    """`&str` is the ordinary way Rust takes a string, and `as` cannot produce one.
+
+    The converter yields `String`, so a spelling-based cast wrote `arg0 as str` -- E0620, cast to
+    unsized type, because `str` is unsized and reached by deref coercion rather than by conversion.
+    Eighteen of sixty-three rust module refusals were this, reported as `reference-will-not-build`:
+    the material was fine and the bridge was not. The `&` on the call site is the whole fix.
+    """
+    source = bridge.source("rust", symbol="normalise",
+                           params=[{"kind": "string", "name": "text", "native": "&str"}],
+                           result={"kind": "string", "native": "String"})
+    assert "as str" not in source, "`as` is only defined between primitive scalars"
+    assert "normalise(&arg0)" in source, "&String coerces to &str; that is what the call needs"
+
+
+def test_a_numeric_spelling_is_still_cast():
+    """The rule that broke `&str` is right for what it was written for, and stays.
+
+    `usize` is the common spelling in real material -- an index or a length -- and the converter
+    yields `i64`, which Rust will not coerce. This is the case the cast exists to serve.
+    """
+    source = bridge.source("rust", symbol="at",
+                           params=[{"kind": "int", "name": "index", "native": "usize"}],
+                           result={"kind": "int", "native": "i64"})
+    assert "as usize" in source

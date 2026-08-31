@@ -289,6 +289,11 @@ fn frf_f64s(value: &crate::Json) -> Result<Vec<f64>, String> {
 _RUST_OWNED = {"int": "i64", "float": "f64", "bool": "bool", "string": "String",
                "int_array": "Vec<i64>", "float_array": "Vec<f64>", "bytes": "Vec<u8>"}
 
+# Which of those may be re-spelled with `as`. Only the numerics: `i32`, `usize` and `f32` are the
+# spellings real material uses, and a scalar cast is exactly what they need. Everything else reaches
+# its parameter type by coercion or not at all -- writing `as` for those emits code that cannot build.
+_RUST_CASTABLE = frozenset(("int", "float"))
+
 # How a returned value becomes JSON. `{}` -- a void function -- is handled separately, through what it
 # mutated, exactly as in Go.
 _RUST_ENCODE = {
@@ -343,7 +348,12 @@ def _rust(symbol: str, params: list, result: dict, package: str, owner: str = ""
             body.append("    let %s%s: Vec<%s> = %s.into_iter().map(|item| item as %s).collect();"
                         % (mutable + " " if mutable else "", name, target_element, name,
                            target_element))
-        elif not kind.endswith("_array") and native.lstrip("&").strip() != owned:
+        # `as` IS ONLY DEFINED BETWEEN PRIMITIVE SCALARS. A `&str` parameter is `string`, whose
+        # converter yields `String`, and `"str" != "String"` used to write `arg0 as str` -- E0620,
+        # cast to unsized type. It was 18 of 63 rust module refusals, all of them our own bug rather
+        # than the material's. The reference below is the whole answer for those: `&String` coerces.
+        elif (kind in _RUST_CASTABLE and not kind.endswith("_array")
+                and native.lstrip("&").strip() != owned):
             body.append("    let %s = %s as %s;" % (name, name, native.lstrip("&").strip()))
         # A borrowed parameter takes a reference to what was just built. `&String` coerces to `&str`
         # and `&Vec<T>` to `&[T]`, so one rule covers both spellings.
