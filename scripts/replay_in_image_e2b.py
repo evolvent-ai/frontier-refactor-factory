@@ -56,6 +56,19 @@ TRANSFER_TIMEOUT = 600
 _SKIP = {".git", "__pycache__", ".pytest_cache", "node_modules", "target", ".venv"}
 
 
+# How many times a build is retried when what failed was the wire.
+BUILD_ATTEMPTS = 3
+
+# What a transient build failure looks like. Named rather than "any failure retried", so a Dockerfile
+# that is genuinely wrong still fails on the first try and says so.
+_TRANSPORT = (
+    "tls: bad record MAC", "TLS handshake timeout", "connection reset by peer",
+    "Temporary failure resolving", "Could not connect to", "Connection timed out",
+    "i/o timeout", "unexpected EOF", "500 Internal Server Error", "503 Service Unavailable",
+    "net/http: TLS handshake", "failed to copy: httpReadSeeker",
+)
+
+
 def _tar_bytes(root: str) -> bytes:
     """The task directory as a tar stream, deterministically ordered."""
     buffer = io.BytesIO()
@@ -110,12 +123,27 @@ def replay_one(task_dir: str, api_key: str, template: str) -> dict:
         # only our label for it was not, and it read in the report as a task that would not build.
         tag = "frf-replay-%s" % re.sub(r"[^a-z0-9_.-]", "-",
                                        name.lower())[:40].strip("-._") or "frf-replay-task"
+        # THE WIRE IS NOT THE MATERIAL, HERE TOO. A build inside DinD reaches the network for a base
+        # image, for apt and for npm, and those fail transiently: `tls: bad record MAC`, a Debian
+        # mirror timing out, a registry 503. Counted as failures they say a task is unbuildable when
+        # the task is fine, and a whole corpus then reads as broken -- which is exactly what a first
+        # run of this tool reported. A retry costs a minute and is the difference between measuring
+        # the tasks and measuring the network.
         record["stage"] = "build"
-        built = sandbox.commands.run(
-            "docker build --pull -t %s %s/environment" % (tag, remote),
-            timeout=BUILD_TIMEOUT, request_timeout=BUILD_TIMEOUT + 120)
-        if built.exit_code != 0:
-            record["detail"] = ((built.stdout or "") + (built.stderr or ""))[-700:]
+        built = None
+        for attempt in range(BUILD_ATTEMPTS):
+            built = sandbox.commands.run(
+                "docker build --pull -t %s %s/environment" % (tag, remote),
+                timeout=BUILD_TIMEOUT, request_timeout=BUILD_TIMEOUT + 120)
+            if built.exit_code == 0:
+                break
+            output = ((built.stdout or "") + (built.stderr or ""))
+            if attempt < BUILD_ATTEMPTS - 1 and any(mark in output for mark in _TRANSPORT):
+                time.sleep(5.0 * (attempt + 1))
+                continue
+            break
+        if built is None or built.exit_code != 0:
+            record["detail"] = ((built.stdout or "") + (built.stderr or ""))[-700:] if built else ""
             return record
 
         # THE VERIFIER, INSIDE THE IMAGE, against the reference the task ships -- driven exactly as
