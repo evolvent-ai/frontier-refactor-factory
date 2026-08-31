@@ -467,3 +467,28 @@ def test_a_package_corpus_is_judged_and_frozen_on_distinct_probes():
     # Too few distinct probes is still refused, and says how many were offered.
     with pytest.raises(ValueError, match="distinct probes"):
         _audit_probe_contract([["alpha", 1]] * 200, dispatch)
+
+
+def test_the_probe_generator_is_asked_for_a_per_operation_quota():
+    """A global target is the wrong thing to ask a generator for.
+
+    "At least 60 distinct probes" makes the model track a running total across a surface it is
+    still enumerating, and it does not: 22 of 24 package probe refusals were corpora that
+    deduplicated below the floor. A per-operation quota is arithmetic it can follow while writing
+    each case, and reaches the same total by construction.
+
+    The floor itself is not a magic number and is not relaxed here: MIN_GRADED_POINTS is 40, freeze
+    holds three probes out for timing and discards whatever the reference will not repeat, so 60
+    distinct is 40 plus the margin that loss takes.
+    """
+    from frf.core.pipeline import MIN_GRADED_POINTS
+    from frf.scales.package import _per_operation_quota
+
+    for operations in (1, 4, 8, 20, 40):
+        quota = _per_operation_quota([{}] * operations)
+        assert quota * operations >= 60, (operations, quota)
+        assert quota >= 3, "two is bare coverage and leaves nothing for freeze to discard"
+
+    # A narrow surface carries the whole floor on few operations; a wide one spreads it.
+    assert _per_operation_quota([{}] * 4) > _per_operation_quota([{}] * 40)
+    assert 60 > MIN_GRADED_POINTS, "the floor must leave margin for what freeze discards"

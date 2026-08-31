@@ -413,7 +413,22 @@ class Package:
                 "(never a list of byte values); int_array/float_array -> a JSON array of numbers. "
                 "Match the arity too: pass exactly len(params) arguments after the operation name. "
                 "Example output shape: {'probes': [['op', 'x']], 'labels': ['valid']}. "
-                "Return at least 60 distinct probes even when n is smaller. "
+                # A GLOBAL TARGET IS THE WRONG THING TO ASK A GENERATOR FOR. "At least 60 distinct
+                # probes" makes the model track a running total across a surface it is still
+                # enumerating, and it does not: 22 of 24 package probe refusals were corpora that
+                # deduplicated below the floor. A per-operation quota is arithmetic it can follow
+                # while writing each case, and it reaches the same total by construction.
+                #
+                # The floor itself is not negotiable and is not a magic number: `MIN_GRADED_POINTS`
+                # is 40, freeze holds three probes out for timing and discards whatever the
+                # reference will not repeat, so 60 distinct is 40 plus the margin that loss takes.
+                + ("Produce at least %d DISTINCT probes for EACH operation -- different arguments, "
+                   "not the same call repeated. With %d operations that is %d distinct probes in "
+                   "total, which is the minimum this corpus is accepted at. Two probes that differ "
+                   "only in whitespace or key order count as one. " % (_per_operation_quota(dispatch),
+                                                                      max(1, len(dispatch)),
+                                                                      _per_operation_quota(dispatch)
+                                                                      * max(1, len(dispatch)))) +
                 "Every argument must be JSON-serializable (null, boolean, number, string, list, "
                 "or object with string keys); never return sets, tuples, bytes, objects, or callables. "
                 "Include valid, invalid and boundary cases for every operation. "
@@ -488,6 +503,18 @@ def _distinct(probes: list) -> list:
         seen.add(key)
         kept.append(args)
     return kept
+
+
+
+# How many distinct probes each operation must carry for the corpus to clear its floor.
+#
+# `_audit_probe_contract` wants 60 distinct overall and at least two per operation. Asked as a
+# global number the generator does not hit it; asked per operation it is arithmetic it can follow
+# while writing each case. Three is the floor per operation even on a wide surface, because two is
+# the bare coverage minimum and leaves nothing for freeze to discard.
+def _per_operation_quota(dispatch) -> int:
+    operations = max(1, len(dispatch))
+    return max(3, -(-60 // operations))
 
 
 def _audit_probe_contract(probes: list, dispatch: tuple, *, labels=None) -> None:
