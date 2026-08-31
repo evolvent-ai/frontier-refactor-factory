@@ -83,7 +83,8 @@ class GitHub:
     def __init__(self, http: Http | None = None, *, language: str = "",
                  query: str = "", scale: str = "repo", sort: str = DEFAULT_SORT,
                  segments: tuple = SEGMENTS, pin: bool = True,
-                 token_pool: TokenPool | None = None) -> None:
+                 token_pool: TokenPool | None = None,
+                 languages: tuple = ()) -> None:
         # Token pool for round-robin rotation and rate-limit awareness. Constructed here so that
         # each GitHub instance manages its own pool, but callers can share one by passing it in.
         self._pool = token_pool if token_pool is not None else TokenPool(
@@ -93,6 +94,9 @@ class GitHub:
         # never a failed one -- so it is applied if present and never required.
         self._http = http or Http(token=token)
         self._language = language
+        # The languages an open-world walk will accept when none was requested. Empty means every
+        # language, which is right for the repo scale: the process seam needs no reader.
+        self._languages = tuple(languages)
         self._query = query
         self._scale = scale
         self._sort = sort
@@ -282,6 +286,17 @@ class GitHub:
         parts = [self._query] if self._query else []
         if self._language:
             parts.append("language:%s" % self._language)
+        elif self._languages:
+            # SEVERAL `language:` QUALIFIERS ARE AN OR, which is a hazard when narrowing to one
+            # language and exactly what is wanted when the caller named none. An open-world walk
+            # otherwise spends its quota on languages nothing here can read: one live page returned
+            # 112 candidates across swift, php, csharp, erlang, zig, kotlin, dart, clojure and
+            # Jupyter notebooks, every one of them refused as `call-adapter-not-registered`.
+            #
+            # This is not a silent narrowing to Python -- the set comes from the miners that exist,
+            # so `capabilities.py` remains the record of what is excluded and why. A language gains
+            # a reader and joins the walk with no change here.
+            parts.extend("language:%s" % name for name in self._languages)
         if segment is not None:
             low, high = segment
             parts.append("stars:>=%d" % low if high is None else "stars:%d..%d" % (low, high))

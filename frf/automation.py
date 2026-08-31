@@ -130,8 +130,19 @@ FUNCTION_TOPICS = ("algorithms", "data-structures", "string", "math", "matrix",
                    "graph", "text-processing", "datetime", "geometry")
 
 
+# The languages a call-seam walk will accept when the caller named none: exactly those with a
+# reader. Derived rather than listed, so a language that gains a miner joins the walk and one that
+# loses it leaves, with nothing here to update. The repo scale passes none of this -- the process
+# seam runs whole programs and needs no reader at all.
+def _mineable_languages() -> tuple:
+    from .source.function_miner import _scanner
+
+    return tuple(name for name in ("python", "javascript", "typescript", "go", "rust", "java",
+                                   "cpp", "ruby") if _scanner(name))
+
+
 def _chain_of_topics(cls, topics: tuple, language: str, *, scale: str = "repo",
-                     quota: int = 0):
+                     quota: int = 0, languages: tuple = ()):
     """One index per topic, walked end to end -- or round-robin, for a diverse corpus.
 
     `quota=0` (the default, used by the repo scale) keeps the depth-first `Chain`: the links are
@@ -147,7 +158,7 @@ def _chain_of_topics(cls, topics: tuple, language: str, *, scale: str = "repo",
     """
     from .source.chain import Chain, QuotaChain
 
-    links = [cls(language=language, query="topic:%s" % topic, scale=scale)
+    links = [cls(language=language, query="topic:%s" % topic, scale=scale, languages=languages)
              for topic in topics]
     name = "github(%s)" % "|".join(topics)
     return Chain(links, name=name) if quota <= 0 else QuotaChain(links, quota=quota, name=name)
@@ -510,7 +521,8 @@ def _index(name: str, *, subset: str, scale: str = ""):
         # as OR, so `--source rust` returned 84 Rust repositories plus all 524 Python ones. That is
         # a reason not to add a second qualifier, not a reason to invent one when the caller asked
         # for none -- `_query_for` omits the qualifier entirely when the language is empty.
-        github = _chain_of_topics(source.GitHub, FUNCTION_TOPICS, language, scale="module", quota=2)
+        github = _chain_of_topics(source.GitHub, FUNCTION_TOPICS, language, scale="module",
+                                  quota=2, languages=_mineable_languages())
         return cls(github, scale=scale, log=lambda message: print("[source] " + message, flush=True))
 
     if name == "github-packages":
@@ -518,7 +530,9 @@ def _index(name: str, *, subset: str, scale: str = ""):
             # One language, several topics chained: a package corpus is the same kind of
             # concentration problem a repo corpus is, and `topic:algorithms` alone would draw
             # every night from the same puzzle-library family.
-            return cls(_chain_of_topics(source.GitHub, FUNCTION_TOPICS, language, scale="package", quota=2))
+            return cls(_chain_of_topics(source.GitHub, FUNCTION_TOPICS, language,
+                                        scale="package", quota=2,
+                                        languages=_mineable_languages()))
         # Open-world default: enumerate multiple language sources instead of silently restricting
         # package discovery to Python. Unsupported adapters remain explicit source rejections.
         package_languages = ("python", "javascript", "typescript", "rust", "go", "ruby", "java")

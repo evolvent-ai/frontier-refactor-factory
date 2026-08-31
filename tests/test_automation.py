@@ -174,9 +174,17 @@ def test_a_requested_language_is_never_widened_back_to_python():
     # The property above is what actually guards the open-world design: a REQUESTED language must
     # not be joined by a second qualifier. Inventing one when none was asked for is a different act
     # and defends nothing.
-    assert "language:" not in query_of("kernel", "")
-    # Module asks for no language of its own, so an unconstrained walk stays open-world.
-    assert "language:" not in query_of("module", "")
+    # NAMING NONE MEANS NAMING THE ONES WITH A READER, which this line has now said three ways.
+    # It first asserted a python default, on grounds that stopped being true. It then asserted no
+    # qualifier at all, which spent the walk's quota on swift, php and csharp -- 112 candidates on
+    # one page, every one refused for having no miner. It now asserts the set derived from the
+    # readers that exist, which is neither a fallback nor an open-world claim we cannot honour.
+    for scale in ("kernel", "module"):
+        query = query_of(scale, "")
+        assert "language:python" in query and "language:go" in query, scale
+        assert "language:swift" not in query, scale
+    # The invariant this test exists for is unchanged: a REQUESTED language is never joined by a
+    # second qualifier, because repeats are an OR and would widen what the caller narrowed.
 
 
 def test_function_scale_sourcing_chains_topics_rather_than_one_algorithms_search():
@@ -190,8 +198,11 @@ def test_function_scale_sourcing_chains_topics_rather_than_one_algorithms_search
     """
     from frf.automation import FUNCTION_TOPICS, _chain_of_topics
     class _Index:
-        def __init__(self, *, language="", query="", scale=""):
+        def __init__(self, *, language="", query="", scale="", languages=()):
+            # `languages` mirrors GitHub's: the readers an open-world walk will accept when the
+            # caller named none. A double that omits it stops standing in for the real thing.
             self.language, self.query, self.scale = language, query, scale
+            self.languages = languages
         def name(self):
             return self.query
     assert len(FUNCTION_TOPICS) >= 8, "a single-topic supply is the concentration this exists to avoid"
@@ -212,8 +223,11 @@ def test_every_scale_walks_more_than_one_topic_by_default():
     """
     from frf.automation import _chain_of_topics, FUNCTION_TOPICS, TRANSFORMER_TOPICS
     class _Index:
-        def __init__(self, *, language="", query="", scale=""):
+        def __init__(self, *, language="", query="", scale="", languages=()):
+            # `languages` mirrors GitHub's: the readers an open-world walk will accept when the
+            # caller named none. A double that omits it stops standing in for the real thing.
             self.language, self.query, self.scale = language, query, scale
+            self.languages = languages
         def name(self):
             return self.query
     repo = _chain_of_topics(_Index, TRANSFORMER_TOPICS, "go", scale="repo")
@@ -418,3 +432,41 @@ def test_one_candidate_failing_outside_the_pipeline_does_not_end_the_roll():
     assert "reports.append(future.result())" in source
     assert "reports.extend(future.result() for future in as_completed(futures))" not in source, (
         "a bare generator over future.result() ends the roll on the first failing candidate")
+
+
+def test_a_call_seam_walk_asks_only_for_languages_it_can_read():
+    """An open-world walk spent its quota on languages nothing here can mine.
+
+    One live page returned 112 candidates across swift, php, csharp, erlang, zig, kotlin, dart,
+    clojure and Jupyter notebooks -- every one refused as `call-adapter-not-registered`, after
+    paying a search request and a head lookup for each.
+
+    Several `language:` qualifiers are an OR, which is a hazard when narrowing to one language and
+    exactly what is wanted when the caller named none. This is not a silent narrowing to Python:
+    the set is derived from the readers that exist, so a language that gains one joins the walk.
+
+    The repo scale asks for none of it -- the process seam runs whole programs and needs no reader.
+    """
+    from frf.automation import _index, _mineable_languages
+
+    mineable = _mineable_languages()
+    assert "python" in mineable and "go" in mineable and "ruby" in mineable
+    assert "swift" not in mineable and "php" not in mineable
+
+    def leaf_of(index):
+        inner = getattr(index, "_index", index)
+        first = inner._links[0]
+        return getattr(first, "_links", [first])[0]
+
+    call_seam = leaf_of(_index("github-functions", subset="", scale="module"))._query_for(None)
+    for name in mineable:
+        assert "language:%s" % name in call_seam, name
+    assert "language:swift" not in call_seam
+
+    # A requested language still wins, and is never joined by the open-world set.
+    pinned = leaf_of(_index("github-functions", subset="rust", scale="kernel"))._query_for(None)
+    assert pinned.count("language:") == 1 and "language:rust" in pinned
+
+    # repo stays open: it needs no miner.
+    repo = _index("github", subset="", scale="repo")._links[0]._query_for(None)
+    assert "language:" not in repo
