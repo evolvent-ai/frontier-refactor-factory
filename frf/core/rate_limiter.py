@@ -21,6 +21,8 @@ the slot returns to the pool and future callers are not blocked by the ghost of 
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 
 
 class RateLimiter:
@@ -64,13 +66,57 @@ class RateLimiter:
 _default_limiter: RateLimiter | None = None
 
 
+
+class SyncGate:
+    """The same bound, for the synchronous callers -- which is all of the real ones.
+
+    `RateLimiter` above is `async`, and `build_async` awaits it around CANDIDATES. Every actual model
+    call goes through `model.ask` on a pipeline worker thread, which never touched it: twenty-six
+    candidate workers each asking two or three times meant the gateway saw twenty-six concurrent
+    requests, and `llm_max_concurrent` was a setting that read as if it did something.
+
+    That is not a cosmetic gap. A degraded gateway is the pipeline's largest single loss -- forty-four
+    of seventy package attempts died on `the gateway did not answer: timed out` in one run -- and an
+    overloaded gateway is how a gateway becomes degraded. Bounding ourselves is the cheapest thing
+    that can be done about it.
+    """
+
+    def __init__(self, max_concurrent: int = 10, calls_per_minute: int = 60) -> None:
+        self._slots = threading.BoundedSemaphore(max(1, max_concurrent))
+        self._interval = (60.0 / calls_per_minute) if calls_per_minute > 0 else 0.0
+        self._spacing = threading.Lock()
+        self._last = 0.0
+
+    def __enter__(self) -> "SyncGate":
+        self._slots.acquire()
+        if self._interval > 0.0:
+            with self._spacing:
+                wait = self._interval - (time.monotonic() - self._last)
+                if wait > 0:
+                    time.sleep(wait)
+                self._last = time.monotonic()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._slots.release()
+
+
+_sync_gate: "SyncGate | None" = None
+
+
+def sync_gate() -> "SyncGate | None":
+    """The gate `model.ask` waits at, or None when nothing configured one."""
+    return _sync_gate
+
+
 def get_limiter() -> RateLimiter | None:
     return _default_limiter
 
 
 def configure(max_concurrent: int = 10, calls_per_minute: int = 60) -> RateLimiter:
     """Replace the module-level singleton and return it."""
-    global _default_limiter
+    global _default_limiter, _sync_gate
     _default_limiter = RateLimiter(max_concurrent=max_concurrent,
                                    calls_per_minute=calls_per_minute)
+    _sync_gate = SyncGate(max_concurrent=max_concurrent, calls_per_minute=calls_per_minute)
     return _default_limiter

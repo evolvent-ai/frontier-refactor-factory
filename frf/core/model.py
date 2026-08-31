@@ -188,9 +188,39 @@ def ask(prompt: str, *, system: str = "", temperature: float = 0.2,
     request = urllib.request.Request(
         "%s/chat/completions" % base, data=body,
         headers={"Content-Type": "application/json", "Authorization": "Bearer %s" % key})
-    # `timeout` is a total request budget, not a per-retry multiplier. Package candidates may ask
-    # once for a generator and once for repair; three full waits per call can otherwise starve a roll.
-    deadline = time.monotonic() + max(0.1, float(timeout))
+
+    # BOUND OURSELVES BEFORE BLAMING THE GATEWAY. Twenty-six candidate workers each asking two or
+    # three times put twenty-six concurrent requests on one gateway, and a degraded gateway then
+    # became the pipeline's largest single loss: forty-four of seventy package attempts refused with
+    # `the gateway did not answer: timed out` while a one-word prompt sent by hand came back in three
+    # seconds. `llm_max_concurrent` existed and was configured, but only an `async` limiter consulted
+    # it -- around candidates, not around calls -- so nothing here ever waited.
+    #
+    # The DEADLINE STARTS AFTER THE WAIT. Queueing is our own doing, and charging it to the gateway's
+    # budget would make a call fail for having waited its turn.
+    gate = _sync_gate()
+    with gate if gate is not None else _nothing():
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        return _ask_within(request, deadline)
+
+
+class _nothing:
+    """Nothing configured a gate -- a test, or a one-shot script."""
+
+    def __enter__(self): return self
+
+    def __exit__(self, *_exc): return False
+
+
+def _sync_gate():
+    try:
+        from .rate_limiter import sync_gate
+        return sync_gate()
+    except Exception:                                      # noqa: BLE001 -- optional
+        return None
+
+
+def _ask_within(request, deadline: float) -> str:
     last_transport = None
     last_refusal = None
     payload = None
