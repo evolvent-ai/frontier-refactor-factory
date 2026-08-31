@@ -249,9 +249,19 @@ def _translate(error: urllib.error.HTTPError, url: str) -> SourceError:
     remaining = (headers or {}).get("X-RateLimit-Remaining") if headers else None
     retry_after = _retry_after(headers)
 
-    if error.code == 429 or (error.code == 403 and remaining == "0"):
-        return RateLimited("%s is rate limiting this client%s" % (
-            url, "" if retry_after is None else " (retry after %.0fs)" % retry_after),
+    # A SECONDARY RATE LIMIT IS A 403 THAT LOOKS LIKE NOTHING ELSE. GitHub's primary limits set
+    # `X-RateLimit-Remaining: 0`; the secondary limit -- the one concurrency triggers -- sets no such
+    # header and says so only in the body. Read as a permission problem, it became `Unauthorized`,
+    # which is permanent: the walk gave up after three of them and the batch reported `attempted: 0`
+    # while advising the operator to set a GITHUB_TOKEN that was present and valid the whole time.
+    #
+    # It is the opposite of permanent. GitHub asks for a wait of a few minutes and the supply is
+    # still there afterwards, so it wears the type that means "ask again later".
+    secondary = "secondary rate limit" in detail.lower()
+    if error.code == 429 or (error.code == 403 and (remaining == "0" or secondary)):
+        return RateLimited("%s is rate limiting this client%s%s" % (
+            url, " (secondary limit)" if secondary else "",
+            "" if retry_after is None else " (retry after %.0fs)" % retry_after),
             status=error.code, url=url, retry_after=retry_after)
     if error.code in (401, 403):
         return Unauthorized(

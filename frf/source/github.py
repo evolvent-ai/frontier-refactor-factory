@@ -69,6 +69,22 @@ HEAD_WORKERS = 8
 # second one makes a run depend on how it was launched.
 _HEAD_GATE = threading.BoundedSemaphore(HEAD_WORKERS)
 
+# SEARCH REQUESTS GO OUT ONE AT A TIME, SPACED. The documented search quota is 30 a minute, but the
+# limit that actually stops a batch is the SECONDARY one, and that is about concurrency rather than
+# rate: GitHub asks that requests for a single token be made serially, and answers a burst with a
+# 403 that carries no `X-RateLimit-Remaining` and a body saying to wait a few minutes.
+#
+# Twelve jobs walking at once tripped it within seconds. Every one of them then stopped -- the walk
+# gives up after three failed pages -- and the batch reported twelve jobs, zero attempts, and no
+# reason. This gate is what makes the job count a throughput decision again rather than a way to
+# make the whole batch fail faster.
+#
+# A lock rather than a semaphore because the requirement is serial, and held ACROSS the request so
+# that spacing is measured between completions. 2.2s leaves the 30/minute quota with headroom.
+_SEARCH_LOCK = threading.Lock()
+SEARCH_INTERVAL = 2.2
+_last_search = 0.0
+
 
 class GitHub:
     """Repository search, segmented so that more than a thousand results are reachable.
@@ -320,9 +336,17 @@ class GitHub:
         if token != self._http.token:
             self._http.token = token
 
-        payload = self._http.json(
-            SEARCH % (quote(query), self._sort, page_number, size),
-            accept="application/vnd.github+json")
+        global _last_search
+        with _SEARCH_LOCK:
+            wait = SEARCH_INTERVAL - (time.monotonic() - _last_search)
+            if wait > 0:
+                time.sleep(wait)
+            try:
+                payload = self._http.json(
+                    SEARCH % (quote(query), self._sort, page_number, size),
+                    accept="application/vnd.github+json")
+            finally:
+                _last_search = time.monotonic()
 
         # Report rate-limit state from response headers so the pool can skip exhausted tokens.
         if token:

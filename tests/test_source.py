@@ -17,6 +17,7 @@ seven registries while this was written, and what they found is recorded in the 
 """
 from __future__ import annotations
 
+import threading
 import os
 import sys
 
@@ -550,3 +551,38 @@ def test_kernels_array_filter_is_counted_like_every_other_refusal():
     assert counted_at > array_at, "the count must record what the array filter removed"
     assert "if before and not found:" in body, (
         "only a repository emptied BY this filter is charged to it")
+
+
+def test_a_secondary_rate_limit_is_not_read_as_a_missing_credential():
+    """GitHub's secondary limit is a 403 with no `X-RateLimit-Remaining` and the reason in the body.
+
+    Classified by status alone it became `Unauthorized` -- permanent -- so a walk gave up after
+    three of them and the batch reported `attempted: 0` while advising the operator to set a
+    GITHUB_TOKEN that was present and valid throughout. It is the opposite of permanent: GitHub asks
+    for a wait and the supply is still there afterwards.
+    """
+    import urllib.error, io
+    from frf.source import http as http_module
+
+    body = io.BytesIO(b'{"message": "You have exceeded a secondary rate limit. '
+                      b'Please wait a few minutes before you try again."}')
+    error = urllib.error.HTTPError("https://api.github.com/search/repositories", 403,
+                                   "Forbidden", {}, body)
+    translated = http_module._translate(error, "https://api.github.com/search/repositories")
+
+    assert isinstance(translated, http_module.RateLimited), \
+        "a secondary rate limit read as %s" % type(translated).__name__
+
+
+def test_search_requests_are_serialised_across_the_process():
+    """The secondary limit is about concurrency, so the gate has to be wider than one client.
+
+    Twelve jobs each built their own `GitHub` instance and walked at once; a per-instance throttle
+    cannot see that. GitHub asks for requests on one token to be made serially.
+    """
+    from frf.source import github as github_module
+
+    assert isinstance(github_module._SEARCH_LOCK, threading.Lock().__class__), \
+        "serial, not merely bounded: a semaphore of one is a lock spelled less clearly"
+    assert github_module.SEARCH_INTERVAL * 30 > 60, \
+        "spacing must keep the documented 30-a-minute quota, with headroom"

@@ -340,14 +340,30 @@ def _total_of(index: Index) -> int | None:
         return None
 
 
+# The longest one page will wait out a rate limit. GitHub's secondary limit asks for "a few
+# minutes"; sleeping through more than this holds a candidate slot for material a later page
+# will reach anyway, so the walk moves on and the segment stays unread rather than retired.
+RATE_LIMIT_WAIT = 180.0
+
+
 def _fetch_page_with_retry(index: Index, page_number: int, size: int,
                             log: Callable[[str], None]) -> list | None:
     """Fetch one page with exponential backoff on retryable failures. -> None when retries exhausted."""
-    from ..source.http import SourceError, TransportError  # avoid circular import
+    from ..source.http import RateLimited, SourceError, TransportError  # avoid circular import
 
     for attempt in range(3):
         try:
             return list(index.page(page_number, size=size))
+        # A RATE LIMIT IS THE ONE FAILURE THAT SAYS THE MATERIAL IS STILL THERE. The client below
+        # has already backed off and given up; arriving here it would fall to `SourceError` and be
+        # called permanent, which retires a star segment that was never read. Its own `retry_after`
+        # is what to honour -- GitHub's secondary limit asks for minutes, not for the seconds an
+        # exponential backoff of our choosing would pick.
+        except RateLimited as error:
+            delay = min(float(getattr(error, "retry_after", None) or 60.0), RATE_LIMIT_WAIT)
+            log("%s: page %d rate limited (attempt %d/3): waiting %.0fs"
+                % (index.name, page_number, attempt + 1, delay))
+            time.sleep(delay)
         except TransportError as error:
             delay = (2 ** attempt) * 1.0
             log("%s: page %d failed (attempt %d/3): %s; retrying in %.1fs"
