@@ -105,6 +105,15 @@ def replay_one(task_dir: str, api_key: str, template: str) -> dict:
                             request_timeout=TRANSFER_TIMEOUT)
         sandbox.commands.run("tar -xf %s/task.tar -C %s" % (remote, remote),
                              timeout=120, request_timeout=180)
+        # THE MOUNT HAS TO BE USABLE BY THE USER THE IMAGE DECLARES. The task images run as
+        # `nobody`; this directory is extracted as root, and a submission that cannot write beside
+        # its own sources dies at startup. The verifier reports that honestly -- "the submission
+        # stopped answering" -- and it read as fifty-eight tasks whose expectations did not
+        # reproduce. Run as root the same task answered 57 of 57.
+        #
+        # `a+rwX` rather than a chown: the image's user id is the image's business, and this tool
+        # must not need to know it to hand over a workspace.
+        sandbox.commands.run("chmod -R a+rwX %s" % remote, timeout=120, request_timeout=180)
 
         scale = ""
         try:
@@ -202,8 +211,14 @@ def replay_one(task_dir: str, api_key: str, template: str) -> dict:
             record.update(ok=True, stage="", detail="%d/%d inside the delivered image"
                                                     % (passed, total))
         else:
-            record["detail"] = ("%d/%d inside the delivered image -- the expectations were frozen "
-                                "somewhere this image does not reproduce" % (passed, total))
+            # CARRY THE VERIFIER'S OWN NOTE. Without it every disagreement read as one sentence --
+            # "the expectations were frozen somewhere this image does not reproduce" -- for fifty-
+            # eight tasks whose causes were not the same thing at all, and the tool that exists to
+            # find defects could not say which defect it had found.
+            record["note"] = str(report.get("note", ""))[:400]
+            record["detail"] = ("%d/%d inside the delivered image%s" % (
+                passed, total, (" -- %s" % record["note"]) if record["note"] else
+                " -- the expectations were frozen somewhere this image does not reproduce"))
         return record
     except Exception as exc:                                   # noqa: BLE001 -- reported, not raised
         # THE TAIL, NOT THE HEAD. A failed `docker build` puts its banner first and the reason
