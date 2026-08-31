@@ -71,23 +71,42 @@ class Memory:
 
     path: str = ""
     seen: set = field(default_factory=set)
+    # WHERE EACH INDEX'S WALK STOPPED. Persisted BESIDE the seen-set, and it has to be: the cursor
+    # used to live on the index object, which dies with the process, while `seen` survived in this
+    # file. A restart therefore began at page zero holding a seen-set of thousands, spent its whole
+    # sourcing deadline re-walking pages it had already drained, and reported `attempted: 0`. Twelve
+    # jobs did exactly that for forty-five seconds and the batch called itself done.
+    #
+    # The asymmetry is the bug: remembering what was drawn without remembering where makes each
+    # restart strictly worse than the last. Keyed by index name, so one file serves every scale.
+    pages: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: str) -> "Memory":
         if path and os.path.exists(path):
             with open(path, encoding="utf-8") as handle:
-                return cls(path, set(json.load(handle).get("seen", ())))
-        return cls(path, set())
+                stored = json.load(handle)
+            pages = {str(k): int(v) for k, v in (stored.get("pages") or {}).items()}
+            return cls(path, set(stored.get("seen", ())), pages)
+        return cls(path, set(), {})
 
     def remember(self, candidate: Candidate) -> None:
         self.seen.add(candidate.identity)
+
+    def resume_at(self, index_name: str) -> int:
+        return int(self.pages.get(str(index_name), 0) or 0)
+
+    def reached(self, index_name: str, page: int) -> None:
+        """Advance the cursor, never rewind it: two jobs share one index and one memory."""
+        key = str(index_name)
+        self.pages[key] = max(int(page), self.pages.get(key, 0))
 
     def save(self) -> None:
         if not self.path:
             return
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as handle:
-            json.dump({"seen": sorted(self.seen)}, handle, indent=1)
+            json.dump({"seen": sorted(self.seen), "pages": self.pages}, handle, indent=1)
 
     def __contains__(self, candidate: Candidate) -> bool:
         return candidate.identity in self.seen
@@ -230,64 +249,71 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
     # stall -- a restarted roll re-walked 182 spent identities on every call and made one attempt
     # in eight minutes.
     #
-    # The cursor lives on the INDEX, beside the `_positions` it already keeps for the same reason,
-    # so successive `find()` calls on one scale continue where the last stopped. A fresh index --
-    # a new process without a persisted memory -- starts at zero as before.
-    page = int(getattr(index, "resume_page", 0) or 0)
+    # The cursor lives on the INDEX for successive `find()` calls within one process, and in the
+    # MEMORY for successive processes -- whichever is further along wins. Persisting it is what makes
+    # a restart resume rather than replay: with the seen-set persisted and the cursor not, a restart
+    # re-walks every drained page before it can reach fresh material, and a batch that has been
+    # restarted twenty times never reaches it at all.
+    page = max(int(getattr(index, "resume_page", 0) or 0), memory.resume_at(index.name))
     consecutive_errors = 0
     max_consecutive_errors = 3
 
-    while produced < budget:
-        if deadline is not None and time.monotonic() >= deadline:
-            log("%s: sourcing deadline reached after %d candidate(s)" % (index.name, coverage.walked))
-            break
-        batch = _fetch_page_with_retry(index, page, page_size, log)
-        if batch is None:
-            # Retry limit exhausted; skip this page.
-            consecutive_errors += 1
-            if consecutive_errors >= max_consecutive_errors:
-                log("%s: too many consecutive errors (%d), stopping walk"
-                    % (index.name, consecutive_errors))
+    # SAVED WHATEVER HAPPENS. This is a generator: when the caller has its budget it simply
+    # stops iterating, and the body after the loop never runs -- so the cursor and the seen-set
+    # would be dropped in exactly the common case, a roll that got what it asked for.
+    try:
+        while produced < budget:
+            if deadline is not None and time.monotonic() >= deadline:
+                log("%s: sourcing deadline reached after %d candidate(s)" % (index.name, coverage.walked))
                 break
+            batch = _fetch_page_with_retry(index, page, page_size, log)
+            if batch is None:
+                # Retry limit exhausted; skip this page.
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    log("%s: too many consecutive errors (%d), stopping walk"
+                        % (index.name, consecutive_errors))
+                    break
+                page += 1
+                continue
+            if not batch:
+                log("%s: exhausted after %d page(s)" % (index.name, page))
+                break
+            consecutive_errors = 0
             page += 1
-            continue
-        if not batch:
-            log("%s: exhausted after %d page(s)" % (index.name, page))
-            break
-        consecutive_errors = 0
-        page += 1
-        try:
-            index.resume_page = page
-        except Exception:                                      # noqa: BLE001 -- optional hook
-            pass
-        log("%s: page %d returned %d row(s)" % (index.name, page - 1, len(batch)))
-        for candidate in batch:
-            # Validate candidate has required fields; skip malformed ones.
-            if not _is_valid_candidate(candidate):
-                log("%s: skipping invalid candidate: %s" % (index.name, candidate))
-                continue
-            coverage.walked += 1
-            if candidate in memory:
-                coverage.repeats += 1
-                continue
-            memory.remember(candidate)
-            # Apply language filter if requested.
-            if language_filter:
-                lang_lower = (candidate.language or "").lower()
-                filter_lower = language_filter.strip().lower()
-                if lang_lower != filter_lower:
+            memory.reached(index.name, page)
+            try:
+                index.resume_page = page
+            except Exception:                                      # noqa: BLE001 -- optional hook
+                pass
+            log("%s: page %d returned %d row(s)" % (index.name, page - 1, len(batch)))
+            for candidate in batch:
+                # Validate candidate has required fields; skip malformed ones.
+                if not _is_valid_candidate(candidate):
+                    log("%s: skipping invalid candidate: %s" % (index.name, candidate))
                     continue
-            if keep is not None and not keep(candidate):
-                log("%s: rejected candidate %s by mechanical filter" %
-                    (index.name, candidate.identity))
-                continue
-            coverage.fresh += 1
-            produced += 1
-            yield candidate
-            if produced >= budget:
-                break
-
-    memory.save()
+                coverage.walked += 1
+                if candidate in memory:
+                    coverage.repeats += 1
+                    continue
+                memory.remember(candidate)
+                # Apply language filter if requested.
+                if language_filter:
+                    lang_lower = (candidate.language or "").lower()
+                    filter_lower = language_filter.strip().lower()
+                    if lang_lower != filter_lower:
+                        continue
+                if keep is not None and not keep(candidate):
+                    log("%s: rejected candidate %s by mechanical filter" %
+                        (index.name, candidate.identity))
+                    continue
+                coverage.fresh += 1
+                produced += 1
+                yield candidate
+                if produced >= budget:
+                    break
+    finally:
+        memory.save()
     try:
         index.last_coverage = coverage
     except Exception:

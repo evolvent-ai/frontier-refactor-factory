@@ -423,3 +423,53 @@ def test_the_shipped_widening_index_skips_repositories_it_has_mined():
     import inspect
     body = inspect.getsource(GitHubFunctions.page)
     assert "_already_drawn_from" in body, "the skip must run before _widen, not after"
+
+
+def test_a_restart_resumes_the_walk_instead_of_replaying_it():
+    """The cursor has to be persisted wherever the seen-set is, or restarts get strictly worse.
+
+    The cursor used to live on the index object and die with the process while `seen` survived in
+    the file. A restart then began at page zero holding thousands of spent identities, burned its
+    whole sourcing deadline re-walking drained pages, and reported `attempted: 0` -- twelve jobs did
+    that for forty-five seconds and the batch declared itself done. A `_FakeIndex` per call is the
+    point: it is what a new process gets.
+    """
+    with tempfile.TemporaryDirectory() as work:
+        path = os.path.join(work, "seen.json")
+
+        first = _FakeIndex(1000)
+        list(sourcing.walk(first, budget=25, page_size=10, memory=sourcing.Memory.load(path)))
+        served_by_the_first = first.pages_served
+
+        second = _FakeIndex(1000)
+        found = list(sourcing.walk(second, budget=5, page_size=10,
+                                   memory=sourcing.Memory.load(path)))
+
+        assert len(found) == 5, "a resumed walk still fills its budget"
+        assert second.pages_served == 1, (
+            "the restart re-read %d spent page(s) instead of resuming"
+            % (second.pages_served - 1))
+        assert sourcing.Memory.load(path).resume_at("test-index") >= served_by_the_first
+
+
+def test_the_cursor_survives_a_caller_that_stops_early():
+    """`walk` is a generator, so the code after its loop does not run when the caller has enough.
+
+    That is the ordinary case -- a roll asks for four and takes four -- and it is precisely when the
+    cursor must be kept. Saving in a `finally` is what makes the resume above hold in practice
+    rather than only when a walk runs to exhaustion.
+    """
+    with tempfile.TemporaryDirectory() as work:
+        path = os.path.join(work, "seen.json")
+        memory = sourcing.Memory.load(path)
+
+        walking = sourcing.walk(_FakeIndex(1000), budget=99, page_size=10, memory=memory)
+        taken = [next(walking) for _ in range(3)]
+        walking.close()                       # what abandoning the generator does
+
+        assert len(taken) == 3
+        stored = sourcing.Memory.load(path)
+        assert stored.resume_at("test-index") == 1, "the page it reached was not written down"
+        # Three, not the page's ten: a candidate is remembered as it is handed out, so material the
+        # walk read but never yielded stays available to the next roll.
+        assert len(stored) == 3, "nor was what it actually handed out"
