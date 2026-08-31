@@ -395,3 +395,26 @@ def test_an_unfiltered_kernel_walk_is_not_narrowed_to_one_language():
     leaves = [leaf for link in getattr(inner, "_links", [])
               for leaf in getattr(link, "_links", [link])]
     assert leaves and all(getattr(leaf, "_language", "") == "rust" for leaf in leaves)
+
+
+def test_one_candidate_failing_outside_the_pipeline_does_not_end_the_roll():
+    """A roll asks for twenty-five tasks; one unopenable sandbox must not take the other twenty-four.
+
+    A live batch died exactly there: a DNS blip reaching api.e2b.app raised SandboxError while
+    opening a sandbox for ONE candidate, `future.result()` re-raised it out of the roll loop, and a
+    twenty-five task job ended with fourteen already emitted and no summary.
+
+    This is the rule the pipeline already applies inside a candidate -- the wire is not the material
+    -- reaching one level out. The loss is counted and surfaced, because a job that stopped early
+    otherwise looks exactly like one whose supply ran out.
+    """
+    import inspect
+
+    from frf import automation
+
+    source = inspect.getsource(automation.run)
+    assert "infrastructure_failures" in source, "losses to our own infrastructure must be counted"
+    # The result is collected inside a try, not in a generator expression that re-raises.
+    assert "reports.append(future.result())" in source
+    assert "reports.extend(future.result() for future in as_completed(futures))" not in source, (
+        "a bare generator over future.result() ends the roll on the first failing candidate")

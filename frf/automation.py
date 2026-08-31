@@ -258,6 +258,9 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         started = time.perf_counter()
         reports = []
         seen = set()
+        # Candidates lost to our own infrastructure rather than to the pipeline's gates.
+        # Surfaced in the summary so a thin batch cannot be read as thin material.
+        infrastructure_failures = 0
         requested = min(attempt_limit, max(4, target * 3))
         attempted = 0
         while (sum(r.summary.get("emitted", 0) for r in reports) < target
@@ -294,11 +297,30 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
                                        harbor_check=harbor_check, harbor_repair=harbor_repair,
                                        harbor_max_repairs=harbor_max_repairs)
                            for candidate in wave]
-                reports.extend(future.result() for future in as_completed(futures))
+                # ONE CANDIDATE MUST NOT END THE JOB. A roll asks for twenty-five tasks and runs
+                # each candidate in its own `run()`; letting that call's exception out of
+                # `future.result()` ends the whole roll. A live batch died exactly there -- a DNS
+                # blip reaching api.e2b.app raised SandboxError on ONE candidate and took a
+                # twenty-five task job down with it, discarding the fourteen already emitted from
+                # that job's accounting.
+                #
+                # This is the same rule the pipeline already applies inside a candidate: the wire is
+                # not the material. A candidate we could not even start is charged to us, counted as
+                # attempted, and the roll moves on -- which is also what keeps the yield honest,
+                # since a job that stops early looks identical to one whose supply ran out.
+                for future in as_completed(futures):
+                    try:
+                        reports.append(future.result())
+                    except Exception as exc:                   # noqa: BLE001 -- reported, not raised
+                        print("[%s] candidate failed outside the pipeline (%s: %s); continuing"
+                              % (name, type(exc).__name__, str(exc)[:200]), flush=True)
+                        infrastructure_failures += 1
         merged = _merge_reports(reports, index_name, time.perf_counter() - started)
         merged.summary["target_emitted"] = target
         merged.summary["target_met"] = merged.summary.get("emitted", 0) >= target
         merged.summary["max_attempts"] = attempt_limit
+        if infrastructure_failures:
+            merged.summary["infrastructure_failures"] = infrastructure_failures
         return merged
 
     # Worker concurrency and active sandbox concurrency are separate controls. Keep many workers

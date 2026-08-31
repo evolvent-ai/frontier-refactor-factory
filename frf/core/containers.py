@@ -71,6 +71,10 @@ TRANSPORT_HEADROOM = 120
 # here, not giving up -- a batch whose work was finished sat in teardown for eleven minutes.
 TEARDOWN_TIMEOUT = 30
 
+# How many times opening a sandbox is retried before the candidate is given up on.
+# See the loop in `Remote.__init__` for why three was too few.
+OPEN_ATTEMPTS = 6
+
 # HOW LONG A SANDBOX STAYS ALIVE, and it has to exceed the longest stage that runs inside one.
 #
 # It did not. This defaulted to 3600 -- exactly `FRF_FREEZE_MAX_SECONDS` -- so a freeze allowed to
@@ -338,7 +342,12 @@ class Remote:
         # older generic spelling as a compatibility fallback for manually configured deployments.
         self._template = (template or credentials.get("E2B_DIND_TEMPLATE")
                           or credentials.get("E2B_TEMPLATE") or "")
-        for attempt in range(3):
+        # RETRIED FOR AS LONG AS THE OUTAGE PLAUSIBLY LASTS. Three attempts at one and two seconds
+        # tolerates three seconds of trouble, and the failures this guards against are not that
+        # short: a live batch died on `dns error: request timed out` reaching api.e2b.app, which is
+        # a resolver blip measured in tens of seconds. Six attempts backing off to thirty seconds
+        # covers about a minute and a half, and costs nothing when the first attempt succeeds.
+        for attempt in range(OPEN_ATTEMPTS):
             try:
                 if self._template:
                     self._sandbox = Sandbox.create(template=self._template, timeout=int(timeout),
@@ -349,13 +358,13 @@ class Remote:
                 break
             except Exception as exc:                          # noqa: BLE001 -- SDK transport/errors
                 message = str(exc)
-                transient = bool(re.search(r"dns|connect|connection|temporar|5\d\d|no connections",
-                                           message, re.I))
-                if not transient or attempt == 2:
+                transient = bool(re.search(r"dns|connect|connection|temporar|timed out|timeout|"
+                                           r"5\d\d|no connections", message, re.I))
+                if not transient or attempt == OPEN_ATTEMPTS - 1:
                     raise SandboxError(
                         "could not open a remote sandbox%s: %s"
                         % (" from template %r" % self._template if self._template else "", message)) from exc
-                time.sleep(2 ** attempt)
+                time.sleep(min(2 ** attempt, 30))
 
     def close(self) -> None:
         try:
