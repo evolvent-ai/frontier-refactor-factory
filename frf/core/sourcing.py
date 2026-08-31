@@ -222,7 +222,18 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
     except Exception:                                          # noqa: BLE001 -- optional hook
         pass
     produced = 0
-    page = 0
+    # RESUMED, NOT RESTARTED. `walk` used to begin at page zero on every call, and an index maps
+    # page zero to the same first page for ever -- correctly, since a stable answer to the same
+    # question is the property this module is built on. The consequence is quadratic: a roll asks,
+    # takes a few candidates, asks again, and re-reads every page it has already exhausted to reach
+    # the fresh ones. With a persisted seen-set that stops being an inefficiency and becomes a
+    # stall -- a restarted roll re-walked 182 spent identities on every call and made one attempt
+    # in eight minutes.
+    #
+    # The cursor lives on the INDEX, beside the `_positions` it already keeps for the same reason,
+    # so successive `find()` calls on one scale continue where the last stopped. A fresh index --
+    # a new process without a persisted memory -- starts at zero as before.
+    page = int(getattr(index, "resume_page", 0) or 0)
     consecutive_errors = 0
     max_consecutive_errors = 3
 
@@ -245,6 +256,10 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
             break
         consecutive_errors = 0
         page += 1
+        try:
+            index.resume_page = page
+        except Exception:                                      # noqa: BLE001 -- optional hook
+            pass
         log("%s: page %d returned %d row(s)" % (index.name, page - 1, len(batch)))
         for candidate in batch:
             # Validate candidate has required fields; skip malformed ones.

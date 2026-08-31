@@ -355,3 +355,43 @@ def test_a_widening_index_is_told_what_is_already_spent():
     # And the widening index's own predicate treats a repository as spent once anything from it was.
     assert _already_drawn_from("github:a/b@c1", index.already_seen)
     assert not _already_drawn_from("github:other/repo@c9", index.already_seen)
+
+
+def test_walk_resumes_paging_instead_of_restarting_it():
+    """Restarting at page zero on every call is quadratic, and with a persisted seen-set it stalls.
+
+    An index maps page zero to the same first page for ever -- correctly, since a stable answer to
+    the same question is what makes a walk resumable. So a roll that asks, takes a few candidates
+    and asks again re-reads every page it already exhausted. Measured: a restarted roll carrying 182
+    spent identities re-walked all of them on every call and made ONE attempt in eight minutes.
+    """
+    from frf.core import sourcing
+    from frf.core.scale import Candidate
+
+    class Index:
+        name = "index"
+        reads = 0
+
+        def total(self):
+            return 8
+
+        def page(self, number, *, size=50):
+            Index.reads += 1
+            if number >= 4:
+                return []
+            return [Candidate(identity="c%d" % (number * 2 + i), scale="repo", language="go",
+                              source="index") for i in range(2)]
+
+    index = Index()
+    first = [c.identity for c in sourcing.walk(index, 2)]
+    reads_after_first = Index.reads
+    second = [c.identity for c in sourcing.walk(index, 2)]
+
+    assert first == ["c0", "c1"], first
+    assert second == ["c2", "c3"], second
+    assert not set(first) & set(second)
+    # The second call read ONE more page, not the first one again.
+    assert Index.reads == reads_after_first + 1, Index.reads
+
+    # A fresh index with no cursor still starts at the beginning.
+    assert [c.identity for c in sourcing.walk(Index(), 2)] == ["c0", "c1"]
