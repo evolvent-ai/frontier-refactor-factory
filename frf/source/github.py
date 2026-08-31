@@ -338,7 +338,12 @@ class GitHub:
 
         global _last_search
         with _SEARCH_LOCK:
-            wait = SEARCH_INTERVAL - (time.monotonic() - _last_search)
+            # THE QUOTA IS PER TOKEN, SO THE SPACING IS TOO. With one token the interval is the
+            # documented 30-a-minute; a second token doubles the rate the pool can sustain, and
+            # without this a token added to `GITHUB_TOKEN` would buy nothing at all. The lock still
+            # serialises, because the secondary limit is about concurrency rather than rate.
+            wait = SEARCH_INTERVAL / max(1, len(getattr(self._pool, "_tokens", None) or [1]))
+            wait -= time.monotonic() - _last_search
             if wait > 0:
                 time.sleep(wait)
             try:

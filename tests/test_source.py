@@ -620,3 +620,23 @@ def test_a_widening_index_buys_many_rows_per_search_request():
     assert asked, "no search request was made at all"
     assert asked[0] >= 25, \
         "one search request bought %d rows; rows are cheap and the gate is not" % asked[0]
+
+
+def test_the_search_gate_spacing_follows_the_token_count():
+    """The quota is per token, so a second token must actually buy throughput.
+
+    The gate serialises search requests -- GitHub's secondary limit is about concurrency -- and
+    spaces them for the documented 30-a-minute primary limit. Spacing fixed at the one-token
+    interval would make a token added to `GITHUB_TOKEN` buy nothing.
+    """
+    from frf.source import github as github_module
+
+    from frf.source.tokens import TokenPool
+
+    def spacing(pool):
+        return github_module.SEARCH_INTERVAL / max(1, len(getattr(pool, "_tokens", None) or [1]))
+
+    one, two = TokenPool(["a"]), TokenPool(["a", "b"])
+    assert spacing(two) < spacing(one), \
+        "two tokens waited as long as one: %.2fs vs %.2fs" % (spacing(two), spacing(one))
+    assert abs(spacing(two) * 2 - spacing(one)) < 1e-9, "the rate should scale with the quota"
