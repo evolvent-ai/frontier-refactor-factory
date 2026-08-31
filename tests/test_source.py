@@ -447,3 +447,50 @@ def test_head_commits_for_a_page_are_resolved_concurrently():
     # Pinning off means no lookups at all.
     index._pin = False
     assert index._heads_of(rows) == {}
+
+
+def test_head_lookups_are_bounded_across_the_whole_process():
+    """The per-page bound multiplies once several jobs page at once.
+
+    `HEAD_WORKERS` limits one page's lookups. With four scale jobs each allowed the whole worker
+    pool, the pages themselves run concurrently, so the real concurrency is that bound times
+    however many pages are in flight. A live batch reached it immediately: a stack dump found five
+    threads in `_head_of` and three already sleeping in the client's own throttle, which is the API
+    refusing us.
+
+    `Http._wait` cannot see this -- it throttles per instance and every job builds its own -- so
+    the ceiling lives where all of them meet.
+    """
+    import threading
+    import time
+
+    from frf.source import github
+
+    peak = 0
+    live = 0
+    lock = threading.Lock()
+
+    class Counting(github.GitHub):
+        def __init__(self):
+            self._pin = True
+
+        def _head_of(self, row):
+            nonlocal peak, live
+            with lock:
+                live += 1
+                peak = max(peak, live)
+            time.sleep(0.02)
+            with lock:
+                live -= 1
+            return "a" * 40
+
+    rows = [{"full_name": "o/r%d" % n, "default_branch": "main"} for n in range(12)]
+    pages = [threading.Thread(target=lambda: Counting()._heads_of(rows)) for _ in range(6)]
+    for page in pages:
+        page.start()
+    for page in pages:
+        page.join()
+
+    assert peak <= github.HEAD_WORKERS, (
+        "six concurrent pages reached %d lookups at once; the gate bounds the process" % peak)
+    assert peak > 1, "the lookups should still overlap within the ceiling"

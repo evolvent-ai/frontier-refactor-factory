@@ -26,6 +26,7 @@ failing, because a slow index still enumerates.
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from urllib.parse import quote
 
@@ -57,6 +58,16 @@ DEFAULT_SORT = "stars"
 # the core API (5000/hour) rather than search (30/minute), so the ceiling is comfort
 # rather than quota -- but it stays small so one page cannot monopolise a token.
 HEAD_WORKERS = 8
+
+# How many head lookups the WHOLE PROCESS may have in flight, across every scale job
+# and every candidate worker. GitHub's core API is generous per hour and unforgiving
+# per moment; without this the per-page bound multiplies by however many pages happen
+# to be in flight, and the client's own per-instance throttle cannot see it because
+# each job builds its own instance.
+# A constant rather than an environment knob: `tests/test_source.py` holds that no client in this
+# package reads `os.environ`, because the one reader of the environment is `core.credentials` and a
+# second one makes a run depend on how it was launched.
+_HEAD_GATE = threading.BoundedSemaphore(HEAD_WORKERS)
 
 
 class GitHub:
@@ -199,8 +210,24 @@ class GitHub:
             return {}
         from concurrent.futures import ThreadPoolExecutor
 
+        # BOUNDED ACROSS THE PROCESS, not per page. `HEAD_WORKERS` limits one page's lookups; with
+        # several scale jobs each running several candidate workers, the pages themselves are
+        # concurrent, so the per-page bound multiplies. A live batch reached that state as soon as
+        # jobs were allowed the whole worker pool: a stack dump found five threads in `_head_of` and
+        # three already sleeping in the client's own throttle, which is the API refusing us.
+        #
+        # `Http._wait` cannot see this: it throttles per INSTANCE and every job builds its own. The
+        # ceiling has to live where all of them meet, so it lives here.
+        def gated(row):
+            # THE GATE IS PER LOOKUP, not per page. Wrapping the pool instead let six concurrent
+            # pages each take one slot and then open eight lookups apiece -- 48 at once against a
+            # ceiling of 8, which is how the first version of this passed its own review and failed
+            # its test.
+            with _HEAD_GATE:
+                return self._head_of(row)
+
         with ThreadPoolExecutor(max_workers=HEAD_WORKERS) as pool:
-            futures = {id(row): pool.submit(self._head_of, row) for row in rows}
+            futures = {id(row): pool.submit(gated, row) for row in rows}
             resolved = {}
             for key, future in futures.items():
                 try:
