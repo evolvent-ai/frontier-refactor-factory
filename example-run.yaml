@@ -16,8 +16,18 @@ llm_max_concurrent: 4
 sandboxed: true             # local-process is development only
 
 jobs:
-  # One job per cell. Ask for the whole target in ONE job: `max_per_repository` counts per job, so
-  # five jobs of five reset it five times and may take the cap from the same repository each time.
+  # TWO RULES THAT PULL AGAINST EACH OTHER, and a real batch needed both.
+  #
+  # `max_per_repository` counts PER JOB, so splitting a target across jobs resets it and the cap can
+  # be taken from one repository several times. That argues for one job per scale.
+  #
+  # But an unfiltered walk ranks by stars, and the top of that ranking is python-heavy: a package
+  # job left open produced fourteen tasks and every one was python, while its dispatcher supports
+  # eight languages. That argues for one job per LANGUAGE.
+  #
+  # So: split by language when a scale's corpus must be multi-language, and keep the per-repository
+  # cap tight in each. Do not split a scale for any other reason -- more jobs than E2B slots starves
+  # the slow ones, which is how a package job went thirty-two minutes without a single attempt.
   - scale: module
     form: inplace
     source_language: python
