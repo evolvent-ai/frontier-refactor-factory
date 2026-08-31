@@ -112,8 +112,17 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         # batch also reported vitest, ts-node, nyc and wireit as not found. All of it arrived as
         # `reference-will-not-build (material)`, blaming repositories whose own code was fine.
         # Installing the MANAGERS is the fix; the downstream tools come from the repo's own lockfile.
+        # `--force`, BECAUSE THE BASE ALREADY SHIPS YARN. The official node images put a yarn at
+        # /usr/local/bin/yarn, and npm 9 refuses to overwrite a binary it does not own:
+        # `npm error File exists: /usr/local/bin/yarn`, exit 1, image not built. It was the single
+        # largest defect in a finished corpus -- about forty JavaScript and TypeScript tasks whose
+        # delivered image could not be built at all, none of which the production run noticed
+        # because the production container is not the delivered image.
+        #
+        # Forcing is right rather than merely expedient: the point of naming a version is that the
+        # task runs against THAT one, so replacing the bundled yarn is the intent.
         "install_cmds": [
-            "npm install -g pnpm@9.12.3 yarn@1.22.22",
+            "npm install -g --force pnpm@9.12.3 yarn@1.22.22",
         ],
         "copy_from_image": "node:22-bookworm-slim",
         "copy_from_paths": [
@@ -131,8 +140,10 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         # Same as javascript above: a TS monorepo declares a package manager, and node slim carries
         # only npm. `pnpm: not found` and `bun: not found` accounted for most of one repo/ts batch's
         # refusals, all charged to the material.
+        # `--force` for the same reason as javascript above: the base ships yarn and npm 9 will not
+        # overwrite it.
         "install_cmds": [
-            "npm install -g typescript@5.6.3 pnpm@9.12.3 yarn@1.22.22",
+            "npm install -g --force typescript@5.6.3 pnpm@9.12.3 yarn@1.22.22",
         ],
         "copy_from_image": "node:22-bookworm-slim",
         "copy_from_paths": [

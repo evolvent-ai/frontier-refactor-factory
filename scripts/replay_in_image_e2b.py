@@ -33,6 +33,7 @@ import argparse
 import io
 import json
 import os
+import re
 import sys
 import tarfile
 import time
@@ -104,7 +105,11 @@ def replay_one(task_dir: str, api_key: str, template: str) -> dict:
         is_repo = scale == "repo"
         record["scale"] = scale
 
-        tag = "frf-replay-%s" % name.lower().replace("@", "-")[:40]
+        # Truncating a name can leave a trailing separator, and docker rejects the tag outright:
+        # `invalid tag "frf-replay-matrix-js-sdk-should-use-hydra-for-room-"`. The task was fine;
+        # only our label for it was not, and it read in the report as a task that would not build.
+        tag = "frf-replay-%s" % re.sub(r"[^a-z0-9_.-]", "-",
+                                       name.lower())[:40].strip("-._") or "frf-replay-task"
         record["stage"] = "build"
         built = sandbox.commands.run(
             "docker build --pull -t %s %s/environment" % (tag, remote),
@@ -173,7 +178,12 @@ def replay_one(task_dir: str, api_key: str, template: str) -> dict:
                                 "somewhere this image does not reproduce" % (passed, total))
         return record
     except Exception as exc:                                   # noqa: BLE001 -- reported, not raised
-        record["detail"] = "%s: %s" % (type(exc).__name__, str(exc)[:400])
+        # THE TAIL, NOT THE HEAD. A failed `docker build` puts its banner first and the reason
+        # last, so a head-truncated message reads `#0 building with "default" ins` for every
+        # distinct failure -- 101 tasks reported an identical, useless line.
+        message = str(exc)
+        keep = message if len(message) <= 900 else "...%s" % message[-900:]
+        record["detail"] = "%s: %s" % (type(exc).__name__, " ".join(keep.split()))
         return record
     finally:
         record["seconds"] = round(time.monotonic() - started, 1)
@@ -234,7 +244,7 @@ def main() -> int:
         print("\nthese must lose their attestation rather than stay in the pool:")
         for record in failures:
             print("  %s (%s) %s" % (record["task"], record["stage"] or "replay",
-                                    record["detail"][:120]))
+                                    record["detail"][-160:]))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as handle:
             json.dump(results, handle, indent=1)

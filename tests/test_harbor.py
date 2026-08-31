@@ -234,3 +234,22 @@ def test_the_candidate_is_not_root_and_still_has_a_usable_home():
         # on a home the candidate cannot write.
         assert text.index("chown -R nobody:nogroup") < text.index("USER nobody"), language
         assert text.index("WORKDIR /app") < text.index("USER nobody"), language
+
+
+def test_a_global_npm_install_does_not_collide_with_the_base_image():
+    """The official node images ship a yarn at /usr/local/bin/yarn.
+
+    npm 9 refuses to overwrite a binary it does not own -- `npm error File exists:
+    /usr/local/bin/yarn`, exit 1, image not built. It was the single largest defect in a finished
+    corpus: about forty JavaScript and TypeScript tasks whose delivered image could not be built at
+    all. The production run did not notice because the production container is not the delivered
+    image, which is the deeper lesson; this is the immediate one.
+    """
+    from frf.core.shims.dockerfiles import _LANGUAGE_SETUP as LANGUAGES
+
+    for language in ("javascript", "typescript"):
+        for command in LANGUAGES[language]["install_cmds"]:
+            if "npm install -g" in command and "yarn" in command:
+                assert "--force" in command, \
+                    "%s installs yarn over the base image's own without --force: %r" % (
+                        language, command)
