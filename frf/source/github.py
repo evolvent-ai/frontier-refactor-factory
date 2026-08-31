@@ -52,6 +52,12 @@ SEGMENTS = ((50000, None), (10000, 49999), (5000, 9999), (2000, 4999), (1000, 19
 # be stable; a star ordering with an explicit range is the closest this API comes to a fixed order.
 DEFAULT_SORT = "stars"
 
+# How many head-commit lookups run at once. One per repository and fifty to a page,
+# so serial resolution is most of a page's wall time and all of it is latency. This is
+# the core API (5000/hour) rather than search (30/minute), so the ceiling is comfort
+# rather than quota -- but it stays small so one page cannot monopolise a token.
+HEAD_WORKERS = 8
+
 
 class GitHub:
     """Repository search, segmented so that more than a thousand results are reachable.
@@ -134,8 +140,9 @@ class GitHub:
             rows = self._fetch(self._query_for(self._segments[index]), offset + 1, size)
             if rows:
                 self._positions[number + 1] = self._after(index, offset, len(rows), size)
+                heads = self._heads_of(rows)
                 return all_or_nothing(rows, lambda row: to_candidate(
-                    row, scale=self._scale, commit=self._head_of(row)), index=self.name)
+                    row, scale=self._scale, commit=heads.get(id(row), "")), index=self.name)
             # An empty segment is not an exhausted index: there are more segments behind it. The
             # walk moves to the next one -- returning [] here would tell `walk()` that the whole of
             # GitHub had run out after one star range.
@@ -169,6 +176,38 @@ class GitHub:
         if got < size or (offset + 1) * size >= RESULT_CEILING:
             return (index + 1, 0)
         return (index, offset + 1)
+
+    def _heads_of(self, rows: list) -> dict:
+        """Every row's head commit, resolved CONCURRENTLY. -> {id(row): sha}.
+
+        One request per repository, and there are fifty rows to a page: resolved one after another
+        that is most of a page's wall time, and it is pure latency rather than work. A stack dump of
+        a live batch found the package and repo jobs both sitting here while module -- whose index
+        widens rather than pages -- ran normally.
+        (
+        The requests are independent, so the fix is to stop waiting for each in turn. Bounded at a
+        small number because this is the core API rather than search: generous enough to hide the
+        latency, small enough not to spend an hour's quota on one page.
+        )
+
+        A row whose head cannot be resolved gets "", and `to_candidate` turns that into a candidate
+        with no version -- which `filters.has_pinned_release` then refuses. That is the same outcome
+        as before; the failure is not swallowed, it is deferred to the filter that already had an
+        opinion about it.
+        """
+        if not self._pin:
+            return {}
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=HEAD_WORKERS) as pool:
+            futures = {id(row): pool.submit(self._head_of, row) for row in rows}
+            resolved = {}
+            for key, future in futures.items():
+                try:
+                    resolved[key] = future.result()
+                except Exception:                              # noqa: BLE001 -- one row, not a page
+                    resolved[key] = ""
+        return resolved
 
     def _head_of(self, row: dict) -> str:
         """The commit a repository's default branch currently points at, or "".

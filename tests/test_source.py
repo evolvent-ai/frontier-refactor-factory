@@ -393,3 +393,57 @@ def test_a_wide_chain_reports_its_total_as_unknown_rather_than_paying_for_it():
     Link.asked = 0
     assert QuotaChain([Link() for _ in range(63)]).total() is None
     assert Link.asked == 0
+
+
+def test_head_commits_for_a_page_are_resolved_concurrently():
+    """One request per repository, fifty rows to a page, and it was one after another.
+
+    That is pure latency rather than work: a stack dump of a live batch found the package and repo
+    jobs both sitting in `_head_of` while module -- whose index widens rather than pages -- ran
+    normally. The requests are independent.
+
+    A row whose head cannot be resolved still gets "", which `to_candidate` turns into a candidate
+    with no version and `filters.has_pinned_release` refuses. The failure is deferred to the filter
+    that already had an opinion, not swallowed.
+    """
+    import threading
+    import time
+
+    from frf.source.github import GitHub, HEAD_WORKERS
+
+    class Recording(GitHub):
+        def __init__(self):
+            self._pin = True
+            self.live = 0
+            self.peak = 0
+            self._lock = threading.Lock()
+
+        def _head_of(self, row):
+            with self._lock:
+                self.live += 1
+                self.peak = max(self.peak, self.live)
+            time.sleep(0.05)
+            with self._lock:
+                self.live -= 1
+            if row.get("full_name") == "broken/one":
+                raise RuntimeError("no head for this one")
+            return "a" * 40
+
+    index = Recording()
+    rows = [{"full_name": "o/r%d" % n, "default_branch": "main"} for n in range(16)]
+    rows.append({"full_name": "broken/one", "default_branch": "main"})
+
+    started = time.monotonic()
+    heads = index._heads_of(rows)
+    elapsed = time.monotonic() - started
+
+    assert len(heads) == len(rows)
+    assert index.peak > 1, "the lookups ran one at a time"
+    assert index.peak <= HEAD_WORKERS
+    # Seventeen serial lookups at 50ms each would be ~0.85s; concurrent they are a fraction of it.
+    assert elapsed < 0.5, elapsed
+    assert heads[id(rows[-1])] == "", "a row that cannot be resolved gets no commit, not an error"
+
+    # Pinning off means no lookups at all.
+    index._pin = False
+    assert index._heads_of(rows) == {}
