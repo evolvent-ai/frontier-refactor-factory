@@ -283,3 +283,36 @@ def test_the_real_scales_advance_across_successive_finds():
         assert first, "%s found nothing at all" % scale_name
         assert not set(first) & set(second), (
             "%s re-served its first page: %s then %s" % (scale_name, first, second))
+
+
+def test_a_restarted_roll_can_continue_the_supply_instead_of_re_mining_its_head(tmp_path, monkeypatch):
+    """Restarting re-walked from page one and re-produced what it had already produced.
+
+    Measured across four restarts of one batch: 55 emissions collapsed to 20 distinct subjects, so
+    roughly two thirds of the sandbox time was spent on material already emitted. `Memory` was built
+    to carry a seen-set between runs and nothing had ever given it a path.
+    """
+    from frf.core import sourcing
+    from frf.core.scale import Candidate
+
+    store = tmp_path / "seen.json"
+    monkeypatch.setenv("FRF_SOURCING_MEMORY", str(store))
+
+    class Owner:
+        pass
+
+    first = sourcing.batch_memory(Owner())
+    first.remember(Candidate(identity="github:a/b@c1", scale="repo", language="go", source="x"))
+    first.save()
+    assert store.exists()
+
+    # A LATER PROCESS, which is what a restart is: a fresh owner reading the same file.
+    resumed = sourcing.batch_memory(Owner())
+    assert Candidate(identity="github:a/b@c1", scale="repo", language="go",
+                     source="x") in resumed, "a restart must not rediscover what it already walked"
+    assert Candidate(identity="github:a/b@c2", scale="repo", language="go",
+                     source="x") not in resumed
+
+    # Unset, it stays in-process -- the right default for a one-shot run.
+    monkeypatch.delenv("FRF_SOURCING_MEMORY")
+    assert len(sourcing.batch_memory(Owner())) == 0

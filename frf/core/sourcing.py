@@ -141,12 +141,20 @@ def batch_memory(owner) -> Memory:
     `find(budget)` takes no memory argument, and threading one through three scales' signatures
     would put the fix in the callers rather than in the thing that has the state.
 
-    NOT PERSISTED. This is per-scale-instance and dies with the batch; the file-backed `Memory.load`
-    remains what carries refusals between runs.
+    PERSISTED WHEN `FRF_SOURCING_MEMORY` NAMES A FILE, and that turned out to matter far more than
+    it looks. A batch restarted four times -- to pick up fixes -- re-walked from page one each time
+    and re-emitted the same top candidates: 55 emissions collapsed to 20 distinct subjects, so about
+    two thirds of the sandbox time went on material already produced. `Memory` was built for exactly
+    this and nothing had ever handed it a path.
+
+    Unset, it stays per-instance and dies with the batch, which is the right default for a one-shot
+    run. Set, a restarted or resumed roll continues through the supply instead of re-mining its
+    head -- and the seen-set is a plain sorted JSON list somebody can read and prune.
     """
     existing = getattr(owner, "_batch_memory", None)
     if existing is None:
-        existing = Memory()
+        path = (os.environ.get("FRF_SOURCING_MEMORY") or "").strip()
+        existing = Memory.load(path) if path else Memory()
         try:
             owner._batch_memory = existing
         except Exception:                                  # noqa: BLE001 -- slotted/frozen owner
