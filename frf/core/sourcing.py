@@ -270,11 +270,18 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
     # Such an index says so, and keeps its own cursor instead: one integer whose meaning it owns
     # (for `github-functions`, the repository page it has walked to). Same memory, same key, same
     # persistence -- the index decides what the number counts.
+    # KEYED BY THE QUESTION, NOT BY THE CLASS THAT ASKS IT. Every job of a scale builds its own
+    # index of the same class and the same `name`, over a DIFFERENT search -- one topic set, one
+    # language. Storing the cursor under the class name made one job's progress move all of them:
+    # a job reaching repository page 40 sent eleven others to page 40 of a search they had never
+    # walked, skipping the material they existed to reach. An index that answers a narrower question
+    # says so in `cursor_key`.
+    key = str(getattr(index, "cursor_key", "") or index.name)
     if getattr(index, "resumable_pages", True):
-        page = max(int(getattr(index, "resume_page", 0) or 0), memory.resume_at(index.name))
+        page = max(int(getattr(index, "resume_page", 0) or 0), memory.resume_at(key))
     else:
         page = 0
-        stored = memory.resume_at(index.name)
+        stored = memory.resume_at(key)
         if stored and getattr(index, "cursor", 0) < stored:
             try:
                 index.cursor = stored
@@ -307,13 +314,13 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
             consecutive_errors = 0
             page += 1
             if getattr(index, "resumable_pages", True):
-                memory.reached(index.name, page)
+                memory.reached(key, page)
                 try:
                     index.resume_page = page
                 except Exception:                                  # noqa: BLE001 -- optional hook
                     pass
             else:
-                memory.reached(index.name, int(getattr(index, "cursor", 0) or 0))
+                memory.reached(key, int(getattr(index, "cursor", 0) or 0))
             log("%s: page %d returned %d row(s)" % (index.name, page - 1, len(batch)))
             for candidate in batch:
                 # Validate candidate has required fields; skip malformed ones.

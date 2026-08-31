@@ -160,7 +160,12 @@ def _chain_of_topics(cls, topics: tuple, language: str, *, scale: str = "repo",
 
     links = [cls(language=language, query="topic:%s" % topic, scale=scale, languages=languages)
              for topic in topics]
-    name = "github(%s)" % "|".join(topics)
+    # THE LANGUAGE IS PART OF THE NAME BECAUSE IT IS PART OF THE QUESTION. A walk cursor is stored
+    # against this name, and twelve jobs splitting one scale by language all answered to
+    # `github(algorithms|...)`: one job reaching repository page 40 sent every other job to page 40
+    # of a completely different search, skipping material none of them had seen. Page 7 of
+    # `topic:algorithms language:rust` has nothing to do with page 7 of the same topic in Go.
+    name = "github(%s%s)" % ("|".join(topics), ("+" + language) if language else "")
     return Chain(links, name=name) if quota <= 0 else QuotaChain(links, quota=quota, name=name)
 
 

@@ -210,6 +210,11 @@ class GitHubFunctions:
     resumable_pages = False
 
     @property
+    def cursor_key(self) -> str:
+        """What this instance is actually walking. The inner index names its topics and language."""
+        return "%s/%s" % (self.name, getattr(self._index, "name", ""))
+
+    @property
     def cursor(self) -> int:
         """The repository page reached. One integer, and this index says what it counts."""
         return self._source_page

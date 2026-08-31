@@ -37,6 +37,11 @@ class GitHubPackages:
     resumable_pages = False
 
     @property
+    def cursor_key(self) -> str:
+        """What this instance is actually walking. The inner index names its topics and language."""
+        return "%s/%s" % (self.name, getattr(self._index, "name", ""))
+
+    @property
     def cursor(self) -> int:
         return self._source_page
 

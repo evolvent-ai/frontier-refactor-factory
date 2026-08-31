@@ -541,3 +541,35 @@ def test_a_widening_index_is_not_resumed_by_page_number():
         assert second._source_page >= first._source_page, \
             "and its OWN cursor is what should have been restored"
         assert len(found) == 5
+
+
+def test_two_walks_of_different_questions_keep_separate_cursors():
+    """Every job of a scale builds its own index of the same class over a different search.
+
+    Storing the cursor under the class name made one job's progress move all of them: a job reaching
+    repository page 40 sent eleven others to page 40 of a search they had never walked, skipping the
+    material they existed to reach. Page 7 of `topic:algorithms language:rust` has nothing to do
+    with page 7 of the same topic in Go.
+    """
+    class _Asking(_FakeIndex):
+        name = "shared-class-name"
+
+        def __init__(self, question: str) -> None:
+            super().__init__(count=1000)
+            self.cursor_key = "%s/%s" % (self.name, question)
+
+    with tempfile.TemporaryDirectory() as work:
+        path = os.path.join(work, "seen.json")
+
+        rust = _Asking("rust")
+        list(sourcing.walk(rust, budget=40, page_size=10, memory=sourcing.Memory.load(path)))
+
+        go = _Asking("go")
+        go_page_asked: list = []
+        original = go.page
+        go.page = lambda number, *, size: (go_page_asked.append(number), original(number, size=size))[1]
+        list(sourcing.walk(go, budget=5, page_size=10, memory=sourcing.Memory.load(path)))
+
+        assert go_page_asked[0] == 0, (
+            "the go walk started at page %d -- it inherited the rust walk's cursor"
+            % go_page_asked[0])
