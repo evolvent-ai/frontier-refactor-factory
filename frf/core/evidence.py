@@ -269,6 +269,41 @@ def package_reproduces_itself(drive_shipped: Callable[[], tuple[int, int]]) -> V
                    "beside it" % (passed, total))
 
 
+def reproduces_in_its_own_image(drive_in_image: Callable[[], dict]) -> Verdict:
+    """E9 -- build the Dockerfile the task SHIPS, and run its verifier inside that.
+
+    E7 above drives the emitted package, but in the container that PRODUCED it. The task ships a
+    Dockerfile describing a different environment, and until this check existed nothing had ever
+    executed it -- so everything the battery established was about a machine the recipient will
+    never have.
+
+    Measured on a finished corpus: about forty JavaScript and TypeScript tasks shipped an image that
+    could not be built at all (`npm install -g yarn` against a base that already has one), and
+    twenty-five package tasks built and then reproduced an average of 18% of their own graded
+    probes. Every one of them had passed E7.
+
+    The verdict is deliberately three-way. A build that failed on the wire, or a sandbox we could not
+    open, is INCONCLUSIVE and ours to retry -- not a statement that the task is wrong.
+    """
+    outcome = drive_in_image()
+    if outcome.get("ok"):
+        return Verdict("reproduces-in-its-own-image", Outcome.HOLDS,
+                       str(outcome.get("detail") or "the shipped image reproduces the task"))
+    stage = str(outcome.get("stage") or "")
+    detail = str(outcome.get("detail") or "")[:600]
+    if stage in ("dockerfile", "unavailable"):
+        # "There was nothing to build" and "we could not open a sandbox" are both statements about
+        # this run, not about the task. INCONCLUSIVE is not ok -- a task still does not ship on it --
+        # but it is recorded as what it is rather than as a failure the material caused.
+        return Verdict("reproduces-in-its-own-image", Outcome.INCONCLUSIVE, detail)
+    if stage == "build":
+        return Verdict("reproduces-in-its-own-image", Outcome.FAILS,
+                       "the image this task ships does not build: %s" % detail)
+    if int(outcome.get("total") or 0) <= 0:
+        return Verdict("reproduces-in-its-own-image", Outcome.INCONCLUSIVE, detail)
+    return Verdict("reproduces-in-its-own-image", Outcome.FAILS, detail)
+
+
 def seed_independent(freeze_under_seed: Callable[[int], str], seeds: list[int]) -> Verdict:
     """E8 -- the expectations must not depend on this run's hash ordering.
 

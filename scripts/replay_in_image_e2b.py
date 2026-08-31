@@ -69,172 +69,18 @@ _TRANSPORT = (
 )
 
 
-def _tar_bytes(root: str) -> bytes:
-    """The task directory as a tar stream, deterministically ordered."""
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as archive:
-        for directory, dirs, files in os.walk(root):
-            dirs[:] = sorted(d for d in dirs if d not in _SKIP)
-            for name in sorted(files):
-                full = os.path.join(directory, name)
-                archive.add(full, arcname=os.path.relpath(full, root))
-    return buffer.getvalue()
-
-
 def replay_one(task_dir: str, api_key: str, template: str) -> dict:
-    """Build this task's own image in E2B and run its verifier inside it. -> a result record."""
-    from e2b import Sandbox
+    """Build this task's own image in E2B and run its verifier inside it. -> a result record.
 
-    name = os.path.basename(task_dir.rstrip("/"))
-    started = time.monotonic()
-    record = {"task": name, "path": task_dir, "ok": False, "stage": "", "detail": "",
-              "seconds": 0.0}
+    ONE IMPLEMENTATION, SHARED WITH THE GATE. This began here, as a tool run after a corpus was
+    finished -- which is to say, a tool whose findings arrive too late. `frf.observe.in_image` is
+    now the same code the pipeline runs before it attests anything, so what this audits is exactly
+    what that enforces. Two copies would drift, and the drift would be invisible in precisely the
+    way both of them exist to prevent.
+    """
+    from frf.observe import in_image
 
-    dockerfile = os.path.join(task_dir, "environment", "Dockerfile")
-    if not os.path.isfile(dockerfile):
-        record.update(stage="dockerfile", detail="no environment/Dockerfile to build")
-        return record
-
-    sandbox = None
-    try:
-        sandbox = Sandbox.create(template=template, timeout=BUILD_TIMEOUT + REPLAY_TIMEOUT,
-                                 api_key=api_key, request_timeout=OPEN_TIMEOUT)
-        remote = "/tmp/frf-replay-%d" % (abs(hash(task_dir)) % 10 ** 10)
-        sandbox.commands.run("mkdir -p %s" % remote, timeout=30, request_timeout=60)
-        sandbox.files.write("%s/task.tar" % remote, _tar_bytes(task_dir),
-                            request_timeout=TRANSFER_TIMEOUT)
-        sandbox.commands.run("tar -xf %s/task.tar -C %s" % (remote, remote),
-                             timeout=120, request_timeout=180)
-        # THE MOUNT HAS TO BE USABLE BY THE USER THE IMAGE DECLARES. The task images run as
-        # `nobody`; this directory is extracted as root, and a submission that cannot write beside
-        # its own sources dies at startup. The verifier reports that honestly -- "the submission
-        # stopped answering" -- and it read as fifty-eight tasks whose expectations did not
-        # reproduce. Run as root the same task answered 57 of 57.
-        #
-        # `a+rwX` rather than a chown: the image's user id is the image's business, and this tool
-        # must not need to know it to hand over a workspace.
-        sandbox.commands.run("chmod -R a+rwX %s" % remote, timeout=120, request_timeout=180)
-
-        scale = ""
-        try:
-            with open(os.path.join(task_dir, "task.toml"), encoding="utf-8") as handle:
-                for line in handle:
-                    if line.strip().startswith("scale = "):
-                        scale = line.split("=", 1)[1].strip().strip('"')
-                        break
-        except OSError:
-            pass
-        is_repo = scale == "repo"
-        record["scale"] = scale
-
-        # Truncating a name can leave a trailing separator, and docker rejects the tag outright:
-        # `invalid tag "frf-replay-matrix-js-sdk-should-use-hydra-for-room-"`. The task was fine;
-        # only our label for it was not, and it read in the report as a task that would not build.
-        tag = "frf-replay-%s" % re.sub(r"[^a-z0-9_.-]", "-",
-                                       name.lower())[:40].strip("-._") or "frf-replay-task"
-        # THE WIRE IS NOT THE MATERIAL, HERE TOO. A build inside DinD reaches the network for a base
-        # image, for apt and for npm, and those fail transiently: `tls: bad record MAC`, a Debian
-        # mirror timing out, a registry 503. Counted as failures they say a task is unbuildable when
-        # the task is fine, and a whole corpus then reads as broken -- which is exactly what a first
-        # run of this tool reported. A retry costs a minute and is the difference between measuring
-        # the tasks and measuring the network.
-        record["stage"] = "build"
-        built = None
-        for attempt in range(BUILD_ATTEMPTS):
-            built = sandbox.commands.run(
-                "docker build --pull -t %s %s/environment" % (tag, remote),
-                timeout=BUILD_TIMEOUT, request_timeout=BUILD_TIMEOUT + 120)
-            if built.exit_code == 0:
-                break
-            output = ((built.stdout or "") + (built.stderr or ""))
-            if attempt < BUILD_ATTEMPTS - 1 and any(mark in output for mark in _TRANSPORT):
-                time.sleep(5.0 * (attempt + 1))
-                continue
-            break
-        if built is None or built.exit_code != 0:
-            record["detail"] = ((built.stdout or "") + (built.stderr or ""))[-700:] if built else ""
-            return record
-
-        # THE VERIFIER, INSIDE THE IMAGE, against the reference the task ships -- driven exactly as
-        # the host-side E7 drives it, because a difference in HOW it is driven would show up as an
-        # environment difference and this tool would be lying about which one it found.
-        #
-        # THE TWO SEAMS ARE DRIVEN DIFFERENTLY, and assuming otherwise is how the first run of this
-        # tool "failed" a task that was fine: the repo scale takes `--self-replay` and writes
-        # REWARD_PATH, while the call seam takes a workspace pointing at the shipped reference and
-        # reports on STDOUT. Read `observe/call/package.drive` and `observe/checkout_task.drive`
-        # together before changing either of these.
-        record["stage"] = "replay"
-        if is_repo:
-            command = ("REWARD_PATH=/tmp/reward.json python3 tests/verify.py "
-                       "--task-root tests --workspace environment --self-replay; "
-                       "cat /tmp/reward.json 2>/dev/null")
-        else:
-            command = ("REWARD_PATH=/tmp/reward.json SUBMISSION_ROOT=tests/reference "
-                       "python3 tests/verify.py --task-root tests --workspace tests/reference; "
-                       "cat /tmp/reward.json 2>/dev/null")
-        replay = sandbox.commands.run(
-            "docker run --rm -v %s:/task -w /task %s sh -c %s"
-            % (remote, tag, json.dumps(command)),
-            timeout=REPLAY_TIMEOUT, request_timeout=REPLAY_TIMEOUT + 120)
-        # Either seam may report on stdout or in the file; take whichever carries a graded total,
-        # and keep stderr for the message when neither does.
-        blob = (replay.stdout or "") + "\n" + (replay.stderr or "")
-        # SCANNED AS OBJECTS, NOT AS LINES. The report is pretty-printed, so a line-oriented parse
-        # sees `{` alone and finds nothing -- which reads as "the verifier said nothing" when it in
-        # fact said 57/57. Walk the blob and decode each balanced object.
-        report = None
-        decoder = json.JSONDecoder()
-        position = 0
-        while True:
-            start = blob.find("{", position)
-            if start < 0:
-                break
-            try:
-                value, end = decoder.raw_decode(blob, start)
-            except ValueError:
-                position = start + 1
-                continue
-            position = end
-            if isinstance(value, dict) and "correctness_total" in value:
-                report = value
-        if report is None:
-            record["detail"] = "verifier produced no graded report: " + blob.strip()[-700:]
-            return record
-
-        passed = int(report.get("correctness_passed", 0))
-        total = int(report.get("correctness_total", 0))
-        record.update(passed=passed, total=total)
-        if total <= 0:
-            record["detail"] = "the shipped verifier graded nothing inside the image"
-        elif passed == total:
-            record.update(ok=True, stage="", detail="%d/%d inside the delivered image"
-                                                    % (passed, total))
-        else:
-            # CARRY THE VERIFIER'S OWN NOTE. Without it every disagreement read as one sentence --
-            # "the expectations were frozen somewhere this image does not reproduce" -- for fifty-
-            # eight tasks whose causes were not the same thing at all, and the tool that exists to
-            # find defects could not say which defect it had found.
-            record["note"] = str(report.get("note", ""))[:400]
-            record["detail"] = ("%d/%d inside the delivered image%s" % (
-                passed, total, (" -- %s" % record["note"]) if record["note"] else
-                " -- the expectations were frozen somewhere this image does not reproduce"))
-        return record
-    except Exception as exc:                                   # noqa: BLE001 -- reported, not raised
-        # THE TAIL, NOT THE HEAD. A failed `docker build` puts its banner first and the reason
-        # last, so a head-truncated message reads `#0 building with "default" ins` for every
-        # distinct failure -- 101 tasks reported an identical, useless line.
-        message = str(exc)
-        keep = message if len(message) <= 900 else "...%s" % message[-900:]
-        record["detail"] = "%s: %s" % (type(exc).__name__, " ".join(keep.split()))
-        return record
-    finally:
-        record["seconds"] = round(time.monotonic() - started, 1)
-        if sandbox is not None:
-            try:
-                sandbox.kill(request_timeout=30)
-            except Exception:                                  # noqa: BLE001 -- teardown
-                pass
+    return in_image.drive(task_dir, api_key=api_key, template=template)
 
 
 def _task_dirs(root: str) -> list[str]:

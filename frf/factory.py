@@ -131,7 +131,11 @@ class Factory:
         repo scale and a package scale share their freeze exactly when they share a seam, so binding
         stages to scales would make each scale reimplement half a pipeline.
         """
-        unknown = set(stages) - {"build", "freeze", "adequacy", "battery", "emit", "replay"}
+        # `replay_in_image` is OPTIONAL and the only one that is: it builds the Dockerfile the task
+        # ships and drives the verifier inside it, which needs a docker-capable sandbox. A run
+        # without one still emits, and records that the check did not run rather than that it held.
+        unknown = set(stages) - {"build", "freeze", "adequacy", "battery", "emit", "replay",
+                                 "replay_in_image"}
         if unknown:
             raise ValueError("unknown stage(s): %s" % ", ".join(sorted(unknown)))
         self._defaults.update(stages)
@@ -390,6 +394,11 @@ class Factory:
                 "scale observes through; scale %r supplied neither an override nor a seam that "
                 "provides one." % (stage, getattr(scale, "name", scale)))
 
+        # OPTIONAL, so `resolve` is not the right shape for it: a scale that supplies nothing here
+        # is not an error, it is a run that ships without the in-image gate and says so.
+        in_image = getattr(scale, "replay_in_image", None) or self._defaults.get("replay_in_image")
+
         return pipeline.Hooks(build=resolve("build"), freeze=resolve("freeze"),
                               adequacy=resolve("adequacy"), battery=resolve("battery"),
-                              emit=resolve("emit"), replay=resolve("replay"))
+                              emit=resolve("emit"), replay=resolve("replay"),
+                              replay_in_image=in_image)

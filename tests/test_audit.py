@@ -183,3 +183,26 @@ def test_the_report_is_json_serialisable_and_stable(tmp_path):
     assert [(c["scale"], c["language"]) for c in first["cells"]] == [
         ("module", "python"), ("repo", "go")]
     assert first == audit.report(str(tmp_path))
+
+
+def test_the_in_image_check_is_decisive_when_it_ran_and_silent_when_it_did_not():
+    """A corpus produced before the gate existed carries no such verdict.
+
+    Demanding one would retro-fail every task rather than describe it. Demanding nothing would let a
+    task that FAILED the gate stay attested, which is the whole point of adding it.
+    """
+    from frf.core.audit import _status_from, ATTESTED, PARTIAL
+
+    def record(extra):
+        checks = [{"check": "ceiling", "outcome": "holds"},
+                  {"check": "floor", "outcome": "holds"},
+                  {"check": "package-reproduces-itself", "outcome": "holds"}] + extra
+        return {"checks_held": len(checks), "checks_total": len(checks),
+                "backend": "remote", "checks": checks}
+
+    assert _status_from({}, record([]))[0] == ATTESTED, "silent when it did not run"
+    assert _status_from({}, record(
+        [{"check": "reproduces-in-its-own-image", "outcome": "holds"}]))[0] == ATTESTED
+    assert _status_from({}, record(
+        [{"check": "reproduces-in-its-own-image", "outcome": "fails"}]))[0] != ATTESTED, \
+        "a task that failed the gate must not stay attested"

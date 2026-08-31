@@ -372,3 +372,58 @@ def test_a_probe_generator_that_broke_itself_is_not_charged_to_the_material():
     assert ours.batch.refused[0].fault is pipeline.Fault.FACTORY, ours.batch.refused[0].to_json()
     assert theirs.batch.refused[0].fault is pipeline.Fault.MATERIAL, \
         theirs.batch.refused[0].to_json()
+
+
+def test_a_task_whose_own_image_will_not_build_does_not_ship():
+    """Every other gate measures the container the task was PRODUCED in.
+
+    The task ships a Dockerfile describing a different environment, and nothing had ever executed
+    it. About forty JavaScript and TypeScript tasks in a finished corpus shipped an image that could
+    not be built at all -- the node base already carries a yarn and npm 9 will not overwrite it --
+    and every one of them was attested. The image is something this factory wrote, so a failure here
+    is ours.
+    """
+    class Scale(_ToyScale):
+        name = "unbuildable"
+
+    stages = _stages()
+    stages["replay_in_image"] = lambda path: {
+        "ok": False, "stage": "build", "passed": 0, "total": 0,
+        "detail": "npm error File exists: /usr/local/bin/yarn"}
+
+    result = Factory().register(Scale()).install_stages(**stages).build("unbuildable", budget=1)
+
+    assert len(result) == 0, "a task that cannot be built must not be emitted"
+    refusal = result.batch.refused[0]
+    assert refusal.reason == "does-not-reproduce-in-its-own-image", refusal.to_json()
+    assert refusal.fault is pipeline.Fault.FACTORY, "we wrote the Dockerfile, not the candidate"
+
+
+def test_no_sandbox_is_not_a_verdict_about_the_task():
+    """"We could not ask" and "the task is wrong" must not arrive as the same outcome.
+
+    A run without a docker-capable sandbox still emits, and records that the check did not run
+    rather than that it held -- INCONCLUSIVE is not ok, so nothing is promoted on it, but the task
+    is not refused for a sandbox this run could not open.
+    """
+    from frf.core import evidence
+
+    unavailable = evidence.reproduces_in_its_own_image(
+        lambda: {"ok": False, "stage": "unavailable", "detail": "could not open a build sandbox"})
+    assert unavailable.outcome is evidence.Outcome.INCONCLUSIVE
+    assert not unavailable.ok, "a task must not ship on a check that did not run"
+
+    broken = evidence.reproduces_in_its_own_image(
+        lambda: {"ok": False, "stage": "replay", "passed": 3, "total": 57,
+                 "detail": "3/57 inside the delivered image", "note": "probe-0000 differed"})
+    assert broken.outcome is evidence.Outcome.FAILS
+
+
+def test_a_run_without_the_gate_emits_exactly_as_before():
+    """The gate is optional, and its absence must not be a silent refusal or a silent pass."""
+    result = (Factory().register(_ToyScale()).install_stages(**_stages())
+              .build(_ToyScale.name, budget=1))
+    assert len(result) == 1
+    checks = {v["check"] for v in result.batch.emitted[0].battery}
+    assert "reproduces-in-its-own-image" not in checks, \
+        "a check that never ran must not appear in the attestation as though it had"

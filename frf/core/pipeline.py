@@ -147,6 +147,12 @@ class Hooks:
     battery: Callable
     emit: Callable
     replay: Callable
+    # OPTIONAL, AND THE ONLY GATE THAT OPENS THE DELIVERED IMAGE. `replay` above drives the emitted
+    # task in the container that produced it; this builds the Dockerfile the task ships and drives
+    # it in there. Optional because it costs a median of 52 seconds and needs a docker-capable
+    # sandbox -- a development run without one still emits, and says the check was not run rather
+    # than pretending it held.
+    replay_in_image: Callable | None = None
 
 
 def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
@@ -373,6 +379,28 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     battery.record(verdict)
     if not verdict.ok:
         raise Stage("emit", "package-does-not-reproduce-itself", Fault.FACTORY, verdict.detail)
+
+    # E9 -- THE SAME QUESTION, ASKED OF THE IMAGE THE TASK SHIPS. Everything above, E7 included, ran
+    # in the container that produced this task. The Dockerfile beside it describes a different
+    # environment and had never been executed by anything, so a task could pass every gate here and
+    # still be undeliverable. About forty JavaScript and TypeScript tasks in one finished corpus
+    # shipped an image that would not build; twenty-five package tasks built and reproduced an
+    # average of 18% of their own probes. All of them were attested.
+    #
+    # OURS WHEN IT FAILS. The image is something this factory wrote, in a format the candidate did
+    # not choose, so a task that will not build or will not reproduce inside its own image is a bug
+    # here and not a fact about the material.
+    if hooks.replay_in_image is not None:
+        log("stage in-image: start")
+        try:
+            in_image = evidence.reproduces_in_its_own_image(lambda: hooks.replay_in_image(path))
+        except OSError as why:
+            raise Stage("emit", "in-image-transport-failed", Fault.FACTORY, str(why)[:2000])
+        battery.record(in_image)
+        if in_image.outcome is evidence.Outcome.FAILS:
+            raise Stage("emit", "does-not-reproduce-in-its-own-image", Fault.FACTORY,
+                        in_image.detail)
+        log("in-image: %s" % in_image.detail)
 
 
     # Purge bytecode left by replay. The E7 step executes the reference Python implementation

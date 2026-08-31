@@ -169,6 +169,14 @@ def _chain_of_topics(cls, topics: tuple, language: str, *, scale: str = "repo",
     return Chain(links, name=name) if quota <= 0 else QuotaChain(links, quota=quota, name=name)
 
 
+# WHETHER THE IN-IMAGE GATE RUNS. An environment variable rather than a parameter threaded through
+# `run()`'s twenty arguments: the gate is a property of the RUN, like the sandbox backend, and every
+# caller of `run` would otherwise have to learn about it to pass it along unchanged.
+def _in_image_gate_enabled() -> bool:
+    return (os.environ.get("FRF_IN_IMAGE_GATE") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+
 def _merge_reports(reports, index_name, elapsed):
     summary = {"attempted": 0, "emitted": 0, "yield_rate": 0.0,
                "refused_material": 0, "refused_factory": 0,
@@ -431,7 +439,26 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
                 "scale %s has no Harbor writer; refusing to emit an incomplete task" % name)
         seam = process_stages.Seam(implementation, destination=output_dir,
                                    write_tests=method, drive=implementation.drive)
-    factory.install_stages(**seam.stages())
+    stages = dict(seam.stages())
+    # THE IN-IMAGE GATE, WHEN THE RUN ASKED FOR ONE. Installed here rather than inside a seam
+    # because it is the same for both seams -- it builds the Dockerfile the task ships and drives
+    # whatever verifier is in there, and `in_image.drive` already knows which seam it is looking at.
+    #
+    # Off unless asked: it costs a median of 52 seconds per task and needs a docker-capable sandbox.
+    # A run without it emits exactly as before, and the attestation records that the check did not
+    # run rather than that it held.
+    if _in_image_gate_enabled():
+        from .core import credentials
+        from .observe import in_image
+        key = credentials.get("E2B_API_KEY") or ""
+        template = credentials.get("E2B_DIND_TEMPLATE") or credentials.get("E2B_TEMPLATE") or ""
+        if key and template:
+            stages["replay_in_image"] = (
+                lambda path: in_image.drive(path, api_key=key, template=template,
+                                            log=lambda m: print("[in-image] %s" % m, flush=True)))
+        else:
+            print("[in-image] no E2B_DIND_TEMPLATE configured; the gate cannot run", flush=True)
+    factory.install_stages(**stages)
     started = time.perf_counter()
     try:
         result = factory.build(name, budget, candidates=candidates)

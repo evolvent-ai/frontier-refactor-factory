@@ -49,6 +49,11 @@ STATUSES = (ATTESTED, PARTIAL, ATTESTED_FAILING, UNRECORDED)
 # subject, which is what makes them the dividing line.
 DECISIVE_CHECKS = ("ceiling", "floor", "package-reproduces-itself")
 
+# Decisive too, but only for a corpus produced WITH the gate. A task emitted before the gate existed
+# carries no such verdict, and demanding one would retro-fail every task in the corpus rather than
+# describe it -- so it is decisive when present and silent when absent, and `audit` reports which.
+CONDITIONAL_CHECKS = ("reproduces-in-its-own-image",)
+
 
 @dataclass(frozen=True)
 class Subject:
@@ -153,6 +158,10 @@ def _status_from(meta: dict, record: dict) -> tuple[str, str, int, int]:
         return ATTESTED_FAILING, backend, held, total
     decisive_held = all(outcomes.get(name) in ("holds", "not-applicable")
                         for name in DECISIVE_CHECKS)
+    # A conditional check that RAN and did not hold demotes the task; one that never ran does not.
+    decisive_held = decisive_held and all(
+        outcomes.get(name) in ("holds", "not-applicable")
+        for name in CONDITIONAL_CHECKS if name in outcomes)
     return (ATTESTED if decisive_held else PARTIAL), backend, held, total
 
 
