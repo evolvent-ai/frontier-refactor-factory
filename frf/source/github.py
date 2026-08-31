@@ -249,8 +249,33 @@ class GitHub:
         branch = str(row.get("default_branch") or "")
         if not full_name or not branch:
             return ""
-        payload = self._http.json(COMMIT % (full_name, quote(branch)),
-                                  accept="application/vnd.github+json")
+        # ROTATED LIKE EVERY OTHER REQUEST. `_fetch` takes a token from the pool for each search;
+        # this did not, so a pool of eight tokens spent the whole batch on one of them. GitHub's
+        # core limit is per token, so that is 5000 requests an hour where 40000 were available --
+        # and one page pins fifty repositories, which is what starved the scales that page most.
+        #
+        # Its own client instance, because `Http` carries the token on itself and these run
+        # concurrently: sharing one and reassigning `.token` per call would race, and the request
+        # that lost would go out under another thread's credential.
+        # ONLY WHEN THERE IS A REAL CLIENT TO ROTATE. A caller may inject its own `Http` -- the
+        # tests do, to answer without a network -- and replacing it here would bypass the thing the
+        # caller supplied and put this method on a different code path than the rest of the class.
+        token = self._pool.get_token() or "" if isinstance(self._http, Http) else ""
+        client = Http(token=token) if token else self._http
+        payload = client.json(COMMIT % (full_name, quote(branch)),
+                              accept="application/vnd.github+json")
+        if token:
+            headers = getattr(client, "last_headers", {}) or {}
+            try:
+                remaining = int(headers.get("x-ratelimit-remaining"))
+            except (TypeError, ValueError):
+                remaining = None
+            try:
+                reset = float(headers.get("x-ratelimit-reset"))
+                reset = time.monotonic() + (reset - time.time())
+            except (TypeError, ValueError):
+                reset = time.monotonic() + 60.0
+            self._pool.report_rate_limit(token, remaining, reset)
         return str(payload.get("sha") or "")
 
     def _query_for(self, segment) -> str:

@@ -494,3 +494,40 @@ def test_head_lookups_are_bounded_across_the_whole_process():
     assert peak <= github.HEAD_WORKERS, (
         "six concurrent pages reached %d lookups at once; the gate bounds the process" % peak)
     assert peak > 1, "the lookups should still overlap within the ceiling"
+
+
+def test_head_lookups_spend_the_whole_token_pool():
+    """`_fetch` rotated tokens for every search; `_head_of` did not, and it makes more requests.
+
+    GitHub's core limit is per token. A pool of eight spent the entire batch on one of them, so
+    5000 requests an hour were available where 40000 were -- and one page pins fifty repositories,
+    which starved exactly the scales that page rather than widen.
+    """
+    from frf.source.github import GitHub
+
+    used = []
+
+    class Pool:
+        def get_token(self):
+            used.append("t%d" % len(used))
+            return used[-1]
+
+        def report_rate_limit(self, token, remaining, reset):
+            used.append("reported:%s" % token)
+
+    class Index(GitHub):
+        def __init__(self):
+            self._pin = True
+            self._pool = Pool()
+            self._http = None                     # forces the injected-client branch off
+
+    index = Index()
+    # With no real client to rotate, the method must not invent one -- that is the branch the
+    # tests' injected clients rely on.
+    assert index._head_of({"full_name": "", "default_branch": ""}) == ""
+    assert used == [], "no token should be drawn when there is nothing to look up"
+
+    import inspect
+    source = inspect.getsource(GitHub._head_of)
+    assert "self._pool.get_token()" in source, "head lookups must draw from the pool"
+    assert "report_rate_limit" in source, "and report what the response said about the limit"
