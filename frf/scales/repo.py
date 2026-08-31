@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import glob
+import re
 import json
 import shutil
 import subprocess
@@ -514,8 +515,18 @@ def _discover_entrypoint(root: str) -> tuple:
         if os.path.isfile(os.path.join(root, rel)):
             return [], ["python", "{ROOT}/" + rel]
 
-    # 3a. A root-level Go main is a common single-binary layout.
-    if os.path.isfile(os.path.join(root, "main.go")) and os.path.isfile(os.path.join(root, "go.mod")):
+    # 3a. A root-level Go main is a common single-binary layout -- and it is NOT always `main.go`.
+    #
+    # Go names the entry file by convention rather than by rule: `goawk.go`, `cli.go` and
+    # `<project>.go` are all ordinary, and only `package main` is load-bearing. Matching the
+    # filename rejected real command-line programs as having no entry point at all -- goawk, an AWK
+    # implementation whose whole purpose is to be run, was refused that way, and 93 of 107 repo
+    # `could-not-specify` refusals were this message.
+    #
+    # So the declaration is read instead of the name. Only the ROOT is scanned, and only its own
+    # files: a `package main` deeper in the tree is what rule 5 (`cmd/<name>`) is for, and walking
+    # the whole tree here would find test helpers and examples.
+    if os.path.isfile(os.path.join(root, "go.mod")) and _has_go_main(root):
         return ([["go", "build", "-o", "{ROOT}/program", "."]], ["{ROOT}/program"])
 
     # 3b. A root-level Rust binary target is declared in Cargo.toml.
@@ -1812,3 +1823,29 @@ def main():
 if __name__ == "__main__":
     raise SystemExit(main())
 '''
+
+
+def _has_go_main(root: str) -> bool:
+    """Whether any file directly in `root` declares `package main` with a `func main`.
+
+    Both halves are needed. `package main` alone appears in a file that only holds helpers for the
+    real entry point, and `func main` alone appears in a doc comment or a string; together they are
+    what `go build .` will actually produce a binary from.
+
+    Read rather than parsed: this runs on every sourced repository and a real parse would cost more
+    than the clone it is deciding about. Test files are skipped because `go build` skips them.
+    """
+    try:
+        names = [n for n in os.listdir(root) if n.endswith(".go") and not n.endswith("_test.go")]
+    except OSError:
+        return False
+    for name in sorted(names)[:60]:
+        try:
+            with open(os.path.join(root, name), encoding="utf-8", errors="replace") as handle:
+                text = handle.read(20000)
+        except OSError:
+            continue
+        if re.search(r"^\s*package\s+main\b", text, re.M) and re.search(r"^\s*func\s+main\s*\(",
+                                                                        text, re.M):
+            return True
+    return False

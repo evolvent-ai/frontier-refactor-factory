@@ -103,3 +103,44 @@ def test_a_survey_does_not_carry_the_host_path_into_a_task():
     # The parts the verifier actually needs survive.
     assert shipped["languages"] == ["go"]
     assert shipped["build_markers"] == ["go.mod"]
+
+
+def test_a_go_program_is_found_whatever_its_entry_file_is_called():
+    """Go names the entry file by convention, not by rule; only `package main` is load-bearing.
+
+    Matching `main.go` rejected real command-line programs as having no entry point at all. goawk --
+    an AWK implementation whose entire purpose is to be run -- declares its main in `goawk.go`, and
+    93 of 107 repo `could-not-specify` refusals carried this message.
+
+    Both halves of the declaration are required: `package main` alone appears in files holding
+    helpers for the real entry point, and `func main` alone appears in comments and strings.
+    """
+    import os
+    import tempfile
+
+    from frf.scales.repo import _discover_entrypoint, _has_go_main
+
+    def make(files):
+        root = tempfile.mkdtemp()
+        for name, body in files.items():
+            os.makedirs(os.path.join(root, os.path.dirname(name)) or root, exist_ok=True)
+            with open(os.path.join(root, name), "w", encoding="utf-8") as handle:
+                handle.write(body)
+        return root
+
+    program = make({"go.mod": "module github.com/benhoyt/goawk\n",
+                    "goawk.go": "package main\n\nfunc main() {\n\tprintln(1)\n}\n"})
+    assert _has_go_main(program)
+    assert _discover_entrypoint(program)[1], "a Go program must be runnable whatever its file is called"
+
+    # `main.go` obviously still works.
+    assert _has_go_main(make({"go.mod": "module x\n",
+                              "main.go": "package main\nfunc main(){}\n"}))
+
+    # A library declares no main and must stay refused -- the process seam has nothing to run.
+    assert not _has_go_main(make({"go.mod": "module x\n", "lib.go": "package lib\nfunc F(){}\n"}))
+    # `package main` without an entry point is a helper file, not a program.
+    assert not _has_go_main(make({"go.mod": "module x\n", "helper.go": "package main\nfunc h(){}\n"}))
+    # Test files are skipped, because `go build` skips them.
+    assert not _has_go_main(make({"go.mod": "module x\n",
+                                  "x_test.go": "package main\nfunc main(){}\n"}))
