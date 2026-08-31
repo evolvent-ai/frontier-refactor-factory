@@ -206,6 +206,21 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
         index.last_coverage = coverage
     except Exception:
         pass
+    # TELL THE INDEX WHAT IS ALREADY SPENT, so it can decline the expensive part.
+    #
+    # The dedup below happens AFTER `index.page()` returns, which is correct for a plain registry --
+    # a row is cheap. A WIDENING index is not: `github-functions` downloads and tree-sitter-mines
+    # every repository a page names before yielding anything, so filtering afterwards pays the whole
+    # cost for material that is then discarded. With a seeded seen-set that is most of the cost:
+    # a restarted roll spent nine minutes re-mining repositories it had already produced from and
+    # made one attempt.
+    #
+    # Best-effort, exactly like `last_coverage` above: an index that does not want this ignores it,
+    # and the dedup below still holds. Nothing here depends on the index honouring it.
+    try:
+        index.already_seen = memory.seen
+    except Exception:                                          # noqa: BLE001 -- optional hook
+        pass
     produced = 0
     page = 0
     consecutive_errors = 0

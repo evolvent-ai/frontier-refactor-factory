@@ -316,3 +316,42 @@ def test_a_restarted_roll_can_continue_the_supply_instead_of_re_mining_its_head(
     # Unset, it stays in-process -- the right default for a one-shot run.
     monkeypatch.delenv("FRF_SOURCING_MEMORY")
     assert len(sourcing.batch_memory(Owner())) == 0
+
+
+def test_a_widening_index_is_told_what_is_already_spent():
+    """Dedup after `page()` is free for a registry and ruinous for a widening index.
+
+    `github-functions` downloads and tree-sitter-mines every repository a page names BEFORE
+    yielding anything, and `walk` filters afterwards -- so a seeded seen-set pays the whole mining
+    cost for material it then discards. A restarted roll spent nine minutes re-mining repositories
+    it had already produced from and made one attempt.
+
+    The hook is best-effort, like `last_coverage`: an index that ignores it still gets correct
+    dedup from the loop below, just slowly.
+    """
+    from frf.core import sourcing
+    from frf.core.scale import Candidate
+    from frf.source.functions import _already_drawn_from
+
+    class Widening:
+        name = "widening"
+        already_seen = None
+
+        def total(self):
+            return 2
+
+        def page(self, number, *, size=50):
+            if number:
+                return []
+            return [Candidate(identity="github:a/b@c1", scale="module", language="go",
+                              source="widening")]
+
+    index = Widening()
+    memory = sourcing.Memory(seen={"github:a/b@c1#src/x.go.F"})
+    list(sourcing.walk(index, 1, memory=memory))
+    assert index.already_seen is not None, "walk must offer the seen-set to the index"
+    assert "github:a/b@c1#src/x.go.F" in index.already_seen
+
+    # And the widening index's own predicate treats a repository as spent once anything from it was.
+    assert _already_drawn_from("github:a/b@c1", index.already_seen)
+    assert not _already_drawn_from("github:other/repo@c9", index.already_seen)

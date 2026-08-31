@@ -148,7 +148,16 @@ class PythonFunctions:
         misbehaved, and that is `self._packages`' business -- it raises, and the raise travels.
         """
         found = []
+        spent = getattr(self, "already_seen", None) or ()
         for candidate in self._packages.page(number, size=size):
+            # A REPOSITORY ALREADY DRAWN FROM IS NOT WORTH MINING AGAIN, and the saving is this
+            # page's whole cost: `materialise` downloads it and `scan` parses every file, and the
+            # dedup in `sourcing.walk` only runs afterwards. A restarted roll with a seeded seen-set
+            # spent nine minutes re-mining repositories it had already produced from, and made one
+            # attempt. `max_per_repository` already caps how many tasks one repository contributes,
+            # so returning to one is waste even when it has functions left.
+            if spent and _already_drawn_from(candidate.identity, spent):
+                continue
             detail = candidate.detail or {}
             name = str(detail.get("package") or "")
             version = str(detail.get("version") or "")
@@ -431,3 +440,15 @@ def to_candidate(function: Function, *, scale: str = "module",
             "package": function.package, "version": function.version,
             "module": function.module,
         })
+
+
+def _already_drawn_from(identity: str, spent) -> bool:
+    """Whether anything already walked came out of this repository. -> True to skip it.
+
+    A function identity is its repository's plus a `#path.symbol` suffix, so the repository is a
+    prefix of everything mined from it. Checked as a prefix rather than by parsing, because the
+    suffix separator differs between the scales that use this.
+    """
+    if identity in spent:
+        return True
+    return any(seen.startswith(identity + "#") for seen in spent)
