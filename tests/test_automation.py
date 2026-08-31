@@ -502,3 +502,16 @@ def test_the_repository_cap_survives_a_scale_being_split_into_language_jobs():
 
     reset_shared()
     assert shared_policy("package", max_per_repository=2) is not go_job
+
+
+def test_a_job_that_attempted_nothing_is_not_trustworthy():
+    """Seeded True and ANDed across the reports, `trustworthy` survives an empty list.
+
+    A job whose sourcing returned nothing therefore reported `attempted: 0, trustworthy: true`, which
+    reads as "the material is not there" when it means "we never got to ask". Twelve jobs reported
+    exactly that in forty-five seconds and the batch declared itself done. `Roll.trustworthy` has
+    always required `attempted > 0`; the merge of several rolls needs the same floor.
+    """
+    merged = _merge_reports([], "github-functions", 45.0).summary
+    assert merged["attempted"] == 0
+    assert merged["trustworthy"] is False, "nothing was measured, so nothing is trusted"

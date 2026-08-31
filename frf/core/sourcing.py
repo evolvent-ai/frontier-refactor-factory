@@ -185,7 +185,7 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
          keep: Callable[[Candidate], bool] | None = None,
          language_filter: str | None = None,
          max_seconds: float | None = None,
-         log: Callable[[str], None] = lambda _m: None) -> Iterator[Candidate]:
+         log: Callable[[str], None] | None = None) -> Iterator[Candidate]:
     """Yield up to `budget` candidates never seen before, and record what it cost to find them.
 
     A generator, because the caller builds a task from each candidate before asking for the next and
@@ -205,6 +205,13 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
     rather than crashing the entire walk. When an index is exhausted or errors repeatedly, the event
     is logged but sourcing continues.
     """
+    # ADOPT THE INDEX'S LOGGER WHEN THE CALLER NAMED NONE. Nothing ever passed one, so every line
+    # `walk` writes went nowhere: "exhausted after N page(s)" and "too many consecutive errors" are
+    # opposite diagnoses -- the supply is gone, versus the API is refusing us and will not in a
+    # minute -- and both arrived as silence. A batch then reads `attempted: 0` and cannot tell which
+    # it is looking at. The index already has somewhere to write; the three scales do not, and
+    # threading a logger through their signatures would put the fix in the callers again.
+    log = log or getattr(index, "_log", None) or (lambda _message: None)
     memory = memory if memory is not None else Memory()
     if max_seconds is None:
         configured = os.environ.get("FRF_SOURCING_MAX_SECONDS", "").strip()

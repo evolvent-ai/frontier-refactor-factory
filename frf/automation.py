@@ -177,6 +177,15 @@ def _merge_reports(reports, index_name, elapsed):
             summary["by_reason"][reason] = summary["by_reason"].get(reason, 0) + count
         for reason, count in item.get("source_rejections", {}).items():
             summary["source_rejections"][reason] = summary["source_rejections"].get(reason, 0) + count
+    # A JOB THAT ATTEMPTED NOTHING HAS MEASURED NOTHING. `trustworthy` seeded True and ANDed across
+    # the reports stays True over an empty list, so a job whose sourcing returned nothing -- the
+    # supply drained, the search API refusing us, a walk stopped by consecutive errors -- reported
+    # `attempted: 0, trustworthy: true` and read as "the material is not there" rather than "we never
+    # got to ask". Twelve jobs did that for forty-five seconds and the batch called itself done.
+    #
+    # `Roll.trustworthy` has always required `attempted > 0` for exactly this reason. The merge is
+    # the same claim over several rolls and needs the same floor.
+    summary["trustworthy"] = summary["trustworthy"] and summary["attempted"] > 0
     summary["yield_rate"] = round(summary["emitted"] / summary["attempted"], 4) if summary["attempted"] else 0.0
     summary["scale"] = reports[0].summary.get("scale", "") if reports else ""
     if not summary["source_rejections"]:

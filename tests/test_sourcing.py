@@ -473,3 +473,23 @@ def test_the_cursor_survives_a_caller_that_stops_early():
         # Three, not the page's ten: a candidate is remembered as it is handed out, so material the
         # walk read but never yielded stays available to the next roll.
         assert len(stored) == 3, "nor was what it actually handed out"
+
+
+def test_a_walk_writes_where_its_index_writes():
+    """"The supply is gone" and "the API is refusing us" are opposite conclusions, both silent.
+
+    `walk` took a logger nothing ever passed, so `exhausted after N page(s)` and `too many
+    consecutive errors` were both written to a no-op. A batch reading `attempted: 0` could not tell
+    a drained pond from a rate limit it should wait out. The index already has somewhere to write.
+    """
+    written: list = []
+
+    class _Logging(_FakeIndex):
+        def __init__(self) -> None:
+            super().__init__(count=0)
+            self._log = written.append
+
+    list(sourcing.walk(_Logging(), budget=3, page_size=10))
+
+    assert any("exhausted" in line for line in written), \
+        "the walk ended on an empty index and said so nowhere: %r" % written
