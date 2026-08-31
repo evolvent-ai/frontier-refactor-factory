@@ -123,9 +123,16 @@ def survey(root: str, target: int) -> dict:
             "name": meta.get("name", os.path.basename(path)),
             "status": subject.status,
             "identity": subject.identity,
-            "held": meta.get("evidence_checks_held", "?"),
-            "total": meta.get("evidence_checks_total", "?"),
-            "backend": meta.get("evidence_backend", "?"),
+            # FROM THE AUDIT, NOT FROM THE TASK FILE. The status on the line above comes from the
+            # audit, which prefers the sidecar record; reading the backend out of `[metadata]`
+            # instead mixed two sources, so a task attested from its sidecar showed `backend=?` and
+            # was then named as NOT WITNESSED REMOTELY. That is a false alarm about the most
+            # safety-critical property here -- whether an expectation describes a sandbox or
+            # whatever laptop froze it -- and it appeared against tasks that were witnessed
+            # remotely, which is how a real one would get ignored.
+            "held": subject.checks_held if subject.checks_total else meta.get("evidence_checks_held", "?"),
+            "total": subject.checks_total or meta.get("evidence_checks_total", "?"),
+            "backend": subject.backend or meta.get("evidence_backend", "") or "?",
             "shape_ok": shape_ok, "shape": shape_detail,
             "format": _format_of(path), "path": path,
         })
