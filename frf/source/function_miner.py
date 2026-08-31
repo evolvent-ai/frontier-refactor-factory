@@ -193,6 +193,23 @@ class GitHubFunctions:
 
     name = "github-functions"
 
+    # PAGE NUMBERS HERE DO NOT SURVIVE THE PROCESS. `page(n)` slices `_expanded`, which is rebuilt
+    # from whatever repositories this instance happens to mine, so page 12 names different functions
+    # every run. Restoring an outer page number made a restart accumulate 260 freshly-mined
+    # candidates only to discard the first 240 as already served: 169 repositories widened over
+    # thirty-one minutes, nothing produced. What IS stable across processes is how far the
+    # repository search has been walked, so that is the cursor this index keeps.
+    resumable_pages = False
+
+    @property
+    def cursor(self) -> int:
+        """The repository page reached. One integer, and this index says what it counts."""
+        return self._source_page
+
+    @cursor.setter
+    def cursor(self, value: int) -> None:
+        self._source_page = max(int(value or 0), self._source_page)
+
     def __init__(self, index, *, workspace: str = "", per_repository: int = PER_REPOSITORY,
                  scale: str = "module", log=None, widen_timeout: float = WIDEN_TIMEOUT) -> None:
         self._index = index

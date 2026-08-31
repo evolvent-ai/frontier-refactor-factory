@@ -261,7 +261,25 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
     # a restart resume rather than replay: with the seen-set persisted and the cursor not, a restart
     # re-walks every drained page before it can reach fresh material, and a batch that has been
     # restarted twenty times never reaches it at all.
-    page = max(int(getattr(index, "resume_page", 0) or 0), memory.resume_at(index.name))
+    # A PAGE NUMBER ONLY RESUMES AN INDEX THAT ADDRESSES ITS MATERIAL BY PAGE NUMBER. A widening
+    # index does not: `github-functions` pages over a list of mined functions that it REBUILDS each
+    # process, so page 12 names different material every run. Restoring 12 there made it accumulate
+    # 260 freshly-mined candidates in order to discard the first 240 as "already served" -- it
+    # widened 169 repositories over thirty-one minutes and produced nothing at all.
+    #
+    # Such an index says so, and keeps its own cursor instead: one integer whose meaning it owns
+    # (for `github-functions`, the repository page it has walked to). Same memory, same key, same
+    # persistence -- the index decides what the number counts.
+    if getattr(index, "resumable_pages", True):
+        page = max(int(getattr(index, "resume_page", 0) or 0), memory.resume_at(index.name))
+    else:
+        page = 0
+        stored = memory.resume_at(index.name)
+        if stored and getattr(index, "cursor", 0) < stored:
+            try:
+                index.cursor = stored
+            except Exception:                                  # noqa: BLE001 -- optional hook
+                pass
     consecutive_errors = 0
     max_consecutive_errors = 3
 
@@ -288,11 +306,14 @@ def walk(index: Index, budget: int, *, memory: Memory | None = None, page_size: 
                 break
             consecutive_errors = 0
             page += 1
-            memory.reached(index.name, page)
-            try:
-                index.resume_page = page
-            except Exception:                                      # noqa: BLE001 -- optional hook
-                pass
+            if getattr(index, "resumable_pages", True):
+                memory.reached(index.name, page)
+                try:
+                    index.resume_page = page
+                except Exception:                                  # noqa: BLE001 -- optional hook
+                    pass
+            else:
+                memory.reached(index.name, int(getattr(index, "cursor", 0) or 0))
             log("%s: page %d returned %d row(s)" % (index.name, page - 1, len(batch)))
             for candidate in batch:
                 # Validate candidate has required fields; skip malformed ones.

@@ -493,3 +493,51 @@ def test_a_walk_writes_where_its_index_writes():
 
     assert any("exhausted" in line for line in written), \
         "the walk ended on an empty index and said so nowhere: %r" % written
+
+
+def test_a_widening_index_is_not_resumed_by_page_number():
+    """Its page numbers address a list it rebuilds, so they mean nothing to a later process.
+
+    `github-functions` pages over the functions it has mined so far. Restoring an outer page number
+    made a restart accumulate enough freshly-mined candidates to fill the pages it believed were
+    already served, then throw those away: 169 repositories widened over thirty-one minutes and not
+    one candidate produced. An index that says `resumable_pages = False` keeps its own cursor
+    instead, and this walk must start it at page zero.
+    """
+    class _Widening(_FakeIndex):
+        name = "widening-index"
+        resumable_pages = False
+
+        def __init__(self) -> None:
+            super().__init__(count=1000)
+            self._source_page = 0
+            self.pages_asked: list = []
+
+        @property
+        def cursor(self) -> int:
+            return self._source_page
+
+        @cursor.setter
+        def cursor(self, value: int) -> None:
+            self._source_page = max(int(value or 0), self._source_page)
+
+        def page(self, number: int, *, size: int):
+            self.pages_asked.append(number)
+            self._source_page += 1
+            return super().page(number, size=size)
+
+    with tempfile.TemporaryDirectory() as work:
+        path = os.path.join(work, "seen.json")
+        first = _Widening()
+        list(sourcing.walk(first, budget=25, page_size=10, memory=sourcing.Memory.load(path)))
+        assert first._source_page > 1, "the first walk moved its own cursor"
+
+        second = _Widening()
+        found = list(sourcing.walk(second, budget=5, page_size=10,
+                                   memory=sourcing.Memory.load(path)))
+
+        assert second.pages_asked[0] == 0, \
+            "a widening index must be asked for page 0, not %d" % second.pages_asked[0]
+        assert second._source_page >= first._source_page, \
+            "and its OWN cursor is what should have been restored"
+        assert len(found) == 5

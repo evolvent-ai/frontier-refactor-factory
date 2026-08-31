@@ -27,6 +27,18 @@ _SKIP = {"tests", "test", "testing", "docs", "examples", "benchmarks", "bench", 
 class GitHubPackages:
     name = "github-packages"
 
+    # Widening, so its page numbers mean nothing to a later process -- see `GitHubFunctions`, which
+    # carries the full account. The repository page walked to is what survives, and is the cursor.
+    resumable_pages = False
+
+    @property
+    def cursor(self) -> int:
+        return self._source_page
+
+    @cursor.setter
+    def cursor(self, value: int) -> None:
+        self._source_page = max(int(value or 0), self._source_page)
+
     def __init__(self, index, *, workspace: str = "") -> None:
         self._index = index
         self._workspace = workspace or os.path.join("work", "package-checkouts")
