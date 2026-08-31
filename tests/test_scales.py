@@ -430,3 +430,40 @@ def test_task_names_read_as_one_thing_and_carry_no_revision():
     # No emitted name may carry a revision or an upper-case letter.
     for name in (package_scale._task_name(package), package_scale._task_name(rewrite)):
         assert "@" not in name and name == name.lower(), name
+
+
+def test_a_package_corpus_is_judged_and_frozen_on_distinct_probes():
+    """Repeats are not evidence, and counting them broke the gate in both directions.
+
+    FORGIVING: a generator returning two hundred probes of which seventy are distinct was refused
+    outright for "too many duplicate probes". Seventy distinct probes is a usable corpus, and that
+    refusal was eight of this scale's ten probe-stage losses.
+
+    STRICT: `counts` incremented per probe, so an operation "covered" by the same probe twice
+    satisfied the two-probe floor. The comment beside that floor already asked for two DISTINCT
+    probes; the code was not checking it.
+    """
+    import pytest
+
+    from frf.scales.package import _audit_probe_contract, _distinct
+
+    dispatch = ({"name": "alpha"}, {"name": "beta"})
+
+    def spread(n, op="alpha"):
+        return [[op, i] for i in range(n)]
+
+    # Distinct-but-repeated output is usable: 70 distinct among 200 offered.
+    probes = spread(35, "alpha") + spread(35, "beta")
+    _audit_probe_contract(probes + probes + probes, dispatch)          # no raise
+
+    assert len(_distinct(probes + probes)) == 70
+    assert _distinct([["a", 1], ["a", 1], ["a", 2]]) == [["a", 1], ["a", 2]]
+
+    # An operation covered only by a repeat no longer counts as covered.
+    lopsided = spread(59, "alpha") + [["beta", 0]] * 8
+    with pytest.raises(ValueError, match="at least two probes"):
+        _audit_probe_contract(lopsided, dispatch)
+
+    # Too few distinct probes is still refused, and says how many were offered.
+    with pytest.raises(ValueError, match="distinct probes"):
+        _audit_probe_contract([["alpha", 1]] * 200, dispatch)

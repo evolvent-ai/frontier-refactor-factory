@@ -349,6 +349,20 @@ class Package:
                     labels_out.append(label)
             probes, labels = expanded, labels_out
         _audit_probe_contract(probes, self._material.dispatch, labels=labels)
+        # THE CORPUS IS THE DISTINCT PROBES. The audit judges them, so freezing anything else would
+        # grade a set nothing checked -- and a repeated probe costs five freeze runs to re-learn an
+        # answer already held. Labels follow their probe, or a corpus would carry a valid/error
+        # balance describing inputs it no longer contains.
+        if labels and len(labels) == len(probes):
+            paired = {}
+            for args, label in zip(probes, labels):
+                key = json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
+                paired.setdefault(key, label)
+            probes = _distinct(probes)
+            labels = [paired[json.dumps(a, sort_keys=True, separators=(",", ":"), default=str)]
+                      for a in probes]
+        else:
+            probes = _distinct(probes)
         from dataclasses import replace
         counts = {}
         for probe in probes:
@@ -460,23 +474,52 @@ def _as_argument_lists(drawn) -> list:
                              % (index, type(item).__name__))
     return drawn
 
+def _distinct(probes: list) -> list:
+    """The probes with repeats removed, in the order they were first offered.
+
+    A CORPUS COUNTS DISTINCT INPUTS. Asking the same question twice measures nothing the first
+    answer did not, so a repeat is not evidence -- it is the same evidence written down again.
+    """
+    seen, kept = set(), []
+    for args in probes:
+        key = json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(args)
+    return kept
+
+
 def _audit_probe_contract(probes: list, dispatch: tuple, *, labels=None) -> None:
-    """Reject generator output that cannot cover a package contract honestly."""
-    if len(probes) < 60:
-        raise ValueError("package generator returned only %d probes; need at least 60" % len(probes))
+    """Reject generator output that cannot cover a package contract honestly.
+
+    EVERY FLOOR IS APPLIED TO THE DISTINCT PROBES, which is both more forgiving and stricter than
+    counting what was offered.
+
+    More forgiving: a generator that returns two hundred probes of which seventy are distinct used
+    to be refused outright for "too many duplicate probes", and seventy distinct probes is a usable
+    corpus. That refusal was eight of this scale's ten probe-stage losses.
+
+    Stricter, and this is the half that was wrong: `counts` incremented per probe, so an operation
+    "covered" by the same probe twice satisfied the two-probe floor. The comment beside that floor
+    already said what it wanted -- "two DISTINCT probes are the minimum evidence that its behaviour,
+    rather than just its dispatch wrapper, is being graded" -- and the code was not checking it.
+    """
     names = {str(entry.get("name")) for entry in dispatch if entry.get("name")}
-    seen = set()
-    counts = {name: 0 for name in names}
     for index, args in enumerate(probes):
         if not args or not isinstance(args[0], str):
             raise ValueError("package probe %d does not start with an operation name" % index)
-        operation = args[0]
-        if operation not in names:
-            raise ValueError("package probe %d names unknown operation %r" % (index, operation))
-        seen.add(json.dumps(args, sort_keys=True, separators=(",", ":"), default=str))
-        counts[operation] += 1
-    if len(seen) * 2 < len(probes):
-        raise ValueError("package generator produced too many duplicate probes")
+        if args[0] not in names:
+            raise ValueError("package probe %d names unknown operation %r" % (index, args[0]))
+
+    unique = _distinct(probes)
+    if len(unique) < 60:
+        raise ValueError(
+            "package generator returned only %d distinct probes; need at least 60 (%d offered)"
+            % (len(unique), len(probes)))
+    counts = {name: 0 for name in names}
+    for args in unique:
+        counts[args[0]] += 1
     # One probe only proves that an operation can be named. Two distinct probes are the
     # minimum evidence that its behavior, rather than just its dispatch wrapper, is being
     # graded. Larger valid/error/boundary balance remains the generator's responsibility.
