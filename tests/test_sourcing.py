@@ -240,7 +240,12 @@ def test_a_scale_without_the_shared_memory_repeats_itself():
     index = Pages()
     first = [c.identity for c in sourcing.walk(index, 4, page_size=4)]
     second = [c.identity for c in sourcing.walk(index, 4, page_size=4)]
-    assert first == second, "this test documents the old behaviour; if it changed, update the fix"
+    # THIS USED TO ASSERT `first == second`, documenting the failure a shared memory worked around:
+    # without one, a second ask re-served the first ask's candidates. The cursor now lives on the
+    # index, so the walk RESUMES and the repetition is gone at its source -- the shared memory
+    # remains what stops a candidate being re-tried, and paging is what stops it being re-read.
+    assert not set(first) & set(second), (
+        "the walk must resume rather than re-serve: %s then %s" % (first, second))
 
 
 def test_the_real_scales_advance_across_successive_finds():
