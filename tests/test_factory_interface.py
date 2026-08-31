@@ -341,3 +341,34 @@ def test_a_new_scale_needs_no_change_to_core():
                 raise AssertionError("%s branches on the scale" % name)
 
     assert len(_factory().build("toy", budget=1)) == 1
+
+
+def test_a_probe_generator_that_broke_itself_is_not_charged_to_the_material():
+    """The package scale asks the model for a probe generator; the package did not write it.
+
+    Observed on a live batch: `NameError: name 'true' is not defined` -- JSON leaking into Python --
+    and a repair that never happened because the gateway timed out. Both were recorded against the
+    material. That flatters `trustworthy`, which is the ratio of our faults to attempts, and it
+    hides the one class of failure we can actually fix. A package that refuses ordinary input still
+    belongs to the material, so the two must not be collapsed either way.
+    """
+    class OurBug(_ToyScale):
+        name = "our-bug"
+
+        def probes(self, spec):
+            raise ValueError("NameError: name 'true' is not defined; "
+                             "repair failed: the gateway did not answer: timed out")
+
+    class TheirRefusal(_ToyScale):
+        name = "their-refusal"
+
+        def probes(self, spec):
+            raise ValueError("the package raised on every drawn probe: empty input not accepted")
+
+    ours = Factory().register(OurBug()).install_stages(**_stages()).build("our-bug", budget=1)
+    theirs = (Factory().register(TheirRefusal()).install_stages(**_stages())
+              .build("their-refusal", budget=1))
+
+    assert ours.batch.refused[0].fault is pipeline.Fault.FACTORY, ours.batch.refused[0].to_json()
+    assert theirs.batch.refused[0].fault is pipeline.Fault.MATERIAL, \
+        theirs.batch.refused[0].to_json()

@@ -197,6 +197,20 @@ def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
         return Refused("unclassified", type(unexpected).__name__, Fault.FACTORY, detail[:2000], candidate.identity)
 
 
+# Errors that only a generator we wrote can raise. A package refusing an ordinary input raises from
+# its own code and is a fact about the package; `NameError` and `SyntaxError` in the generator module
+# are facts about us, and `repair failed: the gateway did not answer` says the second chance never
+# happened either. Named rather than inferred from a traceback frame, because the generator runs in a
+# container and what comes back is text.
+_OUR_GENERATOR_BUGS = ("NameError", "SyntaxError", "IndentationError", "ImportError",
+                       "ModuleNotFoundError", "the gateway did not answer")
+
+
+def _generator_fault(why: str) -> Fault:
+    """Whose fault a drawing failure is. -> FACTORY when the generator broke itself."""
+    return Fault.FACTORY if any(mark in why for mark in _OUR_GENERATOR_BUGS) else Fault.MATERIAL
+
+
 def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], None],
          freeze_runs: int) -> Emitted:
     spec = _specify(scale, candidate)
@@ -223,7 +237,13 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     try:
         source = scale.probes(spec)
     except ValueError as why:
-        raise Stage("probes", "no-probes-could-be-drawn", Fault.MATERIAL, str(why)[:2000])
+        # ...BUT A GENERATOR WE WROTE, CRASHING ON ITS OWN BUG, IS NOT THE MATERIAL DESCRIBING
+        # ITSELF. The package scale asks the model for a probe generator; when that generator dies
+        # of `NameError: name 'true' is not defined` -- JSON leaking into Python -- the package is
+        # innocent. Charging it to the material both flatters `trustworthy`, which is a ratio of our
+        # faults to attempts, and hides the one class of failure we can actually fix.
+        raise Stage("probes", "no-probes-could-be-drawn",
+                    _generator_fault(str(why)), str(why)[:2000])
     except RuntimeError as why:
         # A generator failure can be a malformed material generator or an unavailable
         # execution backend. Both are candidate/setup failures here, never an unclassified
