@@ -16,7 +16,16 @@ from dataclasses import dataclass, field
 
 
 _NEVER = {".git", "node_modules", "target", "build", "dist", ".venv", "venv", "vendor"}
+# WHERE A PROJECT WRITES DOWN HOW TO RUN ITSELF. Scripts were scanned and prose was not, which
+# leaves out the one file every project has and writes for humans: the README. Its fenced code
+# blocks are worked examples -- the maintainer's own invocations, with real arguments, known to run.
+#
+# It is the answer to the largest remaining refusal. Thirteen candidates in one batch lifted
+# scenarios, tried every one, and had none that did anything: `ran but did nothing`. A tool that
+# needs a subcommand cannot be invoked by guessing, and the README is where the subcommand is
+# written.
 _SCRIPT_SUFFIXES = (".sh", ".bash", ".zsh", ".fish", ".py", ".ps1")
+_PROSE_SUFFIXES = (".md", ".markdown", ".rst")
 _INPUT_SUFFIXES = (".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".txt", ".csv", ".c", ".h", ".go", ".rs", ".py", ".js", ".ts")
 
 
@@ -37,6 +46,32 @@ class Harvested:
     line: int
 
 
+
+def _fenced(lines: list) -> list:
+    """The lines inside ``` fences, with everything else blanked out.
+
+    Blanked rather than removed so that a line number still points at the line it came from: a
+    harvested command records where it was found, and an off-by-many is worse than no number.
+    """
+    kept, inside = [], False
+    for line in lines:
+        if line.lstrip().startswith("```") or line.lstrip().startswith("~~~"):
+            inside = not inside
+            kept.append("")
+            continue
+        kept.append(line if inside else "")
+    return kept
+
+
+def _unprompted(raw: str) -> str:
+    """`$ tool --flag` -> `tool --flag`. A shell prompt is not part of the command."""
+    stripped = raw.strip()
+    for prompt in ("$ ", "> ", "% ", "# "):
+        if stripped.startswith(prompt):
+            return stripped[len(prompt):]
+    return raw
+
+
 def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int = 100,
                   max_commands: int = 200, stats: HarvestStats | None = None) -> list[Harvested]:
     """Extract invocations of a known program from repository-owned test scripts.
@@ -51,7 +86,8 @@ def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int =
     for directory, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in _NEVER]
         for filename in sorted(files):
-            if not filename.endswith(_SCRIPT_SUFFIXES):
+            prose = filename.endswith(_PROSE_SUFFIXES)
+            if not (prose or filename.endswith(_SCRIPT_SUFFIXES)):
                 continue
             if scanned >= max_files:
                 return found
@@ -63,7 +99,13 @@ def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int =
                 continue
             if stats:
                 stats.files_scanned += 1
+            if prose:
+                # ONLY WHAT IS INSIDE A FENCE. Prose is full of sentences that shlex will happily
+                # split into an argv, and a sentence mentioning the program's name is not an
+                # invocation of it.
+                lines = _fenced(lines)
             for lineno, raw in enumerate(lines, 1):
+                raw = _unprompted(raw)
                 try:
                     argv = shlex.split(raw.strip())
                 except ValueError:

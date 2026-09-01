@@ -354,3 +354,39 @@ def test_a_python_entry_point_names_the_interpreter_that_exists():
         build, invoke = _discover_entrypoint(root)
 
     assert invoke[0] == "python3", "the image has python3 and no python: %r" % (invoke,)
+
+
+def test_invocations_are_lifted_from_the_readme_as_well_as_from_scripts(tmp_path):
+    """A README's fenced blocks are the maintainer's own worked examples.
+
+    Scripts were scanned and prose was not, which leaves out the one file every project has and
+    writes for humans. Thirteen candidates in one batch lifted scenarios, tried every one, and had
+    none that did anything -- `ran but did nothing`. A tool that needs a subcommand cannot be
+    invoked by guessing, and the README is where the subcommand is written.
+    """
+    from frf.source.repo_harvest import harvest_files
+
+    (tmp_path / "README.md").write_text(
+        "# thing\n"
+        "\n"
+        "Run thing on a file to convert it.\n"     # prose that mentions the program
+        "\n"
+        "```sh\n"
+        "$ thing convert input.csv\n"
+        "```\n",
+        encoding="utf-8")
+
+    lifted = harvest_files(str(tmp_path), ("thing",))
+
+    argvs = [list(item.argv) for item in lifted]
+    assert ["thing", "convert", "input.csv"] in argvs, argvs
+    assert not any("Run" in argv for argv in argvs), \
+        "a sentence mentioning the program is not an invocation of it"
+
+
+def test_a_shell_prompt_is_not_part_of_the_command(tmp_path):
+    from frf.source.repo_harvest import harvest_files
+
+    (tmp_path / "README.md").write_text("```\n% tool --check file.txt\n```\n", encoding="utf-8")
+    lifted = harvest_files(str(tmp_path), ("tool",))
+    assert [list(x.argv) for x in lifted] == [["tool", "--check", "file.txt"]]
