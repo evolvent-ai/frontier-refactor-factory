@@ -36,12 +36,21 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "python3 --version",
     },
     "go": {
-        "base_image": "golang:1.23-bookworm",
+        # 1.25 BECAUSE REAL REPOSITORIES SAY SO. `GOROOT` is pinned here, which disables Go's
+        # toolchain switching, so a repository whose go.mod declares a newer version does not
+        # download one -- it fails the build outright:
+        #
+        #     go: go.mod requires go >= 1.25.0 (running go 1.23.12; GOTOOLCHAIN=local)
+        #
+        # Pinning is deliberate: the multi-stage copy below exists so that `docker build` needs no
+        # outbound HTTP, which some sandboxes block. So the answer is a newer floor rather than
+        # letting the build fetch, and a repository that outruns even this fails honestly.
+        "base_image": "golang:1.25-bookworm",
         "apt_packages": [],
         "install_cmds": [],
         # Multi-stage copy from the official Go image — avoids outbound HTTP during docker build
         # which is blocked in some sandbox environments (e.g. e2b DinD). Registry pulls always work.
-        "copy_from_image": "golang:1.23-bookworm",
+        "copy_from_image": "golang:1.25-bookworm",
         "copy_from_paths": [
             ("/usr/local/go", "/usr/local/go"),
         ],

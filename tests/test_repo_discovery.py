@@ -144,3 +144,25 @@ def test_a_go_program_is_found_whatever_its_entry_file_is_called():
     # Test files are skipped, because `go build` skips them.
     assert not _has_go_main(make({"go.mod": "module x\n",
                                   "x_test.go": "package main\nfunc main(){}\n"}))
+
+
+def test_repo_build_steps_run_as_root_and_still_drop_privilege():
+    """The generic Dockerfile ends at `USER nobody`; a repo task appends its project install.
+
+    Installing a Python project writes console entry points into /usr/local/bin, and as `nobody`
+    that is `PermissionError: [Errno 13] Permission denied: '/usr/local/bin/json-playground'` --
+    exit 1, no image. Five repo tasks in one corpus shipped an image that could not be built at all.
+    The build needs root; the submission must not have it.
+    """
+    import re
+    from frf.scales import repo as repo_module
+
+    source = open(repo_module.__file__, encoding="utf-8").read()
+    block = source[source.index('"", "USER root", "COPY . /app"'):]
+    block = block[:block.index("open(dockerfile,")]
+
+    assert "USER root" in source, "the appended build steps must run privileged"
+    assert re.search(r'"USER nobody"', block), \
+        "and privilege must be dropped again before the submission runs"
+    assert block.index("chown -R nobody") < block.index('"USER nobody"'), \
+        "the workspace is chowned before the user is dropped, or the submission cannot write it"

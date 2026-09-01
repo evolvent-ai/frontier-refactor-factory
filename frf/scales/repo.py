@@ -1066,8 +1066,18 @@ for name, target in scripts.items():
     out.write_text(body)
     out.chmod(0o755)
 """)
+            # BUILD AS ROOT, THEN DROP AGAIN. The generic Dockerfile ends by chowning /app and
+            # switching to `nobody`, which is right for the SUBMISSION and wrong for everything
+            # appended after it: installing a project writes console entry points into
+            # /usr/local/bin, and as `nobody` that is
+            #
+            #     PermissionError: [Errno 13] Permission denied: '/usr/local/bin/json-playground'
+            #
+            # -- exit 1, no image, five repo tasks in one corpus whose delivered image could not be
+            # built at all. The privilege is dropped again at the end, so the submission still runs
+            # unprivileged; what changes is only that the BUILD is allowed to build.
             lines = [open(dockerfile, encoding="utf-8").read().rstrip(),
-                     "", "COPY . /app"]
+                     "", "USER root", "COPY . /app"]
             if self._spec.language.lower() == "python":
                 lines += ["RUN pip install --no-cache-dir --no-deps -e . || python3 /app/.frf_install_scripts.py"]
             import shlex
@@ -1080,7 +1090,9 @@ for name, target in scripts.items():
                     continue
                 if rendered:
                     lines.append("RUN " + rendered)
-            lines.append("")
+            # The submission is unprivileged again, and owns the workspace it was told to work in.
+            lines += ["RUN chown -R nobody:nogroup /app /logs/verifier /home/candidate",
+                      "USER nobody", ""]
             open(dockerfile, "w", encoding="utf-8").write("\n".join(lines))
         if self._material.fixtures and os.path.isdir(self._material.fixtures):
             shutil.copytree(self._material.fixtures, os.path.join(tests, "fixtures"), dirs_exist_ok=True)
