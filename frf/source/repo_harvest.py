@@ -26,6 +26,15 @@ _NEVER = {".git", "node_modules", "target", "build", "dist", ".venv", "venv", "v
 # written.
 _SCRIPT_SUFFIXES = (".sh", ".bash", ".zsh", ".fish", ".py", ".ps1")
 _PROSE_SUFFIXES = (".md", ".markdown", ".rst")
+
+# CI IS WHERE A PROJECT RUNS ITSELF FOR REAL. A workflow's `run:` steps are invocations the
+# maintainer relies on passing, with the arguments they actually use -- the same evidence a README
+# gives, written by the same people, and kept correct because it breaks the build when it is not.
+#
+# Thirty-one candidates in one batch were refused at `corpus-too-thin` within striking distance of
+# the threshold, thirteen of them at exactly nine scenarios. Supply is what that needs, and this is
+# the last untapped source of it.
+_CI_SUFFIXES = (".yml", ".yaml")
 _INPUT_SUFFIXES = (".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".txt", ".csv", ".c", ".h", ".go", ".rs", ".py", ".js", ".ts")
 
 
@@ -72,6 +81,35 @@ def _unprompted(raw: str) -> str:
     return raw
 
 
+
+def _run_steps(lines: list) -> list:
+    """The shell lines of a CI workflow's `run:` steps, with everything else blanked out.
+
+    Handles both `run: tool --flag` and the block form, where `run: |` is followed by an indented
+    script. Blanked rather than removed so a lifted command still records the line it came from.
+    """
+    kept, block_indent = [], None
+    for line in lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if block_indent is not None:
+            if stripped and indent <= block_indent:
+                block_indent = None
+            else:
+                kept.append(line)
+                continue
+        if stripped.startswith("run:") or stripped.startswith("- run:"):
+            body = stripped.split("run:", 1)[1].strip()
+            if body in ("|", ">", "|-", ">-", "|+"):
+                block_indent = indent
+                kept.append("")
+            else:
+                kept.append(body)
+            continue
+        kept.append("")
+    return kept
+
+
 def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int = 100,
                   max_commands: int = 200, stats: HarvestStats | None = None) -> list[Harvested]:
     """Extract invocations of a known program from repository-owned test scripts.
@@ -87,7 +125,8 @@ def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int =
         dirs[:] = [d for d in dirs if d not in _NEVER]
         for filename in sorted(files):
             prose = filename.endswith(_PROSE_SUFFIXES)
-            if not (prose or filename.endswith(_SCRIPT_SUFFIXES)):
+            workflow = filename.endswith(_CI_SUFFIXES)
+            if not (prose or workflow or filename.endswith(_SCRIPT_SUFFIXES)):
                 continue
             if scanned >= max_files:
                 return found
@@ -104,6 +143,10 @@ def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int =
                 # split into an argv, and a sentence mentioning the program's name is not an
                 # invocation of it.
                 lines = _fenced(lines)
+            elif workflow:
+                # ONLY WHAT FOLLOWS `run:`. A workflow is mostly configuration, and a `name:` or an
+                # `if:` that happens to mention the program is not a way to invoke it.
+                lines = _run_steps(lines)
             for lineno, raw in enumerate(lines, 1):
                 raw = _unprompted(raw)
                 try:

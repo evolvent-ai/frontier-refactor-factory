@@ -390,3 +390,36 @@ def test_a_shell_prompt_is_not_part_of_the_command(tmp_path):
     (tmp_path / "README.md").write_text("```\n% tool --check file.txt\n```\n", encoding="utf-8")
     lifted = harvest_files(str(tmp_path), ("tool",))
     assert [list(x.argv) for x in lifted] == [["tool", "--check", "file.txt"]]
+
+
+def test_invocations_are_lifted_from_ci_workflows(tmp_path):
+    """A workflow's `run:` steps are invocations the maintainer relies on passing.
+
+    They carry the arguments actually used, and stay correct because they break the build when they
+    are not. Thirty-one candidates in one batch were refused at `corpus-too-thin` within striking
+    distance of the threshold -- thirteen at exactly nine scenarios -- and supply is what that needs.
+    """
+    from frf.source.repo_harvest import harvest_files
+
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "name: run thing on everything\n"          # mentions the program, is not an invocation
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - run: thing check fixtures/a.json\n"
+        "      - name: many\n"
+        "        run: |\n"
+        "          thing convert fixtures/b.csv\n"
+        "          thing lint fixtures/c.txt\n"
+        "      - uses: actions/checkout@v4\n",
+        encoding="utf-8")
+
+    argvs = [list(x.argv) for x in harvest_files(str(tmp_path), ("thing",))]
+
+    assert ["thing", "check", "fixtures/a.json"] in argvs, argvs
+    assert ["thing", "convert", "fixtures/b.csv"] in argvs, "the block form must be read too"
+    assert ["thing", "lint", "fixtures/c.txt"] in argvs
+    assert not any("name:" in " ".join(argv) or argv[0] == "name" for argv in argvs), \
+        "a `name:` that mentions the program is not a way to invoke it"
