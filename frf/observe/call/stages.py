@@ -111,7 +111,11 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
     inputs = {"probe-%04d" % i: args for i, args in enumerate(source.draw(source.count))}
     observed: dict = {probe_id: [] for probe_id in inputs}
     try:
-        max_seconds = float(os.environ.get("FRF_FREEZE_MAX_SECONDS", "3600"))
+        # STRICTLY INSIDE THE SANDBOX THAT HOLDS IT. E2B refuses a lifetime over an hour, so the
+        # sandbox can be at most 3600s and this default was exactly that -- a freeze allowed to run
+        # until the moment its own sandbox expires, which is a freeze that gets killed rather than
+        # finished. The ceiling moved, so this has to move further.
+        max_seconds = float(os.environ.get("FRF_FREEZE_MAX_SECONDS", "3000"))
     except ValueError:
         max_seconds = 3600.0
     deadline = time.monotonic() + max_seconds

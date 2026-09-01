@@ -18,6 +18,7 @@ and identical because it is the same code in `core` reached through the same int
 """
 from __future__ import annotations
 
+import collections
 import os
 import time
 from dataclasses import dataclass, field
@@ -51,6 +52,10 @@ class Corpus:
     expectations: dict = field(default_factory=dict)     # probe_id -> [Expectation per step]
     discard_rate: float = 0.0
     usable: bool = True
+    # WHY IT IS NOT USABLE, in the seam's own words. The pipeline prints this instead of its own
+    # generic "the reference did not reproduce its probes", which is a specific diagnosis and the
+    # wrong one for most of the ways a freeze comes back empty.
+    unusable_reason: str = ""
     adequacy_note: str = ""
     adequacy: dict = field(default_factory=dict)
     timed: list = field(default_factory=list)
@@ -87,6 +92,7 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
     # See the two refusals below; they are the same question asked one level apart.
     ever_ran = False
     ever_worked = False
+    why: dict = collections.Counter()
 
     batched = getattr(observer, "run_many", None)
     all_runs = ([batched(spec, scenarios) for _ in range(runs)] if batched is not None else None)
@@ -118,6 +124,15 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
             frozen[scenario.probe_id] = steps
         else:
             dropped += 1
+            # WHY IT WAS DROPPED, not only that it was. `100% of probes were discarded` names the
+            # outcome and leaves the cause -- a clock in stderr, a line count that moves, a tree
+            # that gains a temp file -- to be guessed at. The freeze already computed the reason
+            # per channel and threw it away.
+            for step in steps:
+                for name in ("exit_code", "stdout", "stderr", "tree"):
+                    channel = step.channel(name)
+                    if not channel.graded and channel.reason:
+                        why["%s: %s" % (name, channel.reason)] += 1
 
     # DID THE REFERENCE ACTUALLY RUN? A program that was never found exits 127 on every scenario,
     # and that is PERFECTLY REPRODUCIBLE: five runs agree exactly, every channel freezes, `ceiling`
@@ -161,9 +176,15 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
     timed = _pick_timed(list(frozen))
     graded = {pid: steps for pid, steps in frozen.items() if pid not in set(timed)}
 
+    usable = bool(graded) and rate <= 0.25
+    reason = ""
+    if not usable and why:
+        reason = ("%.0f%% of scenarios were discarded; what they disagreed on -- %s"
+                  % (100 * rate, ", ".join("%s (x%d)" % (text, count)
+                                           for text, count in why.most_common(3))))
     return Corpus(scenarios=[s for s in scenarios if s.probe_id in frozen],
-                  expectations=graded, discard_rate=rate,
-                  usable=bool(graded) and rate <= 0.25, timed=timed, runs=runs)
+                  expectations=graded, discard_rate=rate, unusable_reason=reason,
+                  usable=usable, timed=timed, runs=runs)
 
 
 def _pick_timed(probe_ids: list, count: int = 3) -> list:

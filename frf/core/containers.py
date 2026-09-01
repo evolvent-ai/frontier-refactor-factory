@@ -90,7 +90,16 @@ OPEN_ATTEMPTS = 6
 #
 # The headroom is the same idea as TRANSPORT_HEADROOM: an inner bound must be strictly inside the
 # outer one, or the outer one is what the caller actually gets.
-SANDBOX_LIFETIME = float(os.environ.get("FRF_SANDBOX_LIFETIME", "5400"))
+# WHAT THE API WILL ACTUALLY ACCEPT. E2B answers `400: Timeout cannot be greater than 1 hours`, so
+# a longer lifetime is not a longer sandbox -- it is no sandbox. The default was 5400 and every
+# creation that used it was refused: twelve in one repo batch, none of them reaching the ledger,
+# because a sandbox that never opened is not a candidate that failed.
+#
+# Clamped rather than merely defaulted, so an environment that asks for more gets the most it can
+# have instead of nothing at all.
+SANDBOX_LIFETIME_CEILING = 3600.0
+SANDBOX_LIFETIME = min(float(os.environ.get("FRF_SANDBOX_LIFETIME", "3540")),
+                       SANDBOX_LIFETIME_CEILING)
 
 
 class _CommandTimedOut(Exception):

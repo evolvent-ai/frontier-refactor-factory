@@ -210,7 +210,7 @@ def test_a_sandbox_outlives_the_longest_stage_that_runs_inside_it():
 
     from frf.observe.call import stages
 
-    freeze_budget = float(os.environ.get("FRF_FREEZE_MAX_SECONDS", "3600"))
+    freeze_budget = float(os.environ.get("FRF_FREEZE_MAX_SECONDS", "3000"))
     assert containers.SANDBOX_LIFETIME > freeze_budget, (
         "a sandbox that expires at or before its freeze budget kills the freeze it is holding: "
         "lifetime %s, freeze %s" % (containers.SANDBOX_LIFETIME, freeze_budget))
@@ -285,3 +285,27 @@ def test_a_non_zero_exit_still_reaches_the_caller_as_an_exception():
 
     with pytest.raises(RuntimeError, match="CommandExitException-ish"):
         containers._wait_bounded(Failing(), 5.0)
+
+
+def test_a_sandbox_lifetime_stays_inside_what_the_api_accepts():
+    """E2B answers `400: Timeout cannot be greater than 1 hours`.
+
+    A longer lifetime is not a longer sandbox, it is no sandbox. The default was 5400 and every
+    creation that used it was refused -- twelve in one repo batch, none reaching the ledger, because
+    a sandbox that never opened is not a candidate that failed.
+    """
+    import importlib
+    import os
+
+    from frf.core import containers
+
+    assert containers.SANDBOX_LIFETIME <= containers.SANDBOX_LIFETIME_CEILING
+
+    os.environ["FRF_SANDBOX_LIFETIME"] = "99999"
+    try:
+        reloaded = importlib.reload(containers)
+        assert reloaded.SANDBOX_LIFETIME == reloaded.SANDBOX_LIFETIME_CEILING, \
+            "an environment asking for more must get the most it can have, not nothing"
+    finally:
+        del os.environ["FRF_SANDBOX_LIFETIME"]
+        importlib.reload(containers)
