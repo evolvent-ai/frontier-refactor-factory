@@ -479,3 +479,24 @@ def test_npm_run_build_is_only_used_when_the_project_declares_it(tmp_path):
         encoding="utf-8")
     build, _ = _discover_entrypoint(str(tmp_path))
     assert ["npm", "run", "build"] in build, "and it must be run when the project does declare one"
+
+
+def test_a_node_bin_is_invoked_by_its_file_not_its_name(tmp_path):
+    """`npm install` links a package's own `bin` into `./node_modules/.bin/`, not onto PATH.
+
+    So `command -v redos-detector` finds nothing after a successful build, and the project is
+    recorded as declaring a command its own build does not install. Ten distinct node candidates
+    were refused that way in one batch, every one of them fine.
+    """
+    import json
+    from frf.scales.repo import _discover_entrypoint
+
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "redos-detector", "bin": {"redos-detector": "./dist/cli.js"},
+                    "scripts": {"build": "tsc"}}),
+        encoding="utf-8")
+
+    build, invoke = _discover_entrypoint(str(tmp_path))
+
+    assert invoke == ["node", "{ROOT}/dist/cli.js"], invoke
+    assert ["npm", "install"] in build and ["npm", "run", "build"] in build

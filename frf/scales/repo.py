@@ -501,8 +501,26 @@ def _discover_entrypoint(root: str) -> tuple:
         try:
             import json
             manifest = json.load(open(package_json, encoding="utf-8"))
+            # THE FILE, NOT THE NAME. `npm install` links a package's own `bin` into
+            # `./node_modules/.bin/`, which is not on PATH -- so `command -v redos-detector` finds
+            # nothing after a successful build and the project is recorded as declaring a command
+            # its own build does not install. Ten distinct node candidates were refused that way in
+            # one batch, every one of them fine.
+            #
+            # `bin` maps a name to the script that implements it, so the script is what to run.
+            # Invoking it through `node` avoids PATH, the symlink, and npm's version-to-version
+            # differences about which of those it creates.
             bins = manifest.get("bin")
-            name = next(iter(bins)) if isinstance(bins, dict) else (manifest.get("name") if isinstance(bins, str) else "")
+            target = ""
+            if isinstance(bins, dict) and bins:
+                target = str(next(iter(bins.values())) or "")
+            elif isinstance(bins, str):
+                target = bins
+            name = ""
+            if isinstance(bins, dict) and bins:
+                name = str(next(iter(bins)) or "")
+            elif isinstance(bins, str):
+                name = str(manifest.get("name") or "")
             # NOT `--offline`. A fresh sandbox has an empty npm cache, so `--offline` installs
             # nothing at all and the project's own build then fails on its own devDependencies:
             # `sh: 1: ts-node: not found`, `sh: 1: vitest: not found`. Six of eighteen repo build
@@ -526,6 +544,8 @@ def _discover_entrypoint(root: str) -> tuple:
                 steps = [["npm", "install"]]
                 if "build" in (manifest.get("scripts") or {}):
                     steps.append(["npm", "run", "build"])
+                if target:
+                    return steps, ["node", "{ROOT}/" + target.lstrip("./")]
                 return steps, [name]
             scripts = manifest.get("scripts", {})
             for target in ("start", "cli", "run"):
