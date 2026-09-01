@@ -228,6 +228,13 @@ def drive(task_dir: str, *, api_key: str, template: str,
             record["detail"] = "%d/%d inside the delivered image%s" % (
                 passed, total, (" -- %s" % record["note"]) if record["note"] else "")
         return record
+    except Exception as why:                               # noqa: BLE001 -- reported, not raised
+        # ONE TASK MUST NOT END THE RUN, and losing this is how a refactor turned a working audit
+        # into a crash. The SDK raises `CommandExitException` when a command exits non-zero, so a
+        # single task whose `docker build` failed took the whole pool with it and 129 tasks produced
+        # no report at all. The same rule the pipeline applies to candidates applies to this.
+        record["detail"] = "%s: %s" % (type(why).__name__, " ".join(str(why).split())[-700:])
+        return record
     finally:
         record["seconds"] = round(time.monotonic() - started, 1)
         if sandbox is not None:

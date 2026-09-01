@@ -427,3 +427,25 @@ def test_a_run_without_the_gate_emits_exactly_as_before():
     checks = {v["check"] for v in result.batch.emitted[0].battery}
     assert "reproduces-in-its-own-image" not in checks, \
         "a check that never ran must not appear in the attestation as though it had"
+
+
+def test_one_unbuildable_task_does_not_end_an_in_image_audit():
+    """The E2B SDK raises when a command exits non-zero, and `docker build` does that routinely.
+
+    A refactor that moved this driver into the package kept the `finally` and dropped the broad
+    `except`, so one task whose image would not build took the whole pool with it: 129 tasks, no
+    report. The pipeline's own rule -- one candidate may never end a batch -- applies here too.
+    """
+    import frf.observe.in_image as in_image
+
+    class _Exploding:
+        def __getattr__(self, _name):
+            raise RuntimeError("Command exited with code 1")
+
+    record = in_image.drive.__wrapped__(".") if hasattr(in_image.drive, "__wrapped__") else None
+    source = open(in_image.__file__, encoding="utf-8").read()
+    body = source[source.index("def drive("):]
+    assert "except Exception as why" in body, \
+        "drive() must report a failure rather than raise it into the caller's pool"
+    assert body.index("except Exception as why") < body.index("finally:"), \
+        "and it must catch before the teardown, or the record never carries the reason"
