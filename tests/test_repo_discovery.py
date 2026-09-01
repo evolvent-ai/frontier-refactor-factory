@@ -500,3 +500,25 @@ def test_a_node_bin_is_invoked_by_its_file_not_its_name(tmp_path):
 
     assert invoke == ["node", "{ROOT}/dist/cli.js"], invoke
     assert ["npm", "install"] in build and ["npm", "run", "build"] in build
+
+
+def test_the_harvest_searches_for_the_name_the_project_publishes(tmp_path):
+    """A node bin is invoked as `node dist/cli.js` -- correct, because npm does not put it on PATH.
+
+    Every README and workflow says `redos-detector`. Searching only for our spelling found nothing,
+    the harvest returned empty, and the scale fell back to feeding the program each file in the
+    repository: `{PROGRAM} .eslintrc.js`, `{PROGRAM} README.md`. How we invoke it and what it is
+    called are different facts.
+    """
+    import json
+    from frf.scales.repo import _declared_names
+
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "redos-detector", "bin": {"redos-detector": "./dist/cli.js"}}),
+        encoding="utf-8")
+    assert "redos-detector" in _declared_names(str(tmp_path))
+
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'thing'\n\n[project.scripts]\nthing-cli = \"thing.main:run\"\n",
+        encoding="utf-8")
+    assert "thing-cli" in _declared_names(str(tmp_path))

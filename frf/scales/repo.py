@@ -759,6 +759,42 @@ class Material:
     survey: dict = field(default_factory=dict)
 
 
+def _declared_names(root: str) -> tuple:
+    """The command names a project publishes, as a reader would write them. -> names.
+
+    Read from the manifests rather than from how this factory chose to invoke the program: a README
+    says `redos-detector`, not `node dist/cli.js`, and the harvest has to find the former.
+    """
+    found = []
+    manifest = os.path.join(root, "package.json")
+    if os.path.isfile(manifest):
+        try:
+            import json as _json
+            data = _json.load(open(manifest, encoding="utf-8"))
+            bins = data.get("bin")
+            if isinstance(bins, dict):
+                found.extend(str(k) for k in bins)
+            elif isinstance(bins, str) and data.get("name"):
+                found.append(str(data["name"]))
+        except (OSError, ValueError, TypeError):
+            pass
+    pyproject = os.path.join(root, "pyproject.toml")
+    if os.path.isfile(pyproject):
+        try:
+            text = open(pyproject, encoding="utf-8", errors="replace").read()
+            block = text.split("[project.scripts]", 1)
+            if len(block) > 1:
+                for line in block[1].splitlines():
+                    if line.strip().startswith("["):
+                        break
+                    if "=" in line:
+                        found.append(line.split("=", 1)[0].strip().strip('"\''))
+        except OSError:
+            pass
+    return tuple(name for name in found if name)
+
+
+
 class ProbeSource:
     """Scenarios lifted from the repository's own tests."""
 
@@ -1439,7 +1475,16 @@ for name, target in scripts.items():
         from ..source.repo_harvest import fixture_archive, harvest_corpus, harvest_files
         from ..observe.process.runner import Scenario, Step
 
-        names = tuple(str(x) for x in material.invoke if str(x))
+        # THE NAME THE PROJECT PUBLISHES, AS WELL AS THE ARGV WE CHOSE. The harvest searches
+        # scripts, READMEs and CI for lines that mention the program, and it matches on the tokens
+        # of `invoke`. Those are not always the name a reader would write: a node bin is invoked as
+        # `node dist/cli.js` -- correct, because npm does not put it on PATH -- while every README
+        # and workflow says `redos-detector`. Searching for our spelling found nothing, the harvest
+        # returned empty, and the scale fell back to feeding the program each file in the
+        # repository: `{PROGRAM} .eslintrc.js`, `{PROGRAM} README.md`.
+        #
+        # So both are searched for. How we invoke it and what it is called are different facts.
+        names = tuple(str(x) for x in material.invoke if str(x)) + _declared_names(material.root)
         invocations = harvest_files(material.root, names)
         if not invocations:
             return ()
