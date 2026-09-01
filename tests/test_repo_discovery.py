@@ -166,3 +166,23 @@ def test_repo_build_steps_run_as_root_and_still_drop_privilege():
         "and privilege must be dropped again before the submission runs"
     assert block.index("chown -R nobody") < block.index('"USER nobody"'), \
         "the workspace is chowned before the user is dropped, or the submission cannot write it"
+
+
+def test_an_entry_point_the_build_did_not_install_is_refused_not_observed():
+    """`command -v` failing used to fall through, and what followed was exit 127 on every scenario.
+
+    That is perfectly reproducible: five freeze runs agree, every channel freezes, `ceiling` scores
+    the reference 100% against its own frozen failure, and the task ships grading a submission on
+    reproducing "command not found". Fourteen of twenty-five attested repo tasks in one corpus were
+    exactly that. The build ran and did not provide the entry point -- a fact about the repository,
+    seen here at the cheapest point where it can be seen at all.
+    """
+    import frf.scales.repo as repo_module
+
+    source = open(repo_module.__file__, encoding="utf-8").read()
+    block = source[source.index('def _build_remote'):]
+    block = block[:block.index("\n    def ", 10)]
+
+    assert "command -v" in block
+    assert "BuildFailed" in block.split("command -v", 1)[1], \
+        "a program the build did not install must be refused, not observed as 127s"

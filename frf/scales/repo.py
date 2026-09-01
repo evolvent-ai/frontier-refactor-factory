@@ -791,6 +791,21 @@ class Observer:
             path = (located.stdout or "").strip().splitlines()
             if located.ok and path:
                 self._program[0] = path[-1]
+            else:
+                # A PROGRAM THAT IS NOT THERE IS NOT A REFERENCE. This used to fall through and
+                # observe anyway, and what it observed was exit 127 on every scenario -- which is
+                # PERFECTLY REPRODUCIBLE. Five freeze runs agree, every channel freezes, `ceiling`
+                # scores the reference 100% against its own frozen failure, and the task ships
+                # grading a submission on reproducing "command not found". Fourteen of twenty-five
+                # attested repo tasks in one corpus were exactly that.
+                #
+                # The build ran and did not provide the entry point the project declares -- a fact
+                # about this repository, discovered at the cheapest point where it can be seen at
+                # all, and named rather than silently frozen.
+                raise BuildFailed(
+                    "%s built, but its entry point %r is not on PATH afterwards: the project "
+                    "declares a command its own build does not install, so there is nothing to "
+                    "observe" % (self.material.identity, self._program[0]))
 
     def _restricted(self, program: list) -> list:
         """The program, wrapped so it runs unprivileged and cannot fork a fleet.
