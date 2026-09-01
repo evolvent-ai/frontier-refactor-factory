@@ -99,6 +99,36 @@ def _why_it_failed(output: str, limit: int = 700) -> str:
 
 
 
+class _Outcome:
+    """What a command did, whether the SDK returned it or raised it."""
+
+    def __init__(self, exit_code: int, stdout: str, stderr: str) -> None:
+        self.exit_code, self.stdout, self.stderr = exit_code, stdout, stderr
+
+    @property
+    def output(self) -> str:
+        return (self.stdout or "") + (self.stderr or "")
+
+
+def _run(sandbox, command: str, *, timeout: float):
+    """Run a command and RETURN its outcome, including a failing one.
+
+    The SDK raises `CommandExitException` on a non-zero exit rather than returning it. Written
+    against a return value, the build's `exit_code != 0` branch was unreachable: the retry for
+    transient network failures never ran, and the message that reached the ledger was the raw
+    exception tail rather than the cause this module works to extract. Both looked like they worked.
+    """
+    try:
+        done = sandbox.commands.run(command, timeout=timeout, request_timeout=timeout + 120)
+        return _Outcome(int(getattr(done, "exit_code", 0) or 0),
+                        getattr(done, "stdout", "") or "", getattr(done, "stderr", "") or "")
+    except Exception as why:                               # noqa: BLE001 -- reported as an outcome
+        return _Outcome(int(getattr(why, "exit_code", 1) or 1),
+                        getattr(why, "stdout", "") or "",
+                        (getattr(why, "stderr", "") or "") or str(why))
+
+
+
 def _scale_of(task_dir: str) -> str:
     try:
         with open(os.path.join(task_dir, "task.toml"), encoding="utf-8") as handle:
@@ -204,20 +234,19 @@ def drive(task_dir: str, *, api_key: str, template: str,
         record["stage"] = "build"
         built = None
         for attempt in range(BUILD_ATTEMPTS):
-            built = sandbox.commands.run(
-                "docker build --pull -t %s %s/environment" % (tag, remote),
-                timeout=BUILD_TIMEOUT, request_timeout=BUILD_TIMEOUT + 120)
+            built = _run(sandbox, "docker build --pull -t %s %s/environment" % (tag, remote),
+                         timeout=BUILD_TIMEOUT)
             if built.exit_code == 0:
                 break
-            output = (built.stdout or "") + (built.stderr or "")
+            output = built.output
             if attempt < BUILD_ATTEMPTS - 1 and any(m in output for m in TRANSPORT_MARKS):
                 log("in-image: build hit the wire, retrying (%d/%d)" % (attempt + 1, BUILD_ATTEMPTS))
                 time.sleep(5.0 * (attempt + 1))
                 continue
             break
         if built is None or built.exit_code != 0:
-            record["detail"] = (_why_it_failed((built.stdout or "") + (built.stderr or ""))
-                                if built is not None else "the build produced no output")
+            record["detail"] = (_why_it_failed(built.output) if built is not None
+                                else "the build produced no output")
             return record
 
         # THE TWO SEAMS ARE DRIVEN DIFFERENTLY, and assuming otherwise fails a task that is fine:
@@ -234,11 +263,12 @@ def drive(task_dir: str, *, api_key: str, template: str,
             command = ("REWARD_PATH=/tmp/reward.json SUBMISSION_ROOT=tests/reference "
                        "python3 tests/verify.py --task-root tests --workspace tests/reference; "
                        "cat /tmp/reward.json 2>/dev/null")
-        replay = sandbox.commands.run(
-            "docker run --rm -v %s:/task -w /task %s sh -c %s" % (remote, tag, json.dumps(command)),
-            timeout=REPLAY_TIMEOUT, request_timeout=REPLAY_TIMEOUT + 120)
+        replay = _run(sandbox,
+                      "docker run --rm -v %s:/task -w /task %s sh -c %s"
+                      % (remote, tag, json.dumps(command)),
+                      timeout=REPLAY_TIMEOUT)
 
-        blob = (replay.stdout or "") + "\n" + (replay.stderr or "")
+        blob = replay.output
         report = _report_in(blob)
         if report is None:
             record["detail"] = "verifier produced no graded report: " + blob.strip()[-700:]

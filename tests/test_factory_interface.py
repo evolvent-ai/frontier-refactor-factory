@@ -474,3 +474,27 @@ def test_a_failed_build_reports_the_cause_not_the_frame():
 
     assert "uv_build could not be resolved" in said, said
     assert "originates from a subprocess" not in said, "that sentence explains nothing"
+
+
+def test_a_failing_command_comes_back_as_an_outcome_not_an_exception():
+    """The SDK raises `CommandExitException` on a non-zero exit rather than returning it.
+
+    Written against a return value, the build's `exit_code != 0` branch was unreachable: the retry
+    for transient network failures never ran, and what reached the ledger was the raw exception tail
+    rather than the cause. Both looked like they worked -- the ledger still said the build failed,
+    just never why, and never after a retry.
+    """
+    from frf.observe.in_image import _run
+
+    class _Raising:
+        class commands:
+            @staticmethod
+            def run(_command, **_kw):
+                error = RuntimeError("Command exited with code 1")
+                error.exit_code, error.stdout, error.stderr = 1, "", "error: no such crate"
+                raise error
+
+    outcome = _run(_Raising(), "docker build .", timeout=1.0)
+
+    assert outcome.exit_code == 1, "a raised failure must still report its code"
+    assert "no such crate" in outcome.output, "and carry the output the retry and report read"
