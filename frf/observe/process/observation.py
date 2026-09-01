@@ -199,3 +199,21 @@ def grade(expectation: Expectation, actual: Observation) -> tuple[int, int, list
             reasons.append("step %d %s: %d line(s) match in count but differ in content%s"
                            % (expectation.step, name, expected.line_count, ungraded))
     return passed, total, reasons
+
+
+def did_work(observed) -> bool:
+    """Whether one observation shows the program having done something. -> bool.
+
+    ONE DEFINITION, because two would drift and the drift would be silent. The smoke gate asks this
+    of a single run before paying for a freeze; the freeze asks it of a whole corpus afterwards. If
+    they disagreed, a corpus could pass the cheap gate and be discarded by the expensive one, or
+    worse, the other way round.
+
+    Stdout is a `Stream` of lines rather than a string: written for a string this answers "no work"
+    for every observation there is, which would refuse everything.
+    """
+    stream = getattr(observed, "stdout", None)
+    lines = getattr(stream, "lines", ()) if stream is not None else ()
+    if any(str(line).strip() for line in lines):
+        return True
+    return int(getattr(observed, "exit_code", 1) or 0) == 0

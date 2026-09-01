@@ -959,6 +959,7 @@ class Observer:
         return coverage.backend_for(self.material.language)
 
 
+
 class Repo:
     """The repo scale: fork a program, time it, compare four channels.
 
@@ -1278,11 +1279,33 @@ for name, target in scripts.items():
         # commands, missing entrypoints and broken fixtures are rejected before the full corpus cost.
         smoke = scenarios[:min(3, len(scenarios))]
         try:
+            from ..observe.process import observation as _observation
             observer = self.observe()
+            worked = False
             for scenario in smoke:
-                observer.run(spec, scenario)
+                for observed in observer.run(spec, scenario):
+                    if _observation.did_work(observed):
+                        worked = True
         except Exception as exc:
             raise ValueError("repository smoke failed before freeze: %s" % str(exc)[:1200]) from exc
+        # THE SMOKE GATE HAS TO LOOK AT WHAT CAME BACK. It ran three scenarios and checked only that
+        # nothing RAISED -- and a program invoked without the arguments it needs does not raise. It
+        # prints its usage to stderr, writes nothing to stdout, touches no file and exits 2, every
+        # time identically. The freeze then agrees with itself five times over, `ceiling` scores the
+        # reference 100% against its own frozen failure, and the task ships grading a submission on
+        # reproducing an error message.
+        #
+        # 76 of 82 repo tasks in one corpus had empty stdout on every graded scenario: 93% of
+        # everything this scale had produced. The gate's own docstring says it exists to reject
+        # malformed commands; it just never asked whether the command had done anything.
+        #
+        # Here rather than after the freeze because it costs three runs instead of five times the
+        # corpus, and because a scale that is told early can go and draw different scenarios.
+        if not worked:
+            raise ValueError(
+                "%s ran but did nothing: every smoke scenario wrote no output and exited non-zero, "
+                "which is what an invocation the program does not accept looks like"
+                % self._material.identity)
         # The scenario corpus is the concrete contract for a process task. Feed a compact summary
         # back into the statement so a solver can see what is actually exercised instead of only
         # receiving the repository's broad README description.

@@ -230,3 +230,53 @@ def test_a_node_start_script_is_built_before_it_is_started():
     assert invoke == ["npm", "run", "start"]
     assert ["npm", "run", "build"] in build, \
         "a project that declares a build must have it run before start: %r" % (build,)
+
+
+def test_the_smoke_gate_asks_whether_the_command_did_anything():
+    """It ran three scenarios and checked only that nothing RAISED.
+
+    A program invoked without the arguments it needs does not raise: it prints its usage to stderr,
+    writes nothing to stdout, touches no file and exits 2. The freeze then agrees with itself five
+    times over and the task ships grading a submission on reproducing an error message. 76 of 82
+    repo tasks in one corpus were exactly that.
+    """
+    import frf.scales.repo as repo_module
+
+    source = open(repo_module.__file__, encoding="utf-8").read()
+    block = source[source.index("smoke = scenarios[:min(3"):]
+    block = block[:block.index("# The scenario corpus is the concrete contract")]
+
+    assert "did_work" in block, "the smoke gate must look at what came back, not only that it did"
+    assert "ran but did nothing" in block, "and say so in words that name the cause"
+
+
+def test_one_definition_of_having_done_work():
+    """The smoke gate asks it of one run, the freeze asks it of a corpus.
+
+    Two definitions would drift, and the drift would be silent: a corpus could pass the cheap gate
+    and be discarded by the expensive one, or worse, the other way round.
+    """
+    from frf.observe.process import observation, stages
+    import frf.scales.repo as repo_module
+
+    assert callable(observation.did_work)
+    for module in (stages, repo_module):
+        source = open(module.__file__, encoding="utf-8").read()
+        assert "def did_work" not in source and "def _did_work" not in source, \
+            "%s defines its own copy of the rule" % module.__name__
+
+
+def test_a_program_that_printed_nothing_and_failed_did_not_work():
+    from frf.observe.process.observation import did_work
+
+    class _Stream:
+        def __init__(self, text=""):
+            self.lines = tuple(text.splitlines())
+
+    class _Observed:
+        def __init__(self, code, out):
+            self.exit_code, self.stdout = code, _Stream(out)
+
+    assert not did_work(_Observed(2, "")), "usage error with no output is not work"
+    assert did_work(_Observed(0, "")), "a clean exit is work even with no stdout -- it wrote files"
+    assert did_work(_Observed(1, "3 problems found\n")), "output is work even when the exit is not 0"

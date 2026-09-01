@@ -69,19 +69,6 @@ class Corpus:
                    for steps in self.expectations.values() for step in steps)
 
 
-def _did_work(observed) -> bool:
-    """Whether one observation shows the reference doing something. -> bool.
-
-    Stdout is a `Stream` of lines rather than a string, and a `getattr(..., "stdout", "")` written
-    for a string silently answers "no work" for every observation there is.
-    """
-    stream = getattr(observed, "stdout", None)
-    lines = getattr(stream, "lines", ()) if stream is not None else ()
-    if any(str(line).strip() for line in lines):
-        return True
-    return int(getattr(observed, "exit_code", 1) or 0) == 0
-
-
 
 def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
     """Run every scenario `runs` times and keep, per channel, only what repeated exactly.
@@ -123,7 +110,7 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
         # DID IT DO ANYTHING? A program invoked wrongly prints its usage to stderr, writes nothing
         # to stdout, changes no file and exits non-zero -- every time, identically. See the refusal
         # below for what that costs.
-        if any(_did_work(one) for observed in runs_observed for one in observed):
+        if any(obs.did_work(one) for observed in runs_observed for one in observed):
             ever_worked = True
         steps = [obs.freeze(index, [observed[index] for observed in runs_observed])
                  for index in range(len(scenario.steps))]
