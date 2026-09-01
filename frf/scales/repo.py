@@ -1406,10 +1406,16 @@ for name, target in scripts.items():
             if any(_observation.did_work(one) for one in observed):
                 working.append(scenario)
         if not working:
+            # WHAT WAS ACTUALLY TRIED. Without it this refusal names a symptom and hides the only
+            # thing that would fix it: whether the lifted invocations were wrong, or right and the
+            # program needed something else. The scenarios are right here.
+            sample = "; ".join(
+                " ".join(str(x) for x in step.argv)
+                for scenario in scenarios[:4] for step in scenario.steps[:1])
             raise ValueError(
                 "%s ran but did nothing: every scenario wrote no output and exited non-zero, "
-                "which is what an invocation the program does not accept looks like"
-                % self._material.identity)
+                "which is what an invocation the program does not accept looks like. "
+                "Tried: %s" % (self._material.identity, sample[:600]))
         scenarios = tuple(working)
         # The scenario corpus is the concrete contract for a process task. Feed a compact summary
         # back into the statement so a solver can see what is actually exercised instead of only
