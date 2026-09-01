@@ -545,3 +545,39 @@ def test_a_documented_placeholder_is_not_a_command(tmp_path):
     argvs = [list(x.argv) for x in harvest_files(str(tmp_path), ("tool",))]
 
     assert argvs == [["tool", "convert", "samples/a.csv"]], argvs
+
+
+def test_one_documented_invocation_is_generalised_over_the_project_corpus():
+    """A corpus needs about ten scenarios and a project rarely documents ten commands.
+
+    It usually documents ONE and ships a directory of inputs -- the whole shape of a transformer,
+    and what this scale sources for. `corpus-too-thin` refused 34 candidates in one batch, most of
+    them far below the floor.
+
+    The shape stays the maintainer's; only the argument moves, and every substitution is still
+    proved by the same pre-freeze pass as the original.
+    """
+    import frf.scales.repo as repo_module
+
+    source = open(repo_module.__file__, encoding="utf-8").read()
+    block = source[source.index("ONE WORKING SHAPE, MANY INPUTS"):]
+    block = block[:block.index("return tuple(scenarios)")]
+
+    assert "siblings" in block and "SIBLING_SCENARIOS" in block
+    assert "endswith" in block, "a sibling must share the documented argument's kind"
+    assert repo_module.SIBLING_SCENARIOS >= 10, \
+        "ten scenarios of four channels is what the graded-point floor needs"
+
+
+def test_the_scenario_match_knows_the_declared_names_too():
+    """The search was taught what the project calls its command; the match was not.
+
+    A line lifted from a README as `redos-detector input.txt` found no token in `{node, cli.js}` and
+    was dropped again -- the same regression as the search, one layer down.
+    """
+    import frf.scales.repo as repo_module
+
+    source = open(repo_module.__file__, encoding="utf-8").read()
+    block = source[source.index("executable_names = ("):]
+    block = block[:block.index("scenarios = []")]
+    assert "_declared_names" in block

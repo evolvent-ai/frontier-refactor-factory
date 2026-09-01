@@ -759,6 +759,11 @@ class Material:
     survey: dict = field(default_factory=dict)
 
 
+# How many sibling inputs one documented invocation is generalised over. Ten scenarios of four
+# channels clear the graded-point floor, and the pre-freeze pass still has to prove each one.
+SIBLING_SCENARIOS = 12
+
+
 def _declared_names(root: str) -> tuple:
     """The command names a project publishes, as a reader would write them. -> names.
 
@@ -1507,7 +1512,12 @@ for name, target in scripts.items():
             if remote_root and observer is not None:
                 observer._remote_fixtures = remote_root + "/fixtures"
                 self._backend.push(fixtures_dir, observer._remote_fixtures)
-        executable_names = {os.path.basename(str(x)) for x in material.invoke if str(x)}
+        # THE DECLARED NAMES BELONG HERE TOO. The search above was taught to look for what the
+        # project calls its command; this match was not, so a line lifted from a README as
+        # `redos-detector input.txt` found no token in `{node, cli.js}` and was dropped again. The
+        # same regression, one layer down, and invisible for the same reason.
+        executable_names = ({os.path.basename(str(x)) for x in material.invoke if str(x)}
+                            | {os.path.basename(n) for n in _declared_names(material.root)})
         scenarios = []
         for item in invocations:
             argv = list(item.argv)
@@ -1517,8 +1527,31 @@ for name, target in scripts.items():
                 continue
             # Drop wrappers such as `python -m` or `poetry run`; the built program is already the
             # executable represented by PROGRAM_TOKEN.
+            tail = argv[match + 1:]
             scenarios.append(Scenario("harvest-%04d" % len(scenarios),
-                                      [Step(["{PROGRAM}"] + argv[match + 1:])], fixture=fixture))
+                                      [Step(["{PROGRAM}"] + tail)], fixture=fixture))
+            # ONE WORKING SHAPE, MANY INPUTS. A corpus needs about ten scenarios to reach the
+            # graded-point floor, and a project rarely documents ten commands. It usually documents
+            # ONE and ships a directory of inputs -- which is the whole shape of a transformer, and
+            # what this scale sources for.
+            #
+            # So a lifted invocation that names a file is generalised over the repository's own
+            # corpus of files with that extension. The shape is the maintainer's; only the argument
+            # moves, and every substitution is still proven by the same pre-freeze pass as the
+            # original.
+            for position, token in enumerate(tail):
+                stem, dot, extension = token.rpartition(".")
+                if not dot or not stem or "/" in extension:
+                    continue
+                siblings = [x for x in sorted(inputs)
+                            if x.endswith("." + extension) and x != token.lstrip("./")]
+                for sibling in siblings[:SIBLING_SCENARIOS]:
+                    swapped = list(tail)
+                    swapped[position] = sibling
+                    scenarios.append(Scenario(
+                        "harvest-%04d" % len(scenarios),
+                        [Step(["{PROGRAM}"] + swapped)], fixture=fixture))
+                break
         return tuple(scenarios)
 
     def _discover_scenarios(self) -> tuple:
