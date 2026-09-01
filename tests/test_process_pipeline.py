@@ -249,3 +249,89 @@ def test_a_shell_only_corpus_is_caught_by_e5():
                 or "reach" in detail                       # adequacy, reach half
                 or "does nothing already scores" in detail  # adequacy, floor half
                 ), refusal.detail
+
+
+def test_a_reference_that_never_ran_is_not_a_corpus():
+    """A program that was never found exits 127 on every scenario -- perfectly reproducibly.
+
+    Five runs agree exactly, every channel freezes, `ceiling` scores the reference 100% against its
+    own frozen failure, and E7 replays it happily. Every ruler passes, because each asks whether the
+    measurement can be trusted and none asks whether anything was measured. Fourteen of twenty-five
+    attested repo tasks in one corpus graded a submission on reproducing "command not found".
+    """
+    from frf.observe.process import stages as process_stages
+
+    class _Observation:
+        def __init__(self, code):
+            self.exit_code = code
+            self.stdout = ""
+            self.stderr = "could not execute"
+            self.tree = ""
+
+        def freeze(self, index, observed):
+            raise AssertionError("a corpus of 127s must be refused before anything is frozen")
+
+    class _Scenario:
+        def __init__(self, pid):
+            self.probe_id = pid
+            self.steps = [object()]
+
+    class _Source:
+        count = 3
+
+        def draw(self, _n):
+            return [_Scenario("scenario-%04d" % i) for i in range(3)]
+
+    class _Observer:
+        def run(self, _spec, _scenario):
+            return [_Observation(127)]
+
+    corpus = process_stages.freeze(object(), _Observer(), _Source(), runs=2)
+
+    assert not corpus.usable, "a corpus whose reference never ran must not be usable"
+    assert corpus.expectations == {}
+    assert "never" in corpus.adequacy_note and "127" in corpus.adequacy_note
+
+
+def test_one_scenario_exiting_127_is_still_real_material(monkeypatch):
+    """A scenario that exercises a missing-argument path may exit 127 by itself.
+
+    Refusing on any 127 would throw away real material; the rule is that NOTHING ran, not that
+    something returned 127.
+    """
+    from frf.observe.process import stages as process_stages
+
+    class _Step:
+        def graded_points(self):
+            return 4
+
+    monkeypatch.setattr(process_stages.obs, "freeze", lambda index, observed: _Step())
+
+    class _Observation:
+        def __init__(self, code):
+            self.exit_code = code
+
+    class _Scenario:
+        def __init__(self, pid, code):
+            self.probe_id = pid
+            self.steps = [object()]
+            self.code = code
+
+    class _Source:
+        count = 8
+
+        def draw(self, _n):
+            # One in eight, so the existing discard-rate rule (a corpus losing more than a quarter
+            # of its scenarios is not usable) is not what this test is measuring.
+            return ([_Scenario("scenario-0000", 127)]
+                    + [_Scenario("scenario-%04d" % i, 0) for i in range(1, 8)])
+
+    class _Observer:
+        def run(self, _spec, scenario):
+            return [_Observation(scenario.code)]
+
+    corpus = process_stages.freeze(object(), _Observer(), _Source(), runs=2)
+
+    assert corpus.usable, "one 127 among real runs is material, not a broken corpus"
+    assert "scenario-0001" in corpus.expectations, "the scenario that ran was kept"
+    assert "scenario-0000" not in corpus.expectations, "the one that never ran was dropped"

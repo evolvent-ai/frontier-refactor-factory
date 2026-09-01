@@ -38,6 +38,11 @@ TRIVIAL = {
 }
 
 
+# What a shell and this factory's own verifier both report when the program is not there. A corpus
+# made entirely of these measured nothing; see the refusal in `freeze`.
+PROGRAM_NOT_FOUND = 127
+
+
 @dataclass
 class Corpus:
     """What a freeze produced. Same four attributes the pipeline reads on either seam."""
@@ -77,6 +82,8 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
         max_seconds = 180.0
     deadline = time.monotonic() + max_seconds
     frozen, dropped = {}, 0
+    # Whether the reference was ever actually executed. See the refusal below.
+    ever_ran = False
 
     batched = getattr(observer, "run_many", None)
     all_runs = ([batched(spec, scenarios) for _ in range(runs)] if batched is not None else None)
@@ -88,12 +95,40 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
             runs_observed = [observer.run(spec, scenario) for _ in range(runs)]
         else:
             runs_observed = [batch.get(scenario.probe_id, []) for batch in all_runs]
+        # A SCENARIO WHOSE EVERY RUN SAID "NOT FOUND" MEASURED NOTHING, so it is dropped here
+        # rather than frozen. Freezing it would succeed -- 127 repeats perfectly -- and produce an
+        # expectation that grades a submission on reproducing a missing program.
+        if runs_observed and all(
+                int(getattr(one, "exit_code", 0) or 0) == PROGRAM_NOT_FOUND
+                for observed in runs_observed for one in observed):
+            dropped += 1
+            continue
+        ever_ran = True
         steps = [obs.freeze(index, [observed[index] for observed in runs_observed])
                  for index in range(len(scenario.steps))]
         if any(step.graded_points() for step in steps):
             frozen[scenario.probe_id] = steps
         else:
             dropped += 1
+
+    # DID THE REFERENCE ACTUALLY RUN? A program that was never found exits 127 on every scenario,
+    # and that is PERFECTLY REPRODUCIBLE: five runs agree exactly, every channel freezes, `ceiling`
+    # scores the reference 100% against its own frozen failure, and E7 replays it happily. Every
+    # ruler this factory has passes, because each of them asks whether the measurement can be
+    # trusted and none of them asks whether anything was measured at all.
+    #
+    # Not hypothetical: 14 of 25 attested repo tasks in one corpus exited 127 on EVERY scenario.
+    # They graded a submission on reproducing "command not found". The cause is the same one behind
+    # the rest of this file's history -- the reference is installed by the Dockerfile the task
+    # SHIPS, and the freeze runs in the sandbox that PRODUCES it, where nothing installed it.
+    #
+    # `not ever_ran`, rather than refusing any 127: a scenario that exercises a missing-argument or
+    # bad-input path may exit 127 by itself, and that is real material worth keeping.
+    if scenarios and not ever_ran:
+        return Corpus(scenarios=[], expectations={}, discard_rate=1.0, usable=False,
+                      adequacy_note="the reference exited %d on every scenario -- it was never "
+                                    "found, so nothing was measured" % PROGRAM_NOT_FOUND,
+                      timed=[], runs=runs)
 
     attempted = len(scenarios)
     rate = (dropped / attempted) if attempted else 0.0

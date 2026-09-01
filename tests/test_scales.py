@@ -169,7 +169,12 @@ def test_a_repo_needs_scenarios_and_says_why_when_it_has_none():
     try:
         repo.probes(spec)
     except ValueError as exc:
-        assert "no scenarios were lifted" in str(exc)
+        # TWO WORDINGS FOR ONE REFUSAL, and the test used to name only the general one. A repository
+        # that lifts nothing says "no scenarios were lifted"; one that lifts only `--help`-shaped
+        # probes says so more precisely. Both are "there is nothing here to observe", and pinning
+        # the assertion to the vaguer of them fails whenever the miner gets more specific.
+        assert ("no scenarios were lifted" in str(exc)
+                or "without a real input workload" in str(exc)), str(exc)
     else:
         raise AssertionError("a repository with no scenarios must be refused")
 
