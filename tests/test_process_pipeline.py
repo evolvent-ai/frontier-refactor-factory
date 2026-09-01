@@ -335,3 +335,103 @@ def test_one_scenario_exiting_127_is_still_real_material(monkeypatch):
     assert corpus.usable, "one 127 among real runs is material, not a broken corpus"
     assert "scenario-0001" in corpus.expectations, "the scenario that ran was kept"
     assert "scenario-0000" not in corpus.expectations, "the one that never ran was dropped"
+
+
+def test_a_reference_that_only_printed_its_usage_is_not_a_corpus(monkeypatch):
+    """Invoked without the arguments it needs, a program prints usage to stderr and exits 2.
+
+    It writes nothing to stdout, touches no file, and does that identically every run -- as
+    reproducible as exit 127 and passing exactly the same rulers. 76 of 82 repo tasks in one corpus
+    had EMPTY STDOUT on every graded scenario: 93% of everything the scale had produced, grading a
+    submission on reproducing an error message.
+    """
+    from frf.observe.process import stages as process_stages
+
+    # Freezing is per-scenario and in-memory; "did anything work" is a question about the WHOLE
+    # corpus and can only be answered once every scenario has been observed. So the scenarios are
+    # frozen and the corpus is then discarded -- what matters is that nothing ships, not that no
+    # digest was computed.
+    class _Step:
+        def graded_points(self):
+            return 4
+
+    monkeypatch.setattr(process_stages.obs, "freeze", lambda index, observed: _Step())
+
+    class _Stream:
+        def __init__(self, text=""):
+            self.lines = tuple(text.splitlines())
+
+    class _Observation:
+        def __init__(self):
+            self.exit_code = 2
+            self.stdout = _Stream("")
+            self.stderr = _Stream("usage: thing [options] FILE")
+
+    class _Scenario:
+        def __init__(self, pid):
+            self.probe_id = pid
+            self.steps = [object()]
+
+    class _Source:
+        count = 4
+
+        def draw(self, _n):
+            return [_Scenario("scenario-%04d" % i) for i in range(4)]
+
+    class _Observer:
+        def run(self, _spec, _scenario):
+            return [_Observation()]
+
+    corpus = process_stages.freeze(object(), _Observer(), _Source(), runs=2)
+
+    assert not corpus.usable
+    assert corpus.expectations == {}
+    assert "never did any work" in corpus.adequacy_note
+
+
+def test_an_error_path_is_material_when_the_corpus_also_works(monkeypatch):
+    """A program's error path is real material -- when the corpus also contains it working.
+
+    The rule is corpus-level for exactly this reason: refusing every non-zero exit would throw away
+    the scenarios that show what a program does with bad input, which is behaviour worth grading.
+    """
+    from frf.observe.process import stages as process_stages
+
+    class _Step:
+        def graded_points(self):
+            return 4
+
+    monkeypatch.setattr(process_stages.obs, "freeze", lambda index, observed: _Step())
+
+    class _Stream:
+        def __init__(self, text=""):
+            self.lines = tuple(text.splitlines())
+
+    class _Observation:
+        def __init__(self, code, out):
+            self.exit_code = code
+            self.stdout, self.stderr = _Stream(out), _Stream("")
+
+    class _Scenario:
+        def __init__(self, pid, code, out):
+            self.probe_id, self.steps = pid, [object()]
+            self.code, self.out = code, out
+
+    class _Source:
+        count = 8
+
+        def draw(self, _n):
+            # Eight, because `_pick_timed` holds the last three out of the graded set as the timing
+            # workload -- with four, the error path would be the only graded scenario left.
+            return ([_Scenario("scenario-0000", 2, "")]                      # an error path
+                    + [_Scenario("scenario-%04d" % i, 0, "result\n")        # and real work
+                       for i in range(1, 8)])
+
+    class _Observer:
+        def run(self, _spec, scenario):
+            return [_Observation(scenario.code, scenario.out)]
+
+    corpus = process_stages.freeze(object(), _Observer(), _Source(), runs=2)
+
+    assert corpus.usable, "a corpus that works must keep its error-path scenario"
+    assert "scenario-0000" in corpus.expectations, "the error path is material and was kept"

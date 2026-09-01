@@ -69,6 +69,20 @@ class Corpus:
                    for steps in self.expectations.values() for step in steps)
 
 
+def _did_work(observed) -> bool:
+    """Whether one observation shows the reference doing something. -> bool.
+
+    Stdout is a `Stream` of lines rather than a string, and a `getattr(..., "stdout", "")` written
+    for a string silently answers "no work" for every observation there is.
+    """
+    stream = getattr(observed, "stdout", None)
+    lines = getattr(stream, "lines", ()) if stream is not None else ()
+    if any(str(line).strip() for line in lines):
+        return True
+    return int(getattr(observed, "exit_code", 1) or 0) == 0
+
+
+
 def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
     """Run every scenario `runs` times and keep, per channel, only what repeated exactly.
 
@@ -82,8 +96,10 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
         max_seconds = 180.0
     deadline = time.monotonic() + max_seconds
     frozen, dropped = {}, 0
-    # Whether the reference was ever actually executed. See the refusal below.
+    # Whether the reference was ever actually executed, and whether it ever did any WORK.
+    # See the two refusals below; they are the same question asked one level apart.
     ever_ran = False
+    ever_worked = False
 
     batched = getattr(observer, "run_many", None)
     all_runs = ([batched(spec, scenarios) for _ in range(runs)] if batched is not None else None)
@@ -104,6 +120,11 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
             dropped += 1
             continue
         ever_ran = True
+        # DID IT DO ANYTHING? A program invoked wrongly prints its usage to stderr, writes nothing
+        # to stdout, changes no file and exits non-zero -- every time, identically. See the refusal
+        # below for what that costs.
+        if any(_did_work(one) for observed in runs_observed for one in observed):
+            ever_worked = True
         steps = [obs.freeze(index, [observed[index] for observed in runs_observed])
                  for index in range(len(scenario.steps))]
         if any(step.graded_points() for step in steps):
@@ -128,6 +149,24 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
         return Corpus(scenarios=[], expectations={}, discard_rate=1.0, usable=False,
                       adequacy_note="the reference exited %d on every scenario -- it was never "
                                     "found, so nothing was measured" % PROGRAM_NOT_FOUND,
+                      timed=[], runs=runs)
+
+    # ...AND DID IT DO ANY WORK? The check above catches a program that was never found. This
+    # catches one that was found, ran, and did nothing: invoked without the arguments it needs, it
+    # prints usage to stderr, writes nothing to stdout, touches no file and exits 2. That is as
+    # reproducible as exit 127 and passes exactly the same rulers -- five runs agree, every channel
+    # freezes, `ceiling` scores the reference 100% against its own frozen failure.
+    #
+    # 76 of 82 repo tasks in one corpus had EMPTY STDOUT on every graded scenario -- 93% of
+    # everything the scale had ever produced, grading a submission on reproducing an error message.
+    #
+    # The rule is corpus-level, not per-scenario, on purpose: a program's error path is real
+    # material when the corpus also contains it working. What is not material is a corpus made
+    # entirely of error paths.
+    if scenarios and ever_ran and not ever_worked:
+        return Corpus(scenarios=[], expectations={}, discard_rate=1.0, usable=False,
+                      adequacy_note="the reference wrote nothing to stdout and exited non-zero on "
+                                    "every scenario -- it was invoked but never did any work",
                       timed=[], runs=runs)
 
     attempted = len(scenarios)
