@@ -186,3 +186,23 @@ def test_an_entry_point_the_build_did_not_install_is_refused_not_observed():
     assert "command -v" in block
     assert "BuildFailed" in block.split("command -v", 1)[1], \
         "a program the build did not install must be refused, not observed as 127s"
+
+
+def test_a_node_project_is_allowed_to_fetch_what_it_declares():
+    """`npm install --offline` in a fresh sandbox installs nothing: the cache is empty.
+
+    The project's own build then fails on its own devDependencies -- `sh: 1: ts-node: not found`,
+    `sh: 1: vitest: not found` -- and six of eighteen repo build failures in one batch were exactly
+    that, each reading as a repository that would not build when the repository was fine.
+
+    Building a task may reach the network; the SUBMISSION may not. They are different claims.
+    """
+    import frf.scales.repo as repo_module
+
+    source = open(repo_module.__file__, encoding="utf-8").read()
+    installs = [line for line in source.splitlines()
+                if '"npm", "install"' in line]
+    assert installs, "the node entry-point discovery must still install dependencies"
+    for line in installs:
+        assert "--offline" not in line, \
+            "a fresh sandbox has no npm cache, so --offline installs nothing: %s" % line.strip()

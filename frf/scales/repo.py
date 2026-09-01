@@ -501,12 +501,22 @@ def _discover_entrypoint(root: str) -> tuple:
             manifest = json.load(open(package_json, encoding="utf-8"))
             bins = manifest.get("bin")
             name = next(iter(bins)) if isinstance(bins, dict) else (manifest.get("name") if isinstance(bins, str) else "")
+            # NOT `--offline`. A fresh sandbox has an empty npm cache, so `--offline` installs
+            # nothing at all and the project's own build then fails on its own devDependencies:
+            # `sh: 1: ts-node: not found`, `sh: 1: vitest: not found`. Six of eighteen repo build
+            # failures in one batch were that, and every one read as a repository that would not
+            # build when the repository was fine and we had refused to fetch what it declares.
+            #
+            # Fetching here is allowed and is not the same claim as the delivered task's: BUILDING a
+            # task may reach the network, and the SUBMISSION may not. `--ignore-scripts` stays --
+            # it is what keeps an arbitrary postinstall from running, and the measured failure is
+            # missing packages rather than skipped hooks.
             if name:
-                return [["npm", "install", "--ignore-scripts", "--offline"], ["npm", "run", "build"]], [name]
+                return [["npm", "install", "--ignore-scripts"], ["npm", "run", "build"]], [name]
             scripts = manifest.get("scripts", {})
             for target in ("start", "cli", "run"):
                 if target in scripts:
-                    return [["npm", "install", "--ignore-scripts", "--offline"]], ["npm", "run", target]
+                    return [["npm", "install", "--ignore-scripts"]], ["npm", "run", target]
         except (OSError, ValueError, TypeError):
             pass
 
