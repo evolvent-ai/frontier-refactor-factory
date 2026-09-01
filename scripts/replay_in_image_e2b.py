@@ -83,10 +83,37 @@ def replay_one(task_dir: str, api_key: str, template: str) -> dict:
     return in_image.drive(task_dir, api_key=api_key, template=template)
 
 
-def _task_dirs(root: str) -> list[str]:
-    return sorted({os.path.dirname(p) for p in
-                   (os.path.join(d, f) for d, _s, fs in os.walk(root) for f in fs
-                    if f == "task.toml")})
+def _task_dirs(root: str, *, attested_only: bool = True) -> list[str]:
+    """Every task under `root`. -> directories.
+
+    ATTESTED ONLY, BY DEFAULT, and getting this wrong cost most of a night. A results directory
+    holds the leftovers of REFUSED candidates beside the tasks that passed: a candidate refused at
+    `package-reference-replay-failed` has already written its task.toml and its tests/ before the
+    gate that rejected it ran. Replaying those and counting them as failures measures the pipeline's
+    refusals a second time and reports them as corpus defects -- one such directory sent a diagnosis
+    through node versions, lockfiles and dependency trees before its ledger row turned out to say,
+    in the same words the replay used, that the pipeline had already caught it.
+
+    `--all` replays them anyway, which is what to use when asking "did the gate refuse these for the
+    reason it said".
+    """
+    found = sorted({os.path.dirname(p) for p in
+                    (os.path.join(d, f) for d, _s, fs in os.walk(root) for f in fs
+                     if f == "task.toml")})
+    if not attested_only:
+        return found
+    from frf.core import audit
+
+    attested = set()
+    for subject in audit.walk(root):
+        if subject.status == audit.ATTESTED:
+            attested.update(os.path.abspath(p) for p in subject.paths)
+    kept = [d for d in found if os.path.abspath(d) in attested]
+    skipped = len(found) - len(kept)
+    if skipped:
+        print("skipping %d unattested directory(ies) -- refused candidates leave one behind; "
+              "pass --all to include them" % skipped, flush=True)
+    return kept
 
 
 def main() -> int:
@@ -95,11 +122,13 @@ def main() -> int:
     parser.add_argument("--root", help="a results directory; every task under it is replayed")
     parser.add_argument("--concurrent", type=int, default=3)
     parser.add_argument("--json", help="write the full report here")
+    parser.add_argument("--all", action="store_true",
+                        help="include unattested directories (refused candidates leave one behind)")
     args = parser.parse_args()
 
     targets = list(args.tasks)
     if args.root:
-        targets += _task_dirs(args.root)
+        targets += _task_dirs(args.root, attested_only=not args.all)
     if not targets:
         print("nothing to replay: pass task directories or --root", file=sys.stderr)
         return 2
