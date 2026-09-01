@@ -232,22 +232,27 @@ def test_a_node_start_script_is_built_before_it_is_started():
         "a project that declares a build must have it run before start: %r" % (build,)
 
 
-def test_the_smoke_gate_asks_whether_the_command_did_anything():
+def test_the_smoke_gate_keeps_what_works_instead_of_refusing_what_does_not():
     """It ran three scenarios and checked only that nothing RAISED.
 
-    A program invoked without the arguments it needs does not raise: it prints its usage to stderr,
-    writes nothing to stdout, touches no file and exits 2. The freeze then agrees with itself five
-    times over and the task ships grading a submission on reproducing an error message. 76 of 82
-    repo tasks in one corpus were exactly that.
+    An invocation the program does not accept does not raise: it prints usage to stderr, writes
+    nothing to stdout, touches no file and exits 2. 76 of 82 repo tasks in one corpus were made
+    entirely of those -- reproducible, gradeable, and measuring nothing.
+
+    Refusing the whole candidate when three samples fail is the other error. A repository yields
+    scenarios by guessing how its program is invoked, and guessing wrongly about most of them says
+    nothing about the rest: forty lifted and eight that run is a task.
     """
     import frf.scales.repo as repo_module
 
     source = open(repo_module.__file__, encoding="utf-8").read()
-    block = source[source.index("smoke = scenarios[:min(3"):]
+    block = source[source.index("KEEP WHAT WORKS"):]
     block = block[:block.index("# The scenario corpus is the concrete contract")]
 
-    assert "did_work" in block, "the smoke gate must look at what came back, not only that it did"
-    assert "ran but did nothing" in block, "and say so in words that name the cause"
+    assert "did_work" in block, "the gate must look at what came back, not only that it did"
+    assert "working.append(scenario)" in block, "and keep the scenarios that did something"
+    assert "ran but did nothing" in block, "refusing only when NOTHING worked"
+    assert "SMOKE_MAX_SECONDS" in block, "bounded, or a slow repository spends the freeze's budget"
 
 
 def test_one_definition_of_having_done_work():

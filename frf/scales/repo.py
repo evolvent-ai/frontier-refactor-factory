@@ -22,6 +22,7 @@ the only form of the requirement that cannot be ignored.
 """
 from __future__ import annotations
 
+import time
 import os
 import glob
 import re
@@ -31,6 +32,7 @@ import subprocess
 import uuid
 from dataclasses import dataclass, field
 
+from ..observe.process import observation as _observation
 from ..core import integrity, scratch
 from ..core.scale import Candidate, Spec, TaskForm
 from ..observe import coverage
@@ -960,6 +962,13 @@ class Observer:
 
 
 
+# How long the pre-freeze pass may spend proving which scenarios do anything. A fifth of the freeze
+# budget: the freeze runs every scenario five times, this runs each once, and a repository that
+# cannot be proven in that time is not thereby refused -- the untried scenarios are kept and the
+# corpus checks decide.
+SMOKE_MAX_SECONDS = float(os.environ.get("FRF_SMOKE_MAX_SECONDS", "360"))
+
+
 class Repo:
     """The repo scale: fork a program, time it, compare four channels.
 
@@ -1277,35 +1286,42 @@ for name, target in scripts.items():
         _validate_scenarios_call_subject(scenarios)
         # Cheap E2B smoke before full freeze: exercise a few repository-owned scenarios so malformed
         # commands, missing entrypoints and broken fixtures are rejected before the full corpus cost.
-        smoke = scenarios[:min(3, len(scenarios))]
-        try:
-            from ..observe.process import observation as _observation
-            observer = self.observe()
-            worked = False
-            for scenario in smoke:
-                for observed in observer.run(spec, scenario):
-                    if _observation.did_work(observed):
-                        worked = True
-        except Exception as exc:
-            raise ValueError("repository smoke failed before freeze: %s" % str(exc)[:1200]) from exc
-        # THE SMOKE GATE HAS TO LOOK AT WHAT CAME BACK. It ran three scenarios and checked only that
-        # nothing RAISED -- and a program invoked without the arguments it needs does not raise. It
-        # prints its usage to stderr, writes nothing to stdout, touches no file and exits 2, every
-        # time identically. The freeze then agrees with itself five times over, `ceiling` scores the
-        # reference 100% against its own frozen failure, and the task ships grading a submission on
-        # reproducing an error message.
+        # KEEP WHAT WORKS, RATHER THAN REFUSING WHAT MOSTLY DOES NOT. This used to run three
+        # scenarios and check only that nothing RAISED -- and an invocation the program does not
+        # accept does not raise. It prints usage to stderr, writes nothing to stdout, touches no
+        # file and exits 2, identically every time. 76 of 82 repo tasks in one corpus were made
+        # entirely of those: reproducible, gradeable, and measuring nothing.
         #
-        # 76 of 82 repo tasks in one corpus had empty stdout on every graded scenario: 93% of
-        # everything this scale had produced. The gate's own docstring says it exists to reject
-        # malformed commands; it just never asked whether the command had done anything.
-        #
-        # Here rather than after the freeze because it costs three runs instead of five times the
-        # corpus, and because a scale that is told early can go and draw different scenarios.
-        if not worked:
+        # Refusing the whole candidate when three samples fail is the other error. A repository
+        # yields scenarios by guessing how its program is invoked, and guessing wrongly about most
+        # of them says nothing about the rest: forty lifted, eight that run, is a task. So every
+        # scenario is tried ONCE -- a fifth of what the freeze will spend on it -- and the ones that
+        # did something are what the freeze then sees.
+        observer = self.observe()
+        working, tried = [], 0
+        deadline = time.monotonic() + SMOKE_MAX_SECONDS
+        for scenario in scenarios:
+            if time.monotonic() >= deadline:
+                # Out of time rather than out of material: keep what has been proven and let the
+                # thinness checks below decide, instead of charging the clock to the repository.
+                working.extend(scenarios[tried:])
+                break
+            tried += 1
+            try:
+                observed = observer.run(spec, scenario)
+            except Exception as exc:                       # noqa: BLE001 -- one scenario, not all
+                if tried == 1 and not working:
+                    raise ValueError("repository smoke failed before freeze: %s"
+                                     % str(exc)[:1200]) from exc
+                continue
+            if any(_observation.did_work(one) for one in observed):
+                working.append(scenario)
+        if not working:
             raise ValueError(
-                "%s ran but did nothing: every smoke scenario wrote no output and exited non-zero, "
+                "%s ran but did nothing: every scenario wrote no output and exited non-zero, "
                 "which is what an invocation the program does not accept looks like"
                 % self._material.identity)
+        scenarios = tuple(working)
         # The scenario corpus is the concrete contract for a process task. Feed a compact summary
         # back into the statement so a solver can see what is actually exercised instead of only
         # receiving the repository's broad README description.
