@@ -449,3 +449,28 @@ def test_one_unbuildable_task_does_not_end_an_in_image_audit():
         "drive() must report a failure rather than raise it into the caller's pool"
     assert body.index("except Exception as why") < body.index("finally:"), \
         "and it must catch before the teardown, or the record never carries the reason"
+
+
+def test_a_failed_build_reports_the_cause_not_the_frame():
+    """Keeping the tail of a docker build keeps the part every failure shares.
+
+    Five repo tasks all read `RUN pip install --no-cache-dir /src: [end of output] ... error:
+    metadata-generation-failed`, which names the step and not the cause -- while the sentence that
+    would have distinguished them sat hundreds of lines above the tail.
+    """
+    from frf.observe.in_image import _why_it_failed
+
+    output = "\n".join([
+        "#8 [4/8] RUN pip install --no-cache-dir /src",
+        "  Downloading things",
+        "  error: the build backend uv_build could not be resolved",
+        "  " + "filler " * 200,
+        "  note: This error originates from a subprocess, and is likely not a problem with pip.",
+        "  error: metadata-generation-failed",
+        "  hint: See above for details.",
+    ])
+
+    said = _why_it_failed(output)
+
+    assert "uv_build could not be resolved" in said, said
+    assert "originates from a subprocess" not in said, "that sentence explains nothing"

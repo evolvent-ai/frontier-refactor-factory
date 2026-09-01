@@ -68,6 +68,37 @@ def tar_bytes(root: str) -> bytes:
     return buffer.getvalue()
 
 
+# Lines a build writes when it is explaining itself. A docker build ends with a frame quoting the
+# failing RUN and a `note:` telling the reader it is not pip's fault -- true and useless -- while the
+# sentence that names the cause is hundreds of lines above it.
+_CAUSE_MARKS = ("error:", "ERROR:", "error[", "fatal:", "failed:", "Traceback",
+                "not found", "No such file", "Permission denied", "cannot find",
+                "requires", "unsupported", "incompatible", "expected")
+
+# Noise that matches the marks above without explaining anything.
+_CAUSE_NOISE = ("This error originates from a subprocess", "See above for details",
+                "hint: ", "note: This is an issue with the package")
+
+
+def _why_it_failed(output: str, limit: int = 700) -> str:
+    """The part of a failed build that says WHY. -> a bounded string.
+
+    THE TAIL IS THE WRONG END and this is the second time that has cost hours. Keeping the last 700
+    characters of a docker build keeps the frame that quotes the failing RUN line, which every
+    failure has, and drops the message that distinguishes them: five repo tasks all read
+    `RUN pip install --no-cache-dir /src: [end of output] ... error: metadata-generation-failed`,
+    which names the step and not the cause.
+    """
+    lines = [" ".join(line.split()) for line in output.splitlines() if line.strip()]
+    causes = [line for line in lines
+              if any(mark in line for mark in _CAUSE_MARKS)
+              and not any(noise in line for noise in _CAUSE_NOISE)]
+    picked = causes[:6] if causes else lines[-6:]
+    joined = " | ".join(picked)
+    return joined[:limit] if len(joined) <= limit else joined[:limit - 3] + "..."
+
+
+
 def _scale_of(task_dir: str) -> str:
     try:
         with open(os.path.join(task_dir, "task.toml"), encoding="utf-8") as handle:
@@ -185,7 +216,7 @@ def drive(task_dir: str, *, api_key: str, template: str,
                 continue
             break
         if built is None or built.exit_code != 0:
-            record["detail"] = (((built.stdout or "") + (built.stderr or ""))[-700:]
+            record["detail"] = (_why_it_failed((built.stdout or "") + (built.stderr or ""))
                                 if built is not None else "the build produced no output")
             return record
 

@@ -62,7 +62,10 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "go version",
     },
     "rust": {
-        "base_image": "rust:1.82-bookworm",
+        # 1.82 was below what real crates ask for: `Consider trying a newer version of Cargo`, exit 1, no
+        # image -- the same shape as Go's 1.23 floor and found the same way, by building the image a
+        # task actually ships. A crate that outruns this fails honestly rather than silently.
+        "base_image": "rust:1.90-bookworm",
         "apt_packages": [],
         "install_cmds": [
             "curl https://sh.rustup.rs -sSf"
