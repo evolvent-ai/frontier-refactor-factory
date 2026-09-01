@@ -452,3 +452,30 @@ def test_a_project_is_installed_with_what_it_needs():
         assert "--ignore-scripts" not in line, (
             "refusing `prepare` while running `npm run build` protects nothing and breaks every "
             "project that builds itself in prepare: %s" % line.strip())
+
+
+def test_npm_run_build_is_only_used_when_the_project_declares_it(tmp_path):
+    """`npm run build` was added unconditionally and fails outright when absent.
+
+    `npm error Missing script: "build"`, exit 1, and the repository is recorded as one that will not
+    build. It is the branch every package with a `bin` takes -- which is every candidate the repo
+    scale wants -- and node built at 0% while it was there.
+    """
+    import json
+    from frf.scales.repo import _discover_entrypoint
+
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "thing", "bin": {"thing": "cli.js"}, "scripts": {"test": "jest"}}),
+        encoding="utf-8")
+    build, invoke = _discover_entrypoint(str(tmp_path))
+
+    assert ["npm", "install"] in build
+    assert ["npm", "run", "build"] not in build, \
+        "the project declares no build script: %r" % (build,)
+
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "thing", "bin": {"thing": "cli.js"},
+                    "scripts": {"build": "tsc"}}),
+        encoding="utf-8")
+    build, _ = _discover_entrypoint(str(tmp_path))
+    assert ["npm", "run", "build"] in build, "and it must be run when the project does declare one"

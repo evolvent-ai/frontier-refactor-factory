@@ -518,7 +518,15 @@ def _discover_entrypoint(root: str) -> tuple:
             # every project that builds itself in `prepare` -- node repo candidates built at 4%
             # against Go's 100%.
             if name:
-                return [["npm", "install"], ["npm", "run", "build"]], [name]
+                # ONLY IF THE PROJECT HAS ONE. `npm run build` was added unconditionally here and
+                # fails outright when it is absent: `npm error Missing script: "build"`, exit 1, and
+                # the repository is recorded as one that will not build. The neighbouring branch
+                # already checked; this one did not, and it is the branch every package with a `bin`
+                # takes -- which is every candidate the repo scale wants.
+                steps = [["npm", "install"]]
+                if "build" in (manifest.get("scripts") or {}):
+                    steps.append(["npm", "run", "build"])
+                return steps, [name]
             scripts = manifest.get("scripts", {})
             for target in ("start", "cli", "run"):
                 if target in scripts:
