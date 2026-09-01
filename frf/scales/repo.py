@@ -969,6 +969,28 @@ class Observer:
 SMOKE_MAX_SECONDS = float(os.environ.get("FRF_SMOKE_MAX_SECONDS", "360"))
 
 
+# Whether sourcing asks GitHub if a repository declares a command before it is cloned. On by
+# default: the check has no false positives against the refusals it prevents, and the walk refills
+# whatever it rejects. `FRF_RUNNABLE_FILTER=0` turns it off for a run that would rather have the
+# candidates a topic search happens to return.
+_RUNNABLE_FILTER = (os.environ.get("FRF_RUNNABLE_FILTER", "1") or "").strip().lower() not in (
+    "0", "false", "no", "off")
+
+
+def _declares_a_command(full_name: str, commit: str = ""):
+    """-> True / False / None. Never raises: a sourcing filter must not end a walk."""
+    try:
+        from ..core import credentials
+        from ..source.http import Http
+        from ..source.runnable import declares_a_command
+
+        http = Http()
+        http.token = (credentials.get("GITHUB_TOKEN") or "").strip()
+        return declares_a_command(http, full_name, commit)
+    except Exception:                                      # noqa: BLE001 -- unanswered, not "no"
+        return None
+
+
 class Repo:
     """The repo scale: fork a program, time it, compare four channels.
 
@@ -1032,6 +1054,26 @@ class Repo:
             # rejected before any checkout rather than failing later in specify().
             if detail.get("repository") and not detail.get("commit"):
                 return False
+            # DOES IT DECLARE A COMMAND? Two thirds of what a topic search returns are libraries --
+            # sqlglot, gval, libopenapi -- and this scale needs programs. Each was refused at
+            # `no discoverable entry point` AFTER a checkout, so the walk delivered its budget in
+            # candidates that could never become tasks.
+            #
+            # `keep` is what makes this pay. `walk` continues until it has yielded the budget it was
+            # asked for, so filtering does not deliver fewer candidates -- it delivers different
+            # ones, drawn deeper from a pond of eleven star segments per query. Measured against the
+            # refusals it exists to prevent: of 35 repositories the scale later refused for having
+            # no entry point, this rejected all 35. It costs a few core-API requests, which allow
+            # 5000 an hour, against a search quota of 30 a minute.
+            #
+            # UNANSWERED IS NOT NO. A private repository, a rate limit, an exhausted request budget
+            # all come back as None, and refusing on those would narrow the supply whenever GitHub
+            # was having a bad minute.
+            identity = str(detail.get("identity") or "")
+            if identity and _RUNNABLE_FILTER:
+                answer = _declares_a_command(identity, str(detail.get("commit") or ""))
+                if answer is False:
+                    return False
             return True
 
         return sourcing.walk(self._index, budget, page_size=4, keep=keep,

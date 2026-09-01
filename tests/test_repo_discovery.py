@@ -285,3 +285,53 @@ def test_a_program_that_printed_nothing_and_failed_did_not_work():
     assert not did_work(_Observed(2, "")), "usage error with no output is not work"
     assert did_work(_Observed(0, "")), "a clean exit is work even with no stdout -- it wrote files"
     assert did_work(_Observed(1, "3 problems found\n")), "output is work even when the exit is not 0"
+
+
+def test_sourcing_asks_whether_a_repository_declares_a_command():
+    """Two thirds of what a topic search returns are libraries, and this scale needs programs.
+
+    Each was refused at `no discoverable entry point` AFTER a checkout. Filtering does not deliver
+    fewer candidates -- `walk` continues until it has yielded the budget it was asked for -- so it
+    delivers different ones, drawn deeper from a pond of eleven star segments per query.
+    """
+    import frf.scales.repo as repo_module
+
+    source = open(repo_module.__file__, encoding="utf-8").read()
+    block = source[source.index("def keep(candidate"):]
+    block = block[:block.index("return sourcing.walk")]
+
+    assert "_declares_a_command" in block, "the filter must run before a candidate is cloned"
+    assert "answer is False" in block, \
+        "an unanswered check must not reject: None is 'we could not ask', not 'no'"
+
+
+def test_an_unanswerable_check_does_not_reject_a_candidate(monkeypatch):
+    """A private repository, a rate limit and an exhausted request budget all answer None.
+
+    Refusing on those would narrow the supply whenever GitHub was having a bad minute -- and would
+    do it silently, since the candidate simply never appears.
+    """
+    import frf.scales.repo as repo_module
+
+    monkeypatch.setattr(repo_module, "_declares_a_command", lambda *a, **k: None)
+    scale = repo_module.Repo()
+
+    kept = []
+
+    class _Index:
+        name = "test"
+
+        def page(self, number, *, size):
+            from frf.core.scale import Candidate
+            if number:
+                return []
+            return [Candidate("github:o/r@abc", "repo", "go", "test",
+                              detail={"identity": "o/r", "commit": "abc",
+                                      "repository": "https://github.com/o/r", "size_kb": 10})]
+
+        def total(self):
+            return 1
+
+    scale._index = _Index()
+    kept = list(scale.find(1))
+    assert len(kept) == 1, "an unanswered check must leave the candidate in the walk"
