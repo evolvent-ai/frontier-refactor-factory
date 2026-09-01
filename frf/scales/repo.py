@@ -510,11 +510,15 @@ def _discover_entrypoint(root: str) -> tuple:
             # build when the repository was fine and we had refused to fetch what it declares.
             #
             # Fetching here is allowed and is not the same claim as the delivered task's: BUILDING a
-            # task may reach the network, and the SUBMISSION may not. `--ignore-scripts` stays --
-            # it is what keeps an arbitrary postinstall from running, and the measured failure is
-            # missing packages rather than skipped hooks.
+            # task may reach the network, and the SUBMISSION may not.
+            #
+            # `--ignore-scripts` is GONE, and keeping it was inconsistent: the next step runs the
+            # project's own `npm run build`, which is arbitrary code from the same package.json by
+            # the same authors. Refusing `prepare` while running `build` protects nothing and breaks
+            # every project that builds itself in `prepare` -- node repo candidates built at 4%
+            # against Go's 100%.
             if name:
-                return [["npm", "install", "--ignore-scripts"], ["npm", "run", "build"]], [name]
+                return [["npm", "install"], ["npm", "run", "build"]], [name]
             scripts = manifest.get("scripts", {})
             for target in ("start", "cli", "run"):
                 if target in scripts:
@@ -524,7 +528,7 @@ def _discover_entrypoint(root: str) -> tuple:
                     # disagree on exactly half the channels -- stdout is empty and the tree is
                     # unchanged in both, while the exit code and stderr are not. Five repo tasks
                     # were refused at precisely 34/68, 90/180, 114/228, 96/192 and 136/272.
-                    steps = [["npm", "install", "--ignore-scripts"]]
+                    steps = [["npm", "install"]]
                     if "build" in scripts:
                         steps.append(["npm", "run", "build"])
                     return steps, ["npm", "run", target]
@@ -1171,7 +1175,16 @@ for name, target in scripts.items():
             lines = [open(dockerfile, encoding="utf-8").read().rstrip(),
                      "", "USER root", "COPY . /app"]
             if self._spec.language.lower() == "python":
-                lines += ["RUN pip install --no-cache-dir --no-deps -e . || python3 /app/.frf_install_scripts.py"]
+                # WITH ITS DEPENDENCIES. `--no-deps` installed the project and nothing it imports,
+                # so the delivered image held a program that could not start -- and the pipeline
+                # then recorded that the PROJECT did not work. Python repo candidates built at 8%
+                # against Go's 100%, which is not a fact about Python.
+                #
+                # Building may reach the network; the submission may not. Those are different
+                # claims, and only the second one is a property of the corpus.
+                lines += ["RUN pip install --no-cache-dir -e . "
+                          "|| pip install --no-cache-dir --no-deps -e . "
+                          "|| python3 /app/.frf_install_scripts.py"]
             import shlex
             for command in self._spec.build:
                 rendered = (shlex.join(str(x) for x in command) if isinstance(command, (list, tuple))

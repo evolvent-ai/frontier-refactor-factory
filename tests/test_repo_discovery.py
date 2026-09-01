@@ -423,3 +423,32 @@ def test_invocations_are_lifted_from_ci_workflows(tmp_path):
     assert ["thing", "lint", "fixtures/c.txt"] in argvs
     assert not any("name:" in " ".join(argv) or argv[0] == "name" for argv in argvs), \
         "a `name:` that mentions the program is not a way to invoke it"
+
+
+def test_a_project_is_installed_with_what_it_needs():
+    """`--no-deps` installed the project and nothing it imports.
+
+    The delivered image then held a program that could not start, and the pipeline recorded that the
+    PROJECT did not work. Measured over 324 attempts: Python repo candidates built at 8% and node at
+    4%, against Go's 100% -- which is not a fact about Python or JavaScript.
+
+    Building a task may reach the network; the submission it produces may not. Those are different
+    claims and only the second is a property of the corpus.
+    """
+    import frf.scales.repo as repo_module
+
+    source = open(repo_module.__file__, encoding="utf-8").read()
+
+    installs = [line.strip() for line in source.splitlines()
+                if "pip install" in line and "RUN" in line]
+    assert installs, "a python repo task must install its project"
+    first = installs[0]
+    assert "--no-deps" not in first.split("||")[0], \
+        "the first attempt must bring the dependencies: %s" % first
+
+    npm = [line for line in source.splitlines() if '"npm", "install"' in line]
+    assert npm, "a node repo task must install its project"
+    for line in npm:
+        assert "--ignore-scripts" not in line, (
+            "refusing `prepare` while running `npm run build` protects nothing and breaks every "
+            "project that builds itself in prepare: %s" % line.strip())
