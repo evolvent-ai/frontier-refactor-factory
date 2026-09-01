@@ -35,7 +35,11 @@ from typing import Callable
 SKIP_DIRS = frozenset((".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"))
 
 OPEN_TIMEOUT = 180.0
-TRANSFER_TIMEOUT = 600.0
+TRANSFER_TIMEOUT = 900.0
+
+# How many times an upload is retried. A repo task's tarball is the largest thing this moves, and a
+# single timeout on it silently costs the whole check.
+TRANSFER_ATTEMPTS = 3
 BUILD_TIMEOUT = 1800.0
 REPLAY_TIMEOUT = 1200.0
 
@@ -59,7 +63,11 @@ def tar_bytes(root: str) -> bytes:
     is executable and a submission whose entry point is not executable does not start.
     """
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as archive:
+    # GZIPPED, BECAUSE A REPO TASK CARRIES A WHOLE CHECKOUT. Uncompressed, the upload of a real one
+    # timed out against the sandbox filesystem endpoint and the gate came back INCONCLUSIVE -- so
+    # the task shipped without the one check that opens the image it delivers. Repository trees are
+    # mostly text and compress three to five times.
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for directory, dirs, files in os.walk(root):
             dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
             for name in sorted(files):
@@ -213,10 +221,21 @@ def drive(task_dir: str, *, api_key: str, template: str,
 
         remote = "/tmp/frf-in-image-%d" % (abs(hash(task_dir)) % 10 ** 10)
         sandbox.commands.run("mkdir -p %s" % remote, timeout=30, request_timeout=60)
-        sandbox.files.write("%s/task.tar" % remote, tar_bytes(task_dir),
-                            request_timeout=TRANSFER_TIMEOUT)
-        sandbox.commands.run("tar -xf %s/task.tar -C %s" % (remote, remote),
-                             timeout=120, request_timeout=180)
+        # THE WIRE IS NOT THE MATERIAL, ON THE WAY IN TOO. A timeout uploading the tarball is not a
+        # statement about the task, and swallowing it as INCONCLUSIVE means the task ships with the
+        # gate unrun -- which is the same as not having a gate, only quieter.
+        payload = tar_bytes(task_dir)
+        for attempt in range(TRANSFER_ATTEMPTS):
+            try:
+                sandbox.files.write("%s/task.tar" % remote, payload,
+                                    request_timeout=TRANSFER_TIMEOUT)
+                break
+            except Exception:                              # noqa: BLE001 -- retried, then reported
+                if attempt == TRANSFER_ATTEMPTS - 1:
+                    raise
+                time.sleep(5.0 * (attempt + 1))
+        sandbox.commands.run("tar -xzf %s/task.tar -C %s" % (remote, remote),
+                             timeout=300, request_timeout=360)
         # THE MOUNT HAS TO BE USABLE BY THE USER THE IMAGE DECLARES. Task images run as `nobody`;
         # this directory is extracted as root, and a submission that cannot write beside its own
         # sources dies at startup. The verifier says so honestly -- "the submission stopped

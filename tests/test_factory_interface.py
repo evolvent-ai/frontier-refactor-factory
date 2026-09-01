@@ -498,3 +498,28 @@ def test_a_failing_command_comes_back_as_an_outcome_not_an_exception():
 
     assert outcome.exit_code == 1, "a raised failure must still report its code"
     assert "no such crate" in outcome.output, "and carry the output the retry and report read"
+
+
+def test_the_in_image_tarball_is_compressed():
+    """A repo task carries a whole checkout, and the upload of a real one timed out.
+
+    The gate then came back INCONCLUSIVE and the task shipped without the one check that opens the
+    image it delivers -- which is the same as not having a gate, only quieter. Repository trees are
+    mostly text and compress three to five times.
+    """
+    import tarfile
+    import io
+    import os
+    import tempfile
+
+    from frf.observe.in_image import tar_bytes
+
+    with tempfile.TemporaryDirectory() as root:
+        with open(os.path.join(root, "big.txt"), "w", encoding="utf-8") as handle:
+            handle.write("a line that repeats\n" * 5000)
+        blob = tar_bytes(root)
+
+    assert len(blob) < 5000 * len("a line that repeats\n") / 3, \
+        "the tarball is not compressed: %d bytes" % len(blob)
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as archive:
+        assert "big.txt" in archive.getnames()
