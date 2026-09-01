@@ -516,7 +516,16 @@ def _discover_entrypoint(root: str) -> tuple:
             scripts = manifest.get("scripts", {})
             for target in ("start", "cli", "run"):
                 if target in scripts:
-                    return [["npm", "install", "--ignore-scripts"]], ["npm", "run", target]
+                    # `start` USUALLY MEANS "start what build produced". A Next.js or Vite project
+                    # declares both, and `npm run start` without `npm run build` finds no artefact:
+                    # the freeze sees one failure, the delivered image sees another, and the two
+                    # disagree on exactly half the channels -- stdout is empty and the tree is
+                    # unchanged in both, while the exit code and stderr are not. Five repo tasks
+                    # were refused at precisely 34/68, 90/180, 114/228, 96/192 and 136/272.
+                    steps = [["npm", "install", "--ignore-scripts"]]
+                    if "build" in scripts:
+                        steps.append(["npm", "run", "build"])
+                    return steps, ["npm", "run", target]
         except (OSError, ValueError, TypeError):
             pass
 

@@ -206,3 +206,27 @@ def test_a_node_project_is_allowed_to_fetch_what_it_declares():
     for line in installs:
         assert "--offline" not in line, \
             "a fresh sandbox has no npm cache, so --offline installs nothing: %s" % line.strip()
+
+
+def test_a_node_start_script_is_built_before_it_is_started():
+    """`start` usually means "start what build produced".
+
+    A Next.js or Vite project declares both, and `npm run start` without `npm run build` finds no
+    artefact. The freeze sees one failure and the delivered image sees another, and the two agree on
+    exactly half the channels: stdout is empty and the tree unchanged in both, while the exit code
+    and stderr are not. Five repo tasks were refused at precisely 34/68, 90/180, 114/228, 96/192
+    and 136/272 -- every one of them 50%.
+    """
+    import json
+    import tempfile
+    from frf.scales.repo import _discover_entrypoint
+
+    with tempfile.TemporaryDirectory() as root:
+        with open(os.path.join(root, "package.json"), "w", encoding="utf-8") as handle:
+            json.dump({"name": "thing", "scripts": {"start": "next start", "build": "next build"}},
+                      handle)
+        build, invoke = _discover_entrypoint(root)
+
+    assert invoke == ["npm", "run", "start"]
+    assert ["npm", "run", "build"] in build, \
+        "a project that declares a build must have it run before start: %r" % (build,)
