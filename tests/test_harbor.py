@@ -253,3 +253,25 @@ def test_a_global_npm_install_does_not_collide_with_the_base_image():
                 assert "--force" in command, \
                     "%s installs yarn over the base image's own without --force: %r" % (
                         language, command)
+
+
+def test_a_language_floor_moves_in_every_place_it_is_written():
+    """A toolchain version appears twice: as the base image, and as a cross-language install.
+
+    Raising one and not the other moves the floor for tasks where the language is the SOURCE and
+    leaves it for tasks where it is the TARGET, which is the harder half to notice.
+    """
+    import re
+    from frf.core.shims.dockerfiles import _LANGUAGE_SETUP as LANGUAGES
+
+    for language in ("rust",):
+        setup = LANGUAGES[language]
+        base = re.search(r"(\d+)\.(\d+)", str(setup["base_image"]))
+        assert base, setup["base_image"]
+        for command in setup["install_cmds"]:
+            pinned = re.search(r"--default-toolchain\s+(\d+)\.(\d+)", command)
+            if not pinned:
+                continue
+            assert pinned.groups() == base.groups(), (
+                "%s installs %s as a cross-language target while its base is %s"
+                % (language, pinned.group(0), setup["base_image"]))

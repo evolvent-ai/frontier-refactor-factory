@@ -62,14 +62,18 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "go version",
     },
     "rust": {
-        # 1.82 was below what real crates ask for: `Consider trying a newer version of Cargo`, exit 1, no
-        # image -- the same shape as Go's 1.23 floor and found the same way, by building the image a
-        # task actually ships. A crate that outruns this fails honestly rather than silently.
+        # 1.90, RAISED FROM 1.82 BECAUSE REAL CRATES ASK FOR MORE. Below it a build ends in
+        # `Consider trying a newer version of Cargo`, exit 1, no image -- the same shape as Go's
+        # 1.23 floor, and found the same way: by building the image a task actually ships. A crate
+        # that outruns even this fails honestly rather than silently.
+        #
+        # BOTH PLACES, or the floor only moves for half the tasks: `base_image` is where rust is the
+        # SOURCE, and `install_cmds` is where it is a cross-language TARGET on somebody else's base.
         "base_image": "rust:1.90-bookworm",
         "apt_packages": [],
         "install_cmds": [
             "curl https://sh.rustup.rs -sSf"
-            " | sh -s -- -y --default-toolchain 1.82.0 --no-modify-path",
+            " | sh -s -- -y --default-toolchain 1.90.0 --no-modify-path",
         ],
         "copy_from_image": None,
         "copy_from_paths": [],
