@@ -110,6 +110,31 @@ def _run_steps(lines: list) -> list:
     return kept
 
 
+
+# What a documentation placeholder looks like. A README shows the SHAPE of a command --
+# `tool --log_file <path_to_log_file>` -- and that is not a command: the file does not exist, the
+# program exits 2, and the scale spends a smoke run finding out. Four of thirteen invocations lifted
+# in one batch were templates like this, and they crowded out the ones that would have run.
+_PLACEHOLDER_MARKS = ("<", ">", "[", "]", "{", "}", "...", "path_to_", "your_", "your-",
+                      "PATH_TO", "YOUR_", "example.com", "/path/")
+
+
+def _is_runnable(argv: list) -> bool:
+    """Whether a lifted line is a command rather than a description of one.
+
+    Also rejects assignments: a fenced block in a README is often a dependency list, and
+    `thing = 0.1.0` splits into a perfectly good argv that names the program and runs nothing.
+    """
+    if len(argv) > 1 and argv[1] == "=":
+        return False
+    for token in argv[1:]:
+        if any(mark in token for mark in _PLACEHOLDER_MARKS):
+            return False
+        if token.isupper() and len(token) > 2 and token.isalpha():
+            return False           # `tool FILE`, the other way a manual writes a placeholder
+    return True
+
+
 def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int = 100,
                   max_commands: int = 200, stats: HarvestStats | None = None) -> list[Harvested]:
     """Extract invocations of a known program from repository-owned test scripts.
@@ -161,6 +186,10 @@ def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int =
                 if not (token_names & names):
                     continue
                 if any(token in ("|", ">", ">>", "&&", ";") for token in argv):
+                    if stats:
+                        stats.skipped_shell += 1
+                    continue
+                if not _is_runnable(argv):
                     if stats:
                         stats.skipped_shell += 1
                     continue

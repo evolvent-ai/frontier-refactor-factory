@@ -522,3 +522,26 @@ def test_the_harvest_searches_for_the_name_the_project_publishes(tmp_path):
         "[project]\nname = 'thing'\n\n[project.scripts]\nthing-cli = \"thing.main:run\"\n",
         encoding="utf-8")
     assert "thing-cli" in _declared_names(str(tmp_path))
+
+
+def test_a_documented_placeholder_is_not_a_command(tmp_path):
+    """A README shows the SHAPE of a command, and that is not a command.
+
+    `tool --log_file <path_to_log_file>` names a file that does not exist: the program exits 2 and
+    the scale spends a smoke run finding out. Four of thirteen invocations lifted in one batch were
+    templates like this, and they crowded out the ones that would have run.
+    """
+    from frf.source.repo_harvest import harvest_files
+
+    (tmp_path / "README.md").write_text(
+        "```\n"
+        "tool --interval <ms> --log_file <path_to_log>/out.txt\n"   # placeholder
+        "tool [CMD] path_to_binary\n"                                # placeholder
+        "tool = 0.1.0\n"                                             # a dependency line
+        "tool FILE\n"                                                # manual-style placeholder
+        "tool convert samples/a.csv\n"                               # a real one
+        "```\n", encoding="utf-8")
+
+    argvs = [list(x.argv) for x in harvest_files(str(tmp_path), ("tool",))]
+
+    assert argvs == [["tool", "convert", "samples/a.csv"]], argvs
