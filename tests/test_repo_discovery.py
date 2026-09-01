@@ -335,3 +335,22 @@ def test_an_unanswerable_check_does_not_reject_a_candidate(monkeypatch):
     scale._index = _Index()
     kept = list(scale.find(1))
     assert len(kept) == 1, "an unanswered check must leave the candidate in the walk"
+
+
+def test_a_python_entry_point_names_the_interpreter_that_exists():
+    """Debian-based images provide `python3` and no `python` at all.
+
+    Naming the wrong one fails a long way from here: `command -v python` finds nothing after the
+    build, and the entry-point check then reports that the PROJECT declares a command its own build
+    does not install. Eleven of twenty-two build failures in one batch were this single word, every
+    one charged to the repository.
+    """
+    import tempfile
+    from frf.scales.repo import _discover_entrypoint
+
+    with tempfile.TemporaryDirectory() as root:
+        with open(os.path.join(root, "main.py"), "w", encoding="utf-8") as handle:
+            handle.write("print('hi')\n")
+        build, invoke = _discover_entrypoint(root)
+
+    assert invoke[0] == "python3", "the image has python3 and no python: %r" % (invoke,)

@@ -534,7 +534,13 @@ def _discover_entrypoint(root: str) -> tuple:
     # 3. Conventional Python entry points
     for rel in ("main.py", "src/main.py", "__main__.py"):
         if os.path.isfile(os.path.join(root, rel)):
-            return [], ["python", "{ROOT}/" + rel]
+            # `python3`, NOT `python`. Debian-based images -- which is every base this factory
+            # ships -- provide `python3` and no `python` at all. The interpreter was named wrongly
+            # here and the failure surfaced a long way away: `command -v python` found nothing after
+            # the build, and the entry-point check reported that the PROJECT declares a command its
+            # own build does not install. Eleven of twenty-two build failures in one batch were this
+            # one word, every one of them charged to the repository.
+            return [], ["python3", "{ROOT}/" + rel]
 
     # 3a. A root-level Go main is a common single-binary layout -- and it is NOT always `main.go`.
     #
