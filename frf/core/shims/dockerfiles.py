@@ -45,12 +45,12 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         # Pinning is deliberate: the multi-stage copy below exists so that `docker build` needs no
         # outbound HTTP, which some sandboxes block. So the answer is a newer floor rather than
         # letting the build fetch, and a repository that outruns even this fails honestly.
-        "base_image": "golang:1.25-bookworm",
+        "base_image": "golang:1.26-bookworm",
         "apt_packages": [],
         "install_cmds": [],
         # Multi-stage copy from the official Go image — avoids outbound HTTP during docker build
         # which is blocked in some sandbox environments (e.g. e2b DinD). Registry pulls always work.
-        "copy_from_image": "golang:1.25-bookworm",
+        "copy_from_image": "golang:1.26-bookworm",
         "copy_from_paths": [
             ("/usr/local/go", "/usr/local/go"),
         ],
