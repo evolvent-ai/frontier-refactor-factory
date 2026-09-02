@@ -58,6 +58,17 @@ _LANGUAGE_SETUP: dict[str, dict] = {
             "PATH": "/usr/local/go/bin:${PATH}",
             "GOPATH": "/go",
             "GOROOT": "/usr/local/go",
+            # `auto`, SO THE FLOOR STOPS BEING A MOVING TARGET. Pinning GOROOT makes Go refuse to
+            # switch toolchains, so a repository whose go.mod declares a newer version fails
+            # outright: `go.mod requires go >= 1.26.0 (running go 1.25.14; GOTOOLCHAIN=local)`.
+            # This floor was raised from 1.23 to 1.25 and then to 1.26 inside two days, which is
+            # the shape of a rule that will keep being wrong.
+            #
+            # Fetching is still DETERMINISTIC, which is the property that matters: go.mod names the
+            # exact version, so every build of this task gets the same toolchain. It costs outbound
+            # HTTP at BUILD time, which is allowed -- the submission is what must need no network.
+            # A repository that declares nothing keeps the base image and reaches for nothing.
+            "GOTOOLCHAIN": "auto",
         },
         "verify_cmd": "go version",
     },

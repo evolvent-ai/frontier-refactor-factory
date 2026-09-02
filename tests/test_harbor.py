@@ -297,3 +297,18 @@ def test_a_toolchain_is_not_installed_over_its_own_base_image():
 
     cross = dockerfile_for("python", "rust")
     assert "sh.rustup.rs" in cross, "a cross-language target must still be fetched"
+
+
+def test_go_fetches_the_toolchain_its_go_mod_declares():
+    """The floor went 1.23 -> 1.25 -> 1.26 in two days, which is a rule that will keep being wrong.
+
+    Pinning GOROOT makes Go refuse to switch toolchains, so a repository whose go.mod declares a
+    newer version fails outright: `go.mod requires go >= 1.26.0 (running go 1.25.14;
+    GOTOOLCHAIN=local)`. Fetching stays deterministic -- go.mod names the exact version -- and costs
+    outbound HTTP at build time, which is allowed; the submission is what must need no network.
+    """
+    from frf.core.harbor import dockerfile_for
+    from frf.core.shims.dockerfiles import _LANGUAGE_SETUP as LANGUAGES
+
+    assert LANGUAGES["go"]["env"].get("GOTOOLCHAIN") == "auto"
+    assert "GOTOOLCHAIN=auto" in dockerfile_for("go", "")
