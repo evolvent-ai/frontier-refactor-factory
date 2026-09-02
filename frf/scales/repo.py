@@ -1825,22 +1825,46 @@ def _task_name(material: Material) -> str:
 
 
 
+# Directories a project fills with inputs FOR its own program. A file in one of these was put there
+# to be processed; a file at the repository root was put there to configure the repository.
+_CORPUS_DIRS = frozenset(("testdata", "test-data", "fixtures", "fixture", "corpus", "samples",
+                          "sample", "examples", "example", "cases", "regression", "inputs",
+                          "data", "spec", "specs", "tests", "test", "__fixtures__"))
+
+# Files that configure the repository rather than exercise its program. Feeding a linter's own
+# `.eslintrc.js` to it is not a workload; it is what the fallback did first, because they sort
+# shallowest.
+_NOT_A_WORKLOAD = ("package.json", "package-lock.json", "tsconfig.json", "jest.config.ts",
+                   "pyproject.toml", "setup.py", "Cargo.toml", "go.mod", "go.sum",
+                   "README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md", "Makefile")
+
+
 def _repo_workload_files(root: str) -> list:
+    """Files worth feeding to the program, most likely first.
+
+    RANKED BY WHO PUT THE FILE THERE AND WHY. This sorted by path depth, so a repository's root
+    config came first and its `testdata/` came last and was cut by the limit -- the fallback then
+    ran `{PROGRAM} .eslintrc.js`, `{PROGRAM} README.md`, and the candidate was refused for having
+    done nothing. That refusal was ours: those are not inputs, and the project's real inputs were
+    sitting in a directory named for the purpose.
+    """
     suffixes = (".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".md", ".txt", ".csv",
                 ".c", ".py", ".js", ".ts", ".sh", ".bash", ".zsh", ".fish")
     found = []
     for directory, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in (".git", "target", "build", "node_modules", "vendor", "docs", "examples")]
+        dirs[:] = [d for d in dirs if d not in (".git", "target", "build", "node_modules", "vendor")]
+        parts = set(os.path.relpath(directory, root).split(os.sep))
+        corpus = bool(parts & _CORPUS_DIRS)
         for name in files:
-            if not name.endswith(suffixes):
+            if not name.endswith(suffixes) or name in _NOT_A_WORKLOAD or name.startswith("."):
                 continue
             path = os.path.join(directory, name)
             try:
                 if 0 < os.path.getsize(path) <= 262144:
-                    found.append(os.path.relpath(path, root))
+                    found.append((0 if corpus else 1, os.path.relpath(path, root)))
             except OSError:
                 pass
-    return sorted(found, key=lambda p: (p.count(os.sep), p))[:40]
+    return [p for _rank, p in sorted(found, key=lambda x: (x[0], x[1].count(os.sep), x[1]))][:40]
 
 
 def _validate_scenarios_call_subject(scenarios) -> None:

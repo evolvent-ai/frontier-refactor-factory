@@ -581,3 +581,27 @@ def test_the_scenario_match_knows_the_declared_names_too():
     block = source[source.index("executable_names = ("):]
     block = block[:block.index("scenarios = []")]
     assert "_declared_names" in block
+
+
+def test_the_workload_fallback_prefers_the_project_own_inputs(tmp_path):
+    """This sorted by path depth, so root config came first and `testdata/` was cut by the limit.
+
+    The fallback then ran `{PROGRAM} .eslintrc.js` and `{PROGRAM} README.md`, and the candidate was
+    refused for having done nothing -- a refusal that was ours. Those are not inputs, and the
+    project's real inputs were in a directory named for the purpose.
+    """
+    from frf.scales.repo import _repo_workload_files
+
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# hi\n", encoding="utf-8")
+    (tmp_path / ".eslintrc.js").write_text("module.exports={}\n", encoding="utf-8")
+    data = tmp_path / "testdata"
+    data.mkdir()
+    (data / "a.json").write_text('{"a":1}', encoding="utf-8")
+    (data / "b.json").write_text('{"b":2}', encoding="utf-8")
+
+    files = _repo_workload_files(str(tmp_path))
+
+    assert files[:2] == ["testdata/a.json", "testdata/b.json"], files
+    assert "package.json" not in files and "README.md" not in files
+    assert ".eslintrc.js" not in files, "a dotfile configures the repository, it is not a workload"
