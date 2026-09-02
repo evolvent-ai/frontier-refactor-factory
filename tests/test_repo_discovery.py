@@ -751,19 +751,68 @@ def test_the_freeze_builds_under_the_interpreter_the_image_ships():
     assert "env=self._build_env()" in build, "and build with it"
 
 
-def test_the_observer_does_not_reach_for_a_spec_it_does_not_hold():
-    """`Observer` holds material, not a spec.
+def test_matching_the_interpreter_runs_without_guessing_attribute_names():
+    """Asserting on source text is not a test of behaviour, and this is what that cost.
 
-    Reaching for `self._spec` raised `AttributeError: 'Observer' object has no attribute '_spec'` on
-    every candidate -- seven in a row before it was noticed -- and the pipeline charged it to us as
-    an unclassified fault, correctly. What the observer does have is the build it is about to run,
-    which is the better test anyway.
+    `_match_delivered_python` reached for `self._spec`, then for `self._material`, and neither
+    exists on `Observer` -- which holds `material`. Each guess raised AttributeError on every
+    candidate and burned seven of them before the ledger showed it, while a suite of source-text
+    assertions stayed green.
+
+    So this one CALLS it, against a backend that records what it was asked to do.
     """
-    import inspect
-    from frf.scales.repo import Observer
+    from frf.scales.repo import Material, Observer
 
-    source = inspect.getsource(Observer._match_delivered_python)
-    live = [line for line in source.splitlines()
-            if "self._spec" in line and not line.strip().startswith("#")]
-    assert not live, live
-    assert not hasattr(Observer, "_spec"), "and it genuinely has no such attribute"
+    asked = []
+
+    class _Backend:
+        name = "remote"
+
+        def run(self, argv, **kw):
+            asked.append(argv)
+
+            class _R:
+                ok = True
+                stdout = ""
+
+                def tail(self, _n=0):
+                    return ""
+            return _R()
+
+    material = Material(identity="test://repo", language="python", root="/tmp/nowhere",
+                        build=[["pip", "install", "-e", "."]], invoke=["thing"])
+    observer = Observer(material, backend=_Backend())
+    observer._remote_root = "/tmp/remote"
+
+    observer._match_delivered_python()          # must not raise
+
+    assert asked, "an interpreter matching the delivered image should have been provisioned"
+    assert any("uv" in " ".join(str(x) for x in argv) for argv in asked), asked
+
+
+def test_a_build_that_is_not_python_provisions_nothing():
+    from frf.scales.repo import Material, Observer
+
+    asked = []
+
+    class _Backend:
+        name = "remote"
+
+        def run(self, argv, **kw):
+            asked.append(argv)
+
+            class _R:
+                ok = True
+                stdout = ""
+
+                def tail(self, _n=0):
+                    return ""
+            return _R()
+
+    material = Material(identity="test://repo", language="go", root="/tmp/nowhere",
+                        build=[["go", "build", "-o", "prog", "."]], invoke=["prog"])
+    observer = Observer(material, backend=_Backend())
+    observer._remote_root = "/tmp/remote"
+
+    observer._match_delivered_python()
+    assert not asked, "a Go build needs no Python: %r" % (asked,)

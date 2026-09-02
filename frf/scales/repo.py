@@ -907,10 +907,13 @@ class Observer:
         # in a row -- and the pipeline charged it to us as an unclassified fault, correctly. What
         # the observer does have is the build it is about to run, which is the better test anyway:
         # provision an interpreter when the build is a Python one, not when a field says so.
-        if not self._material or not self._material.build:
+        # `self.material`, NOT `self._material`. Twice now I have guessed an attribute name on
+        # this class instead of reading it, and each guess cost seven candidates before the ledger
+        # showed it -- charged to us as an unclassified fault, which is how it surfaced at all.
+        if not getattr(self, "material", None) or not self.material.build:
             return
         if not any("pip" in " ".join(str(x) for x in cmd) or "python" in " ".join(str(x) for x in cmd)
-                   for cmd in self._material.build):
+                   for cmd in self.material.build):
             return
         script = (
             "set -e; command -v uv >/dev/null 2>&1 || pip install --quiet uv >/dev/null 2>&1 || "
