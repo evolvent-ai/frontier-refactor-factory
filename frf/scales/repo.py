@@ -895,6 +895,32 @@ class Observer:
         """
         return {"PATH": "%s/.frf-venv/bin:/usr/local/bin:/usr/bin:/bin" % self._remote_root}
 
+    # The package managers the delivered image installs. A project declares one and the freeze has
+    # to have the same one, or the build fails here and succeeds there -- or, as happened, the other
+    # way round: bun was added to the image and not to this sandbox, so `sh: 1: bun: not found`
+    # survived its own fix.
+    DELIVERED_NODE_TOOLS = ("pnpm@9.12.3", "yarn@1.22.22", "bun@1.1.38")
+
+    def _match_delivered_node_tools(self) -> None:
+        """Install the package managers the delivered image has, when the build wants one.
+
+        Best effort and silent: a build that uses none of them is untouched, and a sandbox that
+        cannot reach npm is no worse off than before.
+        """
+        if not getattr(self, "material", None) or not self.material.build:
+            return
+        flat = " ".join(" ".join(str(x) for x in cmd) for cmd in self.material.build)
+        if not any(tool in flat for tool in ("npm", "pnpm", "yarn", "bun", "npx")):
+            return
+        try:
+            self._backend.run(
+                ["sh", "-c", "command -v bun >/dev/null 2>&1 || "
+                             "npm install -g --force %s >/dev/null 2>&1 || true"
+                             % " ".join(self.DELIVERED_NODE_TOOLS)],
+                timeout=600.0)
+        except Exception:                                  # noqa: BLE001 -- best effort
+            return
+
     def _match_delivered_python(self) -> None:
         """Put an interpreter matching the delivered image ahead of the sandbox's own.
 
@@ -930,6 +956,7 @@ class Observer:
     def _build_remote(self) -> None:
         """Run the project's own build inside the sandbox, against the pushed tree."""
         self._match_delivered_python()
+        self._match_delivered_node_tools()
         for command in (self.material.build or []):
             argv = [part.replace("{ROOT}", self._remote_root) for part in command]
             result = self._backend.run(argv, workdir=self._remote_root,

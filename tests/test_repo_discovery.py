@@ -816,3 +816,43 @@ def test_a_build_that_is_not_python_provisions_nothing():
 
     observer._match_delivered_python()
     assert not asked, "a Go build needs no Python: %r" % (asked,)
+
+
+def test_the_sandbox_gets_the_package_managers_the_image_gets():
+    """bun was added to the delivered image and not to the sandbox that freezes the reference.
+
+    So `sh: 1: bun: not found` survived its own fix -- the build failed where the reference is
+    observed and would have succeeded where it is delivered. The same asymmetry this week has been
+    about, introduced by a fix for it.
+    """
+    from frf.core.shims.dockerfiles import _LANGUAGE_SETUP as LANGUAGES
+    from frf.scales.repo import Observer
+
+    image = " ".join(LANGUAGES["javascript"]["install_cmds"])
+    for tool in Observer.DELIVERED_NODE_TOOLS:
+        name = tool.split("@")[0]
+        assert name in image, "the image does not install %s: %s" % (name, image)
+
+    asked = []
+
+    class _Backend:
+        name = "remote"
+
+        def run(self, argv, **kw):
+            asked.append(" ".join(str(x) for x in argv))
+
+            class _R:
+                ok = True
+                stdout = ""
+
+                def tail(self, _n=0):
+                    return ""
+            return _R()
+
+    from frf.scales.repo import Material
+    observer = Observer(Material(identity="t://r", language="javascript", root="/tmp/x",
+                                 build=[["npm", "install"]], invoke=["thing"]),
+                        backend=_Backend())
+    observer._remote_root = "/tmp/remote"
+    observer._match_delivered_node_tools()
+    assert any("bun" in a for a in asked), asked
