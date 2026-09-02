@@ -749,3 +749,21 @@ def test_the_freeze_builds_under_the_interpreter_the_image_ships():
     build = build[:build.index("\n    def ", 10)]
     assert "_match_delivered_python()" in build, "provision it"
     assert "env=self._build_env()" in build, "and build with it"
+
+
+def test_the_observer_does_not_reach_for_a_spec_it_does_not_hold():
+    """`Observer` holds material, not a spec.
+
+    Reaching for `self._spec` raised `AttributeError: 'Observer' object has no attribute '_spec'` on
+    every candidate -- seven in a row before it was noticed -- and the pipeline charged it to us as
+    an unclassified fault, correctly. What the observer does have is the build it is about to run,
+    which is the better test anyway.
+    """
+    import inspect
+    from frf.scales.repo import Observer
+
+    source = inspect.getsource(Observer._match_delivered_python)
+    live = [line for line in source.splitlines()
+            if "self._spec" in line and not line.strip().startswith("#")]
+    assert not live, live
+    assert not hasattr(Observer, "_spec"), "and it genuinely has no such attribute"

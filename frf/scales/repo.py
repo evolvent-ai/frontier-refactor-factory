@@ -902,8 +902,11 @@ class Observer:
         does not need it, is no worse off than before. `uv` is used because it fetches a standalone
         build rather than compiling one, which is the difference between seconds and an hour.
         """
-        if str(self._spec.language if self._spec else "").lower() not in ("python", ""):
-            return
+        # `Observer` HOLDS MATERIAL, NOT A SPEC. Reaching for `self._spec` here raised
+        # `AttributeError: 'Observer' object has no attribute '_spec'` on every candidate -- seven
+        # in a row -- and the pipeline charged it to us as an unclassified fault, correctly. What
+        # the observer does have is the build it is about to run, which is the better test anyway:
+        # provision an interpreter when the build is a Python one, not when a field says so.
         if not self._material or not self._material.build:
             return
         if not any("pip" in " ".join(str(x) for x in cmd) or "python" in " ".join(str(x) for x in cmd)
