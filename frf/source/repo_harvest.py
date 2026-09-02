@@ -35,6 +35,14 @@ _PROSE_SUFFIXES = (".md", ".markdown", ".rst")
 # the threshold, thirteen of them at exactly nine scenarios. Supply is what that needs, and this is
 # the last untapped source of it.
 _CI_SUFFIXES = (".yml", ".yaml")
+
+# TWO SOURCES EVERY PROJECT HAS, and neither has a suffix the scanner was looking for. A
+# `package.json` script body and a Makefile recipe line ARE invocations -- `"lint": "eslint ."`,
+# `\ttool build $(SRC)` -- written by the maintainer and kept working because the project runs them.
+#
+# 46% of the candidates that got past the build were refused for having no invocation that ran. The
+# harvest was reading scripts, READMEs and CI, and walking past the two files in the root.
+_SCRIPT_FILES = ("Makefile", "makefile", "GNUmakefile", "package.json")
 _INPUT_SUFFIXES = (".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".txt", ".csv", ".c", ".h", ".go", ".rs", ".py", ".js", ".ts")
 
 
@@ -135,6 +143,46 @@ def _is_runnable(argv: list) -> bool:
     return True
 
 
+
+def _json_script_bodies(lines: list) -> list:
+    """The command lines inside a package.json `scripts` block, everything else blanked.
+
+    Blanked rather than dropped so a lifted command still records the line it came from. Parsed as
+    JSON when it can be -- a manifest that does not parse is not worth guessing at.
+    """
+    import json as _json
+
+    try:
+        data = _json.loads("\n".join(lines))
+    except Exception:                                      # noqa: BLE001 -- not our manifest to fix
+        return [""] * len(lines)
+    scripts = data.get("scripts") if isinstance(data, dict) else None
+    if not isinstance(scripts, dict):
+        return [""] * len(lines)
+    # RETURNED AS THEIR OWN LINES, not matched back into the file's. A package.json is often
+    # written on one physical line, so a line-by-line match finds the first script body and loses
+    # the rest. The line number a lifted command records is therefore approximate for a manifest,
+    # which is the right trade: the number is provenance, the command is the material.
+    #
+    # `npm run x && npm run y` is a compound command; the harvest's own shell-operator rejection
+    # drops those, so only the plain ones survive.
+    bodies = [str(v) for v in scripts.values() if isinstance(v, str)]
+    return bodies + [""] * max(0, len(lines) - len(bodies))
+
+
+def _make_recipes(lines: list) -> list:
+    """A Makefile's recipe lines -- the tab-indented ones -- with targets and variables blanked."""
+    kept = []
+    for line in lines:
+        if line.startswith("\t"):
+            body = line[1:].strip()
+            # `@` silences a recipe line and `-` ignores its failure; neither is part of the command.
+            kept.append(body.lstrip("@-").strip())
+        else:
+            kept.append("")
+    return kept
+
+
 def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int = 100,
                   max_commands: int = 200, stats: HarvestStats | None = None) -> list[Harvested]:
     """Extract invocations of a known program from repository-owned test scripts.
@@ -151,7 +199,8 @@ def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int =
         for filename in sorted(files):
             prose = filename.endswith(_PROSE_SUFFIXES)
             workflow = filename.endswith(_CI_SUFFIXES)
-            if not (prose or workflow or filename.endswith(_SCRIPT_SUFFIXES)):
+            manifest = filename in _SCRIPT_FILES
+            if not (prose or workflow or manifest or filename.endswith(_SCRIPT_SUFFIXES)):
                 continue
             if scanned >= max_files:
                 return found
@@ -168,6 +217,9 @@ def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int =
                 # split into an argv, and a sentence mentioning the program's name is not an
                 # invocation of it.
                 lines = _fenced(lines)
+            elif manifest:
+                lines = (_json_script_bodies(lines) if filename == "package.json"
+                         else _make_recipes(lines))
             elif workflow:
                 # ONLY WHAT FOLLOWS `run:`. A workflow is mostly configuration, and a `name:` or an
                 # `if:` that happens to mention the program is not a way to invoke it.

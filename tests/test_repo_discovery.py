@@ -904,3 +904,27 @@ def test_declared_names_covers_cargo_and_go(tmp_path):
     (tmp_path / "cmd" / "yq").mkdir()
     names = _declared_names(str(tmp_path))
     assert "goawk" in names and "yq" in names, names
+
+
+def test_invocations_are_lifted_from_manifests_and_makefiles(tmp_path):
+    """Two sources every project has, and neither has a suffix the scanner looked for.
+
+    A `package.json` script body and a Makefile recipe line ARE invocations, written by the
+    maintainer and kept working because the project runs them. 46% of the candidates that got past
+    the build were refused for having no invocation that ran, while the harvest read scripts,
+    READMEs and CI and walked past the two files in the root.
+    """
+    import json
+    from frf.source.repo_harvest import harvest_files
+
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "tool", "scripts": {"lint": "tool check src/a.js", "build": "tsc"}}),
+        encoding="utf-8")
+    (tmp_path / "Makefile").write_text(
+        "all:\n\t@tool convert data/in.csv\n\t-tool --version\n", encoding="utf-8")
+
+    argvs = [list(x.argv) for x in harvest_files(str(tmp_path), ("tool",))]
+
+    assert ["tool", "check", "src/a.js"] in argvs, argvs
+    assert ["tool", "convert", "data/in.csv"] in argvs, "a recipe line, with @ stripped"
+    assert ["tool", "--version"] in argvs, "and with - stripped"
