@@ -357,22 +357,24 @@ def _reachable_by(user: str, argv: list) -> bool:
         if not candidate.startswith("-") and os.path.isabs(candidate) and os.path.exists(candidate):
             wanted.append(candidate)
     for path in wanted:
-        parts = os.path.abspath(path).split(os.sep)
-        for depth in range(1, len(parts) + 1):
+        absolute = os.path.abspath(path)
+        parts = absolute.split(os.sep)
+        # A DIRECTORY NEEDS `x` AND A FILE NEEDS `r`, and conflating them refuses every script:
+        # a 0644 `cli.js` is exactly what an interpreter wants and has no execute bit at all.
+        # World permissions rather than group, because `restricted_argv` clears supplementary
+        # groups.
+        for depth in range(1, len(parts)):
             step = os.sep.join(parts[:depth]) or os.sep
             try:
-                mode = os.stat(step).st_mode
+                if not os.stat(step).st_mode & 0o001:
+                    return False
             except OSError:
                 return False
-            # World-executable is what a traversal needs; group membership is not assumed, because
-            # `restricted_argv` clears supplementary groups. The last component must also be
-            # READABLE -- an interpreter has to read the script it was handed.
-            if not mode & 0o001:
-                return False
         try:
-            if not os.stat(path).st_mode & 0o004:
-                return False
+            mode = os.stat(absolute).st_mode
         except OSError:
+            return False
+        if not mode & 0o004:
             return False
     return True
 

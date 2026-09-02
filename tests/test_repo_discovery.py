@@ -670,9 +670,17 @@ def test_reachability_checks_the_file_the_interpreter_was_handed(tmp_path):
     import os
     from frf.core.integrity import _reachable_by
 
+    # Every directory above the script must be traversable too -- pytest's tmp dirs are 0700, and
+    # the guard is right to refuse a path it cannot walk.
+    root = tmp_path
+    while str(root) != "/":
+        try:
+            os.chmod(root, 0o755)
+        except OSError:
+            break
+        root = root.parent
     script = tmp_path / "cli.js"
     script.write_text("console.log(1)\n", encoding="utf-8")
-    os.chmod(tmp_path, 0o755)
 
     os.chmod(script, 0o644)
     assert _reachable_by("nobody", ["/bin/sh", str(script)]) is True
