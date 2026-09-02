@@ -96,3 +96,27 @@ def test_typescript_shim_uses_compiler_output_instead_of_node_strip_flag():
     # imports resolve from the workspace root where the module tree lives. (The compiled/ form
     # moved that root and every package/ts candidate died in E3 with ERR_MODULE_NOT_FOUND.)
     assert "subject.js" in shim.run
+
+
+def test_the_shim_is_commonjs_whatever_the_package_declares():
+    """A package that declares `"type": "module"` makes every neighbouring `.js` file ESM.
+
+    The shim is CommonJS, so it died with `ReferenceError: require is not defined` on eleven of
+    thirteen javascript package candidates. `.cjs` is the escape hatch: CommonJS whatever the
+    package says.
+
+    The SUBJECT keeps `.js`, because it is not ours. A mined function is usually ESM
+    (`export function ...`), and renaming it too makes Node parse it as CommonJS and fail with
+    `SyntaxError: Unexpected token 'export'` -- which is exactly what happened when this was first
+    written for both files at once.
+    """
+    from frf.observe.call.shims import TEMPLATES
+
+    for language in ("javascript", "typescript"):
+        shim = TEMPLATES[language]
+        assert shim.template.endswith(".cjs"), \
+            "%s's shim must be CommonJS regardless of the package: %s" % (language, shim.template)
+        assert not shim.subject.endswith(".cjs"), \
+            "%s's subject must keep its own module system: %s" % (language, shim.subject)
+        assert not any(str(part).endswith(".cjs") for part in shim.run if part != shim.template), \
+            "the subject is loaded by its own name: %r" % (shim.run,)

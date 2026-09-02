@@ -136,8 +136,19 @@ class Shim:
 TEMPLATES = {
     "python": Shim("serve.py", "subject.py", ("python3", "{entry}", "{module}", "{symbol}"),
                    tool="python3", binds_symbol=True),
-    "javascript": Shim("serve.js", "subject.js", ("node", "--experimental-specifier-resolution=node", "{entry}", "subject.js", "{symbol}"), tool="node",
-                       binds_symbol=True),
+    # THE SHIM IS `.cjs`, THE SUBJECT IS NOT. A package that declares `"type": "module"` makes
+    # every neighbouring `.js` file ESM, and this shim is CommonJS -- it died with
+    # `ReferenceError: require is not defined` on eleven of thirteen javascript package candidates.
+    # `.cjs` is exactly the escape hatch: CommonJS whatever the package says.
+    #
+    # The SUBJECT keeps `.js`, because it is not ours. A mined function is usually ESM
+    # (`export function ...`), and renaming it to `.cjs` makes Node parse it as CommonJS and fail
+    # with `SyntaxError: Unexpected token 'export'` -- which is what happened when this fix was
+    # first written for both files at once. Node 22 lets a `.cjs` file `require()` an ESM module, so
+    # the shim can load either kind and neither has to pretend to be the other.
+    "javascript": Shim("serve.cjs", "subject.js",
+                       ("node", "--experimental-specifier-resolution=node", "{entry}",
+                        "subject.js", "{symbol}"), tool="node", binds_symbol=True),
     # TypeScript is compiled inside the sandbox with the toolchain declared by the image. This is
     # stable across Node versions and does not depend on experimental runtime flags.
     #
@@ -146,8 +157,10 @@ TEMPLATES = {
     # from the compiled file's directory. Compiling into a subdirectory moved the root away from the
     # module tree, so every package candidate died in E3 with ERR_MODULE_NOT_FOUND -- the import
     # resolved against compiled/ instead of the workspace root where the tree actually lives.
-    "typescript": Shim("serve.js", "subject.ts",
-                       ("node", "--experimental-specifier-resolution=node", "{entry}", "subject.js", "{symbol}"),
+    # Same split as javascript: the shim is `.cjs`, and `tsc`'s output keeps the name it emits.
+    "typescript": Shim("serve.cjs", "subject.ts",
+                       ("node", "--experimental-specifier-resolution=node", "{entry}",
+                        "subject.js", "{symbol}"),
                        build=(("tsc", "--target", "ES2022", "--module", "commonjs",
                                "--skipLibCheck", "--outDir", "{workdir}", "{subject}"),),
                        tool="tsc", binds_symbol=True),

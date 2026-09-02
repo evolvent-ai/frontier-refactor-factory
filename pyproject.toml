@@ -65,7 +65,7 @@ include = ["frf*"]
 # installed wheel reported c, cpp, rust and java as languages this factory cannot serve, while the
 # repository reported that it can. A missing template is indistinguishable from an unsupported
 # language, which is the confusion the shim table exists to prevent.
-"frf.observe.call.shims" = ["*.py", "*.c", "*.go", "*.java", "*.js", "*.rb", "*.rs"]
+"frf.observe.call.shims" = ["*.py", "*.c", "*.go", "*.java", "*.js", "*.cjs", "*.rb", "*.rs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

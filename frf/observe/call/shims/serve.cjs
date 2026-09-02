@@ -9,7 +9,7 @@
 'use strict';
 
 // The subject is resolved without an extension so that the same shim serves both JavaScript and
-// TypeScript: Node picks up `subject.js` or, under --experimental-strip-types, `subject.ts`.
+// TypeScript: Node picks up `subject.js` from the compiler's output.
 // Naming the extension here would make this file JavaScript-only, and the table would then need a
 // second near-identical template to keep in step for no behaviour of its own.
 // The subject's filename arrives as an argument so that this one template serves both JavaScript
