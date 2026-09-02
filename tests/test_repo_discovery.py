@@ -729,3 +729,23 @@ def test_a_sandbox_build_failure_reports_its_cause():
     said = _why_it_failed(noisy)
     assert "libfoo" in said, said
     assert "not pip" not in said and "See above" not in said
+
+
+def test_the_freeze_builds_under_the_interpreter_the_image_ships():
+    """The sandbox has Python 3.11; a repo task's delivered image ships 3.12.8.
+
+    A project declaring `requires-python >= 3.12` is refused at the freeze -- ten of thirty-three
+    build failures in one batch -- and any project that does build is frozen under one interpreter
+    and replayed under another, which is the defect this whole week has been about.
+
+    Provisioning an interpreter and not using it would be worse than not provisioning one: the build
+    would still run under the wrong version while looking fixed.
+    """
+    import frf.scales.repo as repo_module
+
+    source = open(repo_module.__file__, encoding="utf-8").read()
+    assert 'DELIVERED_PYTHON = "3.12"' in source
+    build = source[source.index("def _build_remote"):]
+    build = build[:build.index("\n    def ", 10)]
+    assert "_match_delivered_python()" in build, "provision it"
+    assert "env=self._build_env()" in build, "and build with it"

@@ -877,11 +877,57 @@ class Observer:
                                   % (self.material.identity,
                                      (done.stderr or done.stdout).strip()[-800:]))
 
+    # What the delivered image ships for a Python task. The sandbox that freezes the reference has
+    # 3.11, and a project that declares `requires-python >= 3.12` is refused there with
+    #
+    #     Package 'parable' requires a different Python: 3.10.12 not in '>=3.12'
+    #
+    # -- ten of thirty-three build failures in one batch. It is also a mismatch in its own right:
+    # the expectation would be frozen under one interpreter and replayed under another, which is the
+    # defect this whole week has been about.
+    DELIVERED_PYTHON = "3.12"
+
+    def _build_env(self) -> dict:
+        """PATH with the provisioned interpreter ahead of the sandbox's own, when there is one.
+
+        Provisioning it and not using it would be worse than not provisioning it: the build would
+        still run under the wrong interpreter while looking as though it had been fixed.
+        """
+        return {"PATH": "%s/.frf-venv/bin:/usr/local/bin:/usr/bin:/bin" % self._remote_root}
+
+    def _match_delivered_python(self) -> None:
+        """Put an interpreter matching the delivered image ahead of the sandbox's own.
+
+        Best effort and silent when it cannot be done: a sandbox without network, or a project that
+        does not need it, is no worse off than before. `uv` is used because it fetches a standalone
+        build rather than compiling one, which is the difference between seconds and an hour.
+        """
+        if str(self._spec.language if self._spec else "").lower() not in ("python", ""):
+            return
+        if not self._material or not self._material.build:
+            return
+        if not any("pip" in " ".join(str(x) for x in cmd) or "python" in " ".join(str(x) for x in cmd)
+                   for cmd in self._material.build):
+            return
+        script = (
+            "set -e; command -v uv >/dev/null 2>&1 || pip install --quiet uv >/dev/null 2>&1 || "
+            "python3 -m pip install --quiet uv >/dev/null 2>&1; "
+            "uv python install %s >/dev/null 2>&1; "
+            "uv venv --python %s %s/.frf-venv >/dev/null 2>&1"
+            % (self.DELIVERED_PYTHON, self.DELIVERED_PYTHON, self._remote_root))
+        try:
+            self._backend.run(["sh", "-c", script], timeout=900.0)
+        except Exception:                                  # noqa: BLE001 -- best effort
+            return
+
+
     def _build_remote(self) -> None:
         """Run the project's own build inside the sandbox, against the pushed tree."""
+        self._match_delivered_python()
         for command in (self.material.build or []):
             argv = [part.replace("{ROOT}", self._remote_root) for part in command]
-            result = self._backend.run(argv, workdir=self._remote_root, timeout=BUILD_TIMEOUT)
+            result = self._backend.run(argv, workdir=self._remote_root,
+                                       env=self._build_env(), timeout=BUILD_TIMEOUT)
             if not result.ok:
                 # THE CAUSE, NOT THE TAIL. A failed build ends with a frame quoting the failing
                 # command and a `note:` saying it is not pip's fault -- true and useless -- while
@@ -906,7 +952,8 @@ class Observer:
                           timeout=300.0)
         if self._program and "/" not in self._program[0]:
             located = self._backend.run(["sh", "-c", "command -v %s" % self._program[0]],
-                                        workdir=self._remote_root, timeout=60)
+                                        workdir=self._remote_root, env=self._build_env(),
+                                        timeout=60)
             path = (located.stdout or "").strip().splitlines()
             if located.ok and path:
                 self._program[0] = path[-1]
