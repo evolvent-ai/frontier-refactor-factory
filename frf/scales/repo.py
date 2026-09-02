@@ -885,6 +885,17 @@ class Observer:
             if not result.ok:
                 raise BuildFailed("%s did not build in the sandbox: %s"
                                   % (self.material.identity, result.tail(800)))
+        # READABLE BY THE ACCOUNT THE SUBJECT WILL RUN AS. The build runs as root, and a toolchain
+        # that writes 0600 or 0700 leaves an artefact `nobody` cannot read. The isolation wrapper
+        # then drops to `nobody`, every probe returns the same permission error, and the freeze
+        # records that as the program's behaviour -- a subject that does nothing, reproducible five
+        # times over. `integrity._reachable_by` exists to refuse exactly this, and it only ever saw
+        # argv[0]: for `node /app/dist/cli.js` that is the interpreter, which is always readable.
+        #
+        # This is why the only repo tasks that ever worked were Go: a Go entry point IS argv[0] and
+        # `go build` writes it 0755.
+        self._backend.run(["sh", "-c", "chmod -R a+rX %s 2>/dev/null || true" % self._remote_root],
+                          timeout=300.0)
         if self._program and "/" not in self._program[0]:
             located = self._backend.run(["sh", "-c", "command -v %s" % self._program[0]],
                                         workdir=self._remote_root, timeout=60)

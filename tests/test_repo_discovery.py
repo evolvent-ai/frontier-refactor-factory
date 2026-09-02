@@ -653,3 +653,44 @@ def test_the_verifier_does_not_ask_for_a_privilege_drop_it_cannot_make():
 
     assert "os.geteuid() == 0" in block, \
         "only root can drop to nobody, and only root needs to"
+
+
+def test_reachability_checks_the_file_the_interpreter_was_handed(tmp_path):
+    """The check was written when argv[0] WAS the program.
+
+    An interpreted entry point is `node /app/dist/cli.js` or `python3 /app/main.py`, where argv[0]
+    is a world-readable interpreter and the file that matters is the next token. Checking only the
+    first made the guard pass while the subject was unreachable -- the silent failure its own
+    docstring describes: every probe returns the same permission error and the freeze records it as
+    the program's behaviour.
+
+    It is why the only repo tasks that ever worked were Go: a Go entry point IS argv[0], and
+    `go build` writes it 0755.
+    """
+    import os
+    from frf.core.integrity import _reachable_by
+
+    script = tmp_path / "cli.js"
+    script.write_text("console.log(1)\n", encoding="utf-8")
+    os.chmod(tmp_path, 0o755)
+
+    os.chmod(script, 0o644)
+    assert _reachable_by("nobody", ["/bin/sh", str(script)]) is True
+
+    os.chmod(script, 0o600)
+    assert _reachable_by("nobody", ["/bin/sh", str(script)]) is False, \
+        "an interpreter has to read the script it was handed"
+
+
+def test_the_build_leaves_its_artefacts_readable():
+    """The build runs as root and a toolchain that writes 0600 leaves an unreadable artefact.
+
+    The isolation wrapper then drops to `nobody`, every probe returns the same permission error, and
+    the freeze records that as the program's behaviour -- reproducible five times over.
+    """
+    import frf.scales.repo as repo_module
+
+    source = open(repo_module.__file__, encoding="utf-8").read()
+    block = source[source.index("def _build_remote"):]
+    block = block[:block.index("\n    def ", 10)]
+    assert "chmod -R a+rX" in block, "the built tree must be readable by whoever runs the subject"

@@ -329,7 +329,14 @@ def restricted_argv(argv: list, *, user: str = "nobody", cap: int = PROCESS_CAP)
 
 
 def _reachable_by(user: str, argv: list) -> bool:
-    """Whether `user` could execute argv[0] at all: every directory above it must be traversable.
+    """Whether `user` could execute what argv names: every directory above it must be traversable.
+
+    EVERY TOKEN THAT NAMES A FILE, not only argv[0]. The check was written when argv[0] was the
+    program; an interpreted entry point is `node /app/dist/cli.js` or `python3 /app/main.py`, where
+    argv[0] is a world-readable interpreter and the file that matters is the next token. Checking
+    only the first made the guard pass while the subject was unreachable -- which is precisely the
+    silent failure described below, and it is why only Go, whose entry point IS argv[0], ever
+    produced a repo task.
 
     Checked before wrapping rather than discovered afterwards, because the failure is silent in the
     worst way -- every probe returns the same permission message, the corpus freezes it as the
@@ -344,17 +351,28 @@ def _reachable_by(user: str, argv: list) -> bool:
     if record.pw_uid == 0:
         return True
 
-    path = os.path.abspath(argv[0] if argv else "")
-    parts = path.split(os.sep)
-    for depth in range(1, len(parts) + 1):
-        step = os.sep.join(parts[:depth]) or os.sep
+    wanted = [os.path.abspath(argv[0])] if argv else []
+    for token in (argv or [])[1:]:
+        candidate = str(token)
+        if not candidate.startswith("-") and os.path.isabs(candidate) and os.path.exists(candidate):
+            wanted.append(candidate)
+    for path in wanted:
+        parts = os.path.abspath(path).split(os.sep)
+        for depth in range(1, len(parts) + 1):
+            step = os.sep.join(parts[:depth]) or os.sep
+            try:
+                mode = os.stat(step).st_mode
+            except OSError:
+                return False
+            # World-executable is what a traversal needs; group membership is not assumed, because
+            # `restricted_argv` clears supplementary groups. The last component must also be
+            # READABLE -- an interpreter has to read the script it was handed.
+            if not mode & 0o001:
+                return False
         try:
-            mode = os.stat(step).st_mode
+            if not os.stat(path).st_mode & 0o004:
+                return False
         except OSError:
-            return False
-        # World-executable is what a traversal needs; group membership is not assumed, because
-        # `restricted_argv` clears supplementary groups.
-        if not mode & 0o001:
             return False
     return True
 
