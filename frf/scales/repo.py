@@ -883,8 +883,16 @@ class Observer:
             argv = [part.replace("{ROOT}", self._remote_root) for part in command]
             result = self._backend.run(argv, workdir=self._remote_root, timeout=BUILD_TIMEOUT)
             if not result.ok:
+                # THE CAUSE, NOT THE TAIL. A failed build ends with a frame quoting the failing
+                # command and a `note:` saying it is not pip's fault -- true and useless -- while
+                # the sentence that names the reason is far above it. Eight of thirteen build
+                # failures in one batch read identically because of that.
+                #
+                # The same extractor the in-image gate uses, imported rather than copied: two would
+                # drift and the drift would be invisible in exactly the way both exist to prevent.
+                from ..observe.in_image import _why_it_failed
                 raise BuildFailed("%s did not build in the sandbox: %s"
-                                  % (self.material.identity, result.tail(800)))
+                                  % (self.material.identity, _why_it_failed(result.tail(20000))))
         # READABLE BY THE ACCOUNT THE SUBJECT WILL RUN AS. The build runs as root, and a toolchain
         # that writes 0600 or 0700 leaves an artefact `nobody` cannot read. The isolation wrapper
         # then drops to `nobody`, every probe returns the same permission error, and the freeze

@@ -85,7 +85,9 @@ _CAUSE_MARKS = ("error:", "ERROR:", "error[", "fatal:", "failed:", "Traceback",
 
 # Noise that matches the marks above without explaining anything.
 _CAUSE_NOISE = ("This error originates from a subprocess", "See above for details",
-                "hint: ", "note: This is an issue with the package")
+                "hint: ", "note: This is an issue with the package",
+                "See above for output", "A complete log of this run",
+                "debconf: ", "requires a controlling tty", "warning: build failed, wait")
 
 
 def _why_it_failed(output: str, limit: int = 700) -> str:

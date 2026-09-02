@@ -702,3 +702,30 @@ def test_the_build_leaves_its_artefacts_readable():
     block = source[source.index("def _build_remote"):]
     block = block[:block.index("\n    def ", 10)]
     assert "chmod -R a+rX" in block, "the built tree must be readable by whoever runs the subject"
+
+
+def test_a_sandbox_build_failure_reports_its_cause():
+    """A failed build ends with a frame quoting the command and a `note:` disclaiming blame.
+
+    Both are true and useless, and both are in the tail. Eight of thirteen build failures in one
+    batch read identically -- `note: This is an issue with the package mentioned above, not pip` --
+    which names nothing at all.
+    """
+    import frf.scales.repo as repo_module
+    from frf.observe.in_image import _why_it_failed
+
+    source = open(repo_module.__file__, encoding="utf-8").read()
+    block = source[source.index("def _build_remote"):]
+    block = block[:block.index("\n    def ", 10)]
+    assert "_why_it_failed" in block, "the sandbox build must report a cause, not a tail"
+
+    noisy = "\n".join([
+        "  Building wheel for thing",
+        "  error: could not find system library 'libfoo' required by the `foo-sys` crate",
+        "  " + "filler " * 300,
+        "  note: This is an issue with the package mentioned above, not pip.",
+        "  See above for output.",
+    ])
+    said = _why_it_failed(noisy)
+    assert "libfoo" in said, said
+    assert "not pip" not in said and "See above" not in said
