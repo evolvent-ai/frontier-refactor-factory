@@ -121,7 +121,15 @@ def dockerfile_for(source_language: str, target_language: str,
     lines.append("")
 
     # --- Standard tools + base-image apt packages ---
-    standard_apt = ["time", "build-essential", "curl", "git", "ca-certificates"]
+    # WHAT A NATIVE BUILD ASKS FOR. `build-essential` gives a compiler and nothing else, and a
+    # third of one batch's build failures were a package missing beneath that: `Make sure you also
+    # have the development packages of openssl installed` (6 of 33), and `llvm-sys` refusing to
+    # compile without LLVM (5 of 33). These are the libraries a crate or a wheel links against, and
+    # they are the same short list every time -- cheaper to install once than to refuse a repository
+    # for each one and call it unbuildable material.
+    standard_apt = ["time", "build-essential", "curl", "git", "ca-certificates",
+                    "pkg-config", "libssl-dev", "zlib1g-dev", "libffi-dev",
+                    "libxml2-dev", "libxslt1-dev", "libclang-dev", "llvm-dev", "cmake"]
     base_apt = [p for p in base_cfg["apt_packages"] if p not in standard_apt]
     all_apt = standard_apt + base_apt
 

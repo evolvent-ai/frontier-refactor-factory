@@ -312,3 +312,18 @@ def test_go_fetches_the_toolchain_its_go_mod_declares():
 
     assert LANGUAGES["go"]["env"].get("GOTOOLCHAIN") == "auto"
     assert "GOTOOLCHAIN=auto" in dockerfile_for("go", "")
+
+
+def test_the_image_carries_what_a_native_build_links_against():
+    """`build-essential` gives a compiler and nothing else.
+
+    A third of one batch's build failures were a package missing beneath it: `Make sure you also
+    have the development packages of openssl installed` (6 of 33) and `llvm-sys` refusing to compile
+    without LLVM (5 of 33). These are the same short list every time, and installing them once is
+    cheaper than refusing a repository for each one and calling it unbuildable material.
+    """
+    from frf.core.harbor import dockerfile_for
+
+    text = dockerfile_for("rust", "")
+    for package in ("pkg-config", "libssl-dev", "libclang-dev", "llvm-dev", "cmake"):
+        assert package in text, "%s is missing: %s" % (package, text)
