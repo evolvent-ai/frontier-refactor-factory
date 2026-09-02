@@ -275,3 +275,25 @@ def test_a_language_floor_moves_in_every_place_it_is_written():
             assert pinned.groups() == base.groups(), (
                 "%s installs %s as a cross-language target while its base is %s"
                 % (language, pinned.group(0), setup["base_image"]))
+
+
+def test_a_toolchain_is_not_installed_over_its_own_base_image():
+    """`rust:1.90-bookworm` ships cargo and rustc; rustup-init on top of it fails outright.
+
+    `error: cannot install while Rust is installed`, exit 1, no image -- the same shape as
+    `npm install -g yarn` against a node base that already has one. The fetch command is still
+    needed for the other case, where rust is a cross-language TARGET on somebody else's base.
+    """
+    from frf.core.harbor import dockerfile_for
+    from frf.core.shims.dockerfiles import _LANGUAGE_SETUP as LANGUAGES
+
+    assert LANGUAGES["rust"]["install_cmds"] == [], \
+        "the base image is the toolchain; installing it again is what fails"
+    assert LANGUAGES["rust"]["cross_install_cmds"], \
+        "and it is still needed where rust is a target on another base"
+
+    inplace = dockerfile_for("rust", "")
+    assert "rustup" not in inplace and "sh.rustup.rs" not in inplace, inplace
+
+    cross = dockerfile_for("python", "rust")
+    assert "sh.rustup.rs" in cross, "a cross-language target must still be fetched"

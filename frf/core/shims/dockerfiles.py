@@ -71,7 +71,17 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         # SOURCE, and `install_cmds` is where it is a cross-language TARGET on somebody else's base.
         "base_image": "rust:1.90-bookworm",
         "apt_packages": [],
-        "install_cmds": [
+        # EMPTY, BECAUSE THE BASE ALREADY IS THE TOOLCHAIN. `rust:1.90-bookworm` ships cargo and
+        # rustc; running rustup-init on top of it fails outright with
+        #
+        #     error: cannot install while Rust is installed
+        #
+        # -- exit 1, no image, the same shape as `npm install -g yarn` against a node base that
+        # already has one. `cross_install_cmds` below is for the other case: rust as a
+        # cross-language TARGET, where the base is somebody else's image and rust is genuinely
+        # absent.
+        "install_cmds": [],
+        "cross_install_cmds": [
             "curl https://sh.rustup.rs -sSf"
             " | sh -s -- -y --default-toolchain 1.90.0 --no-modify-path",
         ],

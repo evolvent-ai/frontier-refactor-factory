@@ -179,7 +179,11 @@ def dockerfile_for(source_language: str, target_language: str,
                 for sp, dp in copy_paths:
                     lines.append("COPY --from=toolchain %s %s" % (sp, dp))
                 lines.append("")
-        for cmd in tgt_cfg["install_cmds"]:
+        # `cross_install_cmds` FIRST, WHERE A LANGUAGE HAS ONE. A toolchain that is the base image
+        # in the in-place case still has to be fetched when it is a cross-language target on
+        # somebody else's base -- and the command that fetches it is exactly the one that fails
+        # against its own base image.
+        for cmd in (tgt_cfg.get("cross_install_cmds") or tgt_cfg["install_cmds"]):
             lines.append("# Install %s toolchain" % tgt)
             lines.append("RUN %s" % cmd)
             lines.append("")
