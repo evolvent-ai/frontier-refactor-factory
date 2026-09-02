@@ -783,6 +783,48 @@ def _declared_names(root: str) -> tuple:
                 found.append(str(data["name"]))
         except (OSError, ValueError, TypeError):
             pass
+    # CARGO, GO AND cmd/ TOO. This read package.json and pyproject.toml only, so a Rust or Go
+    # project's published command name was never searched for -- and those are exactly the projects
+    # whose invocation cannot be guessed, because the binary is `target/release/prog` while every
+    # README says `prog`. The harvest found nothing and the scale fell back to feeding the program
+    # each file in the repository: `{PROGRAM} readme.md`, `{PROGRAM} test/main.ts`, which is 42 of
+    # one batch's `ran but did nothing` refusals.
+    cargo = os.path.join(root, "Cargo.toml")
+    if os.path.isfile(cargo):
+        try:
+            text = open(cargo, encoding="utf-8", errors="replace").read()
+            for block in text.split("[[bin]]")[1:]:
+                for line in block.splitlines():
+                    if line.strip().startswith("["):
+                        break
+                    if line.strip().startswith("name"):
+                        found.append(line.split("=", 1)[1].strip().strip('"\''))
+                        break
+            if "[[bin]]" not in text and "[package]" in text:
+                for line in text.split("[package]", 1)[1].splitlines():
+                    if line.strip().startswith("["):
+                        break
+                    if line.strip().startswith("name"):
+                        found.append(line.split("=", 1)[1].strip().strip('"\''))
+                        break
+        except OSError:
+            pass
+    gomod = os.path.join(root, "go.mod")
+    if os.path.isfile(gomod):
+        try:
+            for line in open(gomod, encoding="utf-8", errors="replace"):
+                if line.startswith("module "):
+                    found.append(line.split()[1].rstrip("/").rsplit("/", 1)[-1])
+                    break
+        except OSError:
+            pass
+    cmd_dir = os.path.join(root, "cmd")
+    if os.path.isdir(cmd_dir):
+        try:
+            found.extend(name for name in sorted(os.listdir(cmd_dir))
+                         if os.path.isdir(os.path.join(cmd_dir, name)))
+        except OSError:
+            pass
     pyproject = os.path.join(root, "pyproject.toml")
     if os.path.isfile(pyproject):
         try:

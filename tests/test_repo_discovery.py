@@ -856,3 +856,51 @@ def test_the_sandbox_gets_the_package_managers_the_image_gets():
     observer._remote_root = "/tmp/remote"
     observer._match_delivered_node_tools()
     assert any("bun" in a for a in asked), asked
+
+
+def test_declared_names_covers_cargo_and_go(tmp_path):
+    """This read package.json and pyproject.toml only.
+
+    A Rust or Go project's published command name was never searched for -- and those are exactly
+    the projects whose invocation cannot be guessed, because the binary is `target/release/prog`
+    while the README says `prog`. The harvest found nothing and the scale fell back to feeding the
+    program each file in the repository: `{PROGRAM} readme.md`, `{PROGRAM} test/main.ts`.
+    """
+    from frf.scales.repo import _declared_names
+
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "outer"\n\n[[bin]]\nname = "solang"\npath = "src/main.rs"\n',
+        encoding="utf-8")
+    assert "solang" in _declared_names(str(tmp_path))
+
+    (tmp_path / "Cargo.toml").unlink()
+    (tmp_path / "go.mod").write_text("module github.com/owner/goawk\n\ngo 1.25\n", encoding="utf-8")
+    assert "goawk" in _declared_names(str(tmp_path))
+
+    (tmp_path / "cmd").mkdir()
+    (tmp_path / "cmd" / "yq").mkdir()
+    assert "yq" in _declared_names(str(tmp_path))
+
+
+def test_declared_names_covers_cargo_and_go(tmp_path):
+    """This read package.json and pyproject.toml only.
+
+    A Rust or Go project's published command name was never searched for -- and those are exactly
+    the projects whose invocation cannot be guessed, because the binary is `target/release/prog`
+    while every README says `prog`. The harvest found nothing and the scale fell back to feeding the
+    program each file in the repository: `{PROGRAM} readme.md`, `{PROGRAM} test/main.ts`, which is
+    42 of one batch's `ran but did nothing` refusals.
+    """
+    from frf.scales.repo import _declared_names
+
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "outer"\n\n[[bin]]\nname = "solang"\npath = "src/main.rs"\n',
+        encoding="utf-8")
+    assert "solang" in _declared_names(str(tmp_path))
+
+    (tmp_path / "Cargo.toml").unlink()
+    (tmp_path / "go.mod").write_text("module github.com/owner/goawk\n\ngo 1.25\n", encoding="utf-8")
+    (tmp_path / "cmd").mkdir()
+    (tmp_path / "cmd" / "yq").mkdir()
+    names = _declared_names(str(tmp_path))
+    assert "goawk" in names and "yq" in names, names
