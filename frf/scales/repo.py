@@ -2076,7 +2076,21 @@ def main():
                       "note": "no run.sh in the submission"}, open(reward, "w"))
         return 1
 
-    if environment.get("isolated") and shutil.which("setpriv"):
+    # ONLY ROOT CAN DROP TO NOBODY, AND ONLY ROOT NEEDS TO. `setpriv --reuid` changes the user id,
+    # which an unprivileged process may not do: run as `nobody` it fails with
+    #
+    #     setpriv: setgroups failed: Operation not permitted
+    #
+    # and exits 127 -- identically, on every scenario. The image already declares `USER nobody`, so
+    # the isolation this wrapper exists to provide is in force before the verifier starts; asking
+    # for it again is what breaks it.
+    #
+    # Two isolation mechanisms met and collided. Before the image dropped its user, the verifier ran
+    # as root and setpriv worked. Afterwards it could not, and the effect was invisible in the
+    # obvious place: stdout and the file tree still matched perfectly, because the program that
+    # never ran wrote nothing and touched nothing, while exit code and stderr failed on every one of
+    # 47 scenarios. In aggregate: 47 of 75 in-image refusals at precisely 50%, 19 at precisely 25%.
+    if environment.get("isolated") and shutil.which("setpriv") and os.geteuid() == 0:
         reference_prog = ["setpriv", "--reuid", "nobody", "--regid", "nogroup", "--clear-groups", "--", reference]
         submission_prog = ["setpriv", "--reuid", "nobody", "--regid", "nogroup", "--clear-groups", "--", submission]
     else:

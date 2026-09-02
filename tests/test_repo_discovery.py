@@ -631,3 +631,25 @@ def test_the_shipped_wrapper_starts_the_subject_the_way_it_was_observed():
     assert "ulimit -u" in block, "and it is started under the same process cap"
     assert "integrity.PROCESS_CAP" in block, \
         "one number, or the two drift and the drift is a graded channel"
+
+
+def test_the_verifier_does_not_ask_for_a_privilege_drop_it_cannot_make():
+    """`setpriv --reuid` changes the user id, which an unprivileged process may not do.
+
+    Run as `nobody` it fails with `setpriv: setgroups failed: Operation not permitted` and exits
+    127 -- identically, on every scenario. The image already declares `USER nobody`, so the
+    isolation this wrapper provides is in force before the verifier starts.
+
+    Two isolation mechanisms collided, and the effect hid in plain sight: stdout and the file tree
+    matched perfectly, because a program that never ran writes nothing and touches nothing, while
+    exit code and stderr failed on all 47 scenarios. In aggregate, 47 of 75 in-image refusals sat at
+    precisely 50% and 19 at precisely 25%.
+    """
+    import frf.scales.repo as repo_module
+
+    source = open(repo_module.__file__, encoding="utf-8").read()
+    block = source[source.index('if environment.get("isolated") and shutil.which("setpriv")'):]
+    block = block[:block.index("submission_prog = [submission]")]
+
+    assert "os.geteuid() == 0" in block, \
+        "only root can drop to nobody, and only root needs to"
