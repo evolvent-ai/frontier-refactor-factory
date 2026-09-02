@@ -327,3 +327,18 @@ def test_the_image_carries_what_a_native_build_links_against():
     text = dockerfile_for("rust", "")
     for package in ("pkg-config", "libssl-dev", "libclang-dev", "llvm-dev", "cmake"):
         assert package in text, "%s is missing: %s" % (package, text)
+
+
+def test_the_javascript_image_carries_the_package_managers_projects_declare():
+    """`bun: not found` was named in a comment as a cause of most of one batch's refusals.
+
+    Then pnpm and yarn were installed and bun was not -- half a fix, left long enough to become the
+    single largest build failure the repo scale had: fifteen of twenty-four. It also carries the
+    `workspace:` protocol that npm refuses with EUNSUPPORTEDPROTOCOL.
+    """
+    from frf.core.shims.dockerfiles import _LANGUAGE_SETUP as LANGUAGES
+
+    for language in ("javascript", "typescript"):
+        installs = " ".join(LANGUAGES[language]["install_cmds"])
+        for manager in ("pnpm", "yarn", "bun"):
+            assert manager in installs, "%s does not install %s: %s" % (language, manager, installs)

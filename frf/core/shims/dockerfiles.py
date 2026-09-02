@@ -158,8 +158,15 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         #
         # Forcing is right rather than merely expedient: the point of naming a version is that the
         # task runs against THAT one, so replacing the bundled yarn is the intent.
+        # BUN TOO, AND ITS ABSENCE WAS ALREADY WRITTEN DOWN. The comment above named
+        # `bun: not found` as a cause of most of one repo/ts batch's refusals, and then installed
+        # pnpm and yarn only -- half a fix, left in place long enough to become the single largest
+        # build failure the repo scale had: `sh: 1: bun: not found`, fifteen of twenty-four.
+        #
+        # It also carries the `workspace:` protocol that npm refuses with EUNSUPPORTEDPROTOCOL, so a
+        # monorepo declaring bun stops failing at its own lockfile.
         "install_cmds": [
-            "npm install -g --force pnpm@9.12.3 yarn@1.22.22",
+            "npm install -g --force pnpm@9.12.3 yarn@1.22.22 bun@1.1.38",
         ],
         "copy_from_image": "node:22-bookworm-slim",
         "copy_from_paths": [
@@ -179,8 +186,9 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         # refusals, all charged to the material.
         # `--force` for the same reason as javascript above: the base ships yarn and npm 9 will not
         # overwrite it.
+        # `bun` for the same reason as javascript above.
         "install_cmds": [
-            "npm install -g --force typescript@5.6.3 pnpm@9.12.3 yarn@1.22.22",
+            "npm install -g --force typescript@5.6.3 pnpm@9.12.3 yarn@1.22.22 bun@1.1.38",
         ],
         "copy_from_image": "node:22-bookworm-slim",
         "copy_from_paths": [
