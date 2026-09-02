@@ -176,21 +176,31 @@ TEMPLATES = {
     # `Entry` serve.go calls and converts JSON arguments into the subject's own types. Naming
     # `{bridge}` in the build argv is what makes it compile; writing it and forgetting that is a file
     # on disk the linker never sees, which fails as `undefined: Entry`.
-    # GOTOOLCHAIN=local BECAUSE THE SANDBOX HAS NO NETWORK AND SAYING SO IS CHEAPER THAN FINDING OUT.
-    # A modern go.mod may carry `toolchain go1.27.0`, and Go's default is to go and FETCH that
-    # toolchain -- which `GOPROXY=off` then blocks, after the attempt. Two candidates in a real batch
-    # refused as `go: download go1.27.0 for linux/amd64: toolchain not available`, which reads like a
-    # missing dependency and is really a repository asking for a compiler this image does not carry.
-    # `local` makes Go use what is installed and say so immediately, so the refusal is fast and names
-    # the real reason.
+    # THE SANDBOX HAS NETWORK, AND THIS SAID IT DID NOT. `GOPROXY=off` was justified by that
+    # premise, and the premise is false: the same sandbox clones from GitHub, runs `npm install` and
+    # runs `pip install`. What it actually did was guarantee failure for one scale and change
+    # nothing for the others.
     #
-    # THE IMAGE IS NOT BUMPED TO CHASE THIS. The repositories that demanded a newer toolchain were
-    # applications rather than libraries, and an offline sandbox refuses them at their dependency
-    # closure anyway -- so a newer compiler would move the refusal without preventing it. The pin in
-    # `core/shims/dockerfiles.py` is one line and worth revisiting from a host that can verify a tag
-    # exists; guessing one from here would break every Go build instead of two.
+    # A kernel or module subject is a single mined function that imports only the standard library,
+    # so the proxy is never consulted and turning it off cost nothing. A PACKAGE subject is a whole
+    # package with a dependency closure, so turning it off refused every one that had dependencies:
+    # fourteen of fourteen Go package candidates, every one reading
+    #
+    #     module lookup disabled by GOPROXY=off
+    #
+    # which is our configuration talking, not the repository. It is the third time this week the
+    # same mistake has been found in a different language -- `npm install --offline` against an
+    # empty cache and `pip install --no-deps` were the other two. Removing what a program needs and
+    # then recording that the program does not work.
+    #
+    # BUILDING MAY FETCH; THE SUBMISSION MAY NOT. Those are different claims and only the second is
+    # a property of the corpus. `GOSUMDB=off` stays -- the checksum database is a second network
+    # dependency with its own failure modes, and the module proxy already pins by content hash.
+    #
+    # GOTOOLCHAIN follows `dockerfiles.py`: a go.mod naming a toolchain pins it exactly, so fetching
+    # it is deterministic, and refusing to fetch it only moves the refusal.
     "go": Shim("serve.go", "subject.go", ("{binary}",), tool="go", bridge="bridge.go",
-               build=(("env", "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local",
+               build=(("env", "GOSUMDB=off", "GOFLAGS=-mod=mod", "GOTOOLCHAIN=auto",
                        "go", "build", "-o", "{binary}", "{entry}", "{bridge}", "{subject}"),)),
     # THE BRIDGE IS THE SUBJECT FILE, because rustc is handed only the shim and reaches the subject as
     # `mod subject;` -- a third file would be invisible to the compiler. So the generated `entry` is

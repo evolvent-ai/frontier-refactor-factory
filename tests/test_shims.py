@@ -129,3 +129,23 @@ def test_an_error_still_gets_a_reply_line_and_kills_the_process():
             capture_output=True, text=True, timeout=60)
         reply = json.loads(result.stdout.strip().splitlines()[-1])
         assert reply["ok"] is False and "bad input" in reply["error"], reply
+
+
+def test_a_go_subject_may_resolve_its_dependencies():
+    """`GOPROXY=off` was justified by "the sandbox has no network", and that premise is false.
+
+    The same sandbox clones from GitHub, runs `npm install` and runs `pip install`. Turning the
+    proxy off cost nothing for a kernel or module subject -- a single mined function importing only
+    the standard library -- and refused every Go PACKAGE candidate that had dependencies: fourteen
+    of fourteen, each reading `module lookup disabled by GOPROXY=off`, which is our configuration
+    talking rather than the repository.
+
+    The third instance of the same mistake this week, after `npm install --offline` against an empty
+    cache and `pip install --no-deps`.
+    """
+    from frf.observe.call.shims import TEMPLATES
+
+    argv = " ".join(str(x) for cmd in TEMPLATES["go"].build for x in cmd)
+    assert "GOPROXY=off" not in argv, argv
+    assert "GOSUMDB=off" in argv, \
+        "the checksum database is a second network dependency; the proxy already pins by hash"
