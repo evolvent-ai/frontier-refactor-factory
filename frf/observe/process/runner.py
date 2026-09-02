@@ -100,6 +100,31 @@ def _tree_lines(root: str, exclude: tuple = ()) -> list:
     return sorted(lines)
 
 
+def _make_output_dirs(workspace: str, argv: list) -> None:
+    """Create the directories a maintainer's command assumes already exist.
+
+    A harvested invocation carries the repository's layout with it -- `-o ./src/parser.js` is
+    written by somebody whose `src/` exists. The scenario workspace holds only the fixture, so the
+    write fails, the program exits non-zero with nothing on stdout, and the candidate is refused for
+    having done nothing. That refusal is ours.
+
+    Only inside the workspace, and only for tokens that name a directory: this creates somewhere to
+    write, never the file itself, so a program that was going to read a missing input still fails
+    exactly as it would.
+    """
+    for token in argv:
+        token = str(token)
+        if not token or token.startswith("-") or "/" not in token:
+            continue
+        parent = os.path.dirname(os.path.normpath(os.path.join(workspace, token.lstrip("./"))))
+        if os.path.commonpath([os.path.abspath(parent), os.path.abspath(workspace)]) == \
+                os.path.abspath(workspace):
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except OSError:
+                pass
+
+
 def _scrub(text: str, workspace: str) -> str:
     return text.replace(workspace, WORKSPACE_TOKEN)
 
@@ -149,6 +174,7 @@ def run_scenario(scenario: Scenario, program: list, *, fixtures_dir: str | None 
         for step in scenario.steps:
             cwd = os.path.normpath(os.path.join(workspace, step.cwd))
             os.makedirs(cwd, exist_ok=True)
+            _make_output_dirs(workspace, step.argv)
             # THE WHOLE-TOKEN CASE FIRST, and the order is the bug this comment exists for. Doing
             # the textual replacement first rewrites a bare `{PROGRAM}` into `program[0]`, so the
             # test below never matches and the rest of `program` is dropped -- which is invisible
@@ -314,7 +340,17 @@ def _run_remote_scenario(scenario: Scenario, program: list, *, backend,
             else:
                 argv = " ".join(_shell_quote(str(x).replace(PROGRAM_TOKEN, " ".join(remote_program)))
                                   for x in step.argv)
+            # THE SAME DIRECTORIES THE LOCAL RUNNER AND THE SHIPPED VERIFIER CREATE. A harvested
+            # invocation carries the repository's layout with it -- `-o ./src/parser.js` is written
+            # by somebody whose `src/` exists -- and three places have to agree about this or the
+            # freeze and the delivered task observe different things.
+            wanted = [os.path.dirname(os.path.normpath(workspace + "/" + str(t).lstrip("./")))
+                      for t in step.argv
+                      if str(t) and not str(t).startswith("-") and "/" in str(t)]
             command = "mkdir -p %s; " % _shell_quote(cwd)
+            for parent in wanted:
+                if parent.startswith(workspace):
+                    command += "mkdir -p %s; " % _shell_quote(parent)
             if step.stdin is not None:
                 command += "printf %s | %s" % (_shell_quote(step.stdin), argv)
             else:

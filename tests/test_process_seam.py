@@ -98,3 +98,44 @@ def test_an_expectation_survives_a_round_trip_through_json():
     assert restored.to_json() == original.to_json()
     assert restored.channel("stdout").masked == frozenset({1})
     assert grade(restored, runs[0]) == grade(original, runs[0])
+
+
+def test_a_command_that_writes_gets_somewhere_to_write():
+    """A harvested invocation carries the repository's layout with it.
+
+    `-o ./src/parser.js` is written by somebody whose `src/` exists. The scenario workspace holds
+    only the fixture, so the write fails, the program exits non-zero with nothing on stdout, and the
+    candidate is refused for having done nothing -- a refusal that is ours.
+    """
+    import os
+    import tempfile
+
+    from frf.observe.process.runner import _make_output_dirs
+
+    with tempfile.TemporaryDirectory() as workspace:
+        _make_output_dirs(workspace, ["{PROGRAM}", "-o", "./src/parser.js", "grammar/x.ts"])
+
+        assert os.path.isdir(os.path.join(workspace, "src"))
+        assert os.path.isdir(os.path.join(workspace, "grammar"))
+        assert not os.path.exists(os.path.join(workspace, "src", "parser.js")), \
+            "somewhere to write, never the file: a missing input must still be missing"
+
+        _make_output_dirs(workspace, ["{PROGRAM}", "../../etc/passwd"])
+        assert not os.path.isdir("/etc/passwd"), "and never outside the workspace"
+
+
+def test_the_three_runners_agree_about_creating_output_directories():
+    """The freeze runs one, the sandbox runs another, and the shipped task runs a third.
+
+    If they disagree the freeze and the delivered task observe different things, which is the defect
+    class this whole week has been about.
+    """
+    import frf.observe.process.runner as runner
+    import frf.scales.repo as repo
+
+    remote = open(runner.__file__, encoding="utf-8").read()
+    verifier = open(repo.__file__, encoding="utf-8").read()
+
+    assert "_make_output_dirs(workspace, step.argv)" in remote, "the local runner"
+    assert 'mkdir -p %s; " % _shell_quote(parent)' in remote, "the sandbox runner"
+    assert "os.makedirs(_p, exist_ok=True)" in verifier, "the verifier the task ships"

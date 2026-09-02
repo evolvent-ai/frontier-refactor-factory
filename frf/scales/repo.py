@@ -1933,6 +1933,17 @@ def run_scenario(scenario, program, fixtures_dir, exclude):
             cwd = os.path.normpath(os.path.join(workspace, step.get("cwd", ".")))
             os.makedirs(cwd, exist_ok=True)
             args = step["argv"]
+            for _token in args:
+                _t = str(_token)
+                if not _t or _t.startswith("-") or "/" not in _t:
+                    continue
+                _p = os.path.dirname(os.path.normpath(os.path.join(workspace, _t.lstrip("./"))))
+                if os.path.commonpath([os.path.abspath(_p), os.path.abspath(workspace)]) == \
+                        os.path.abspath(workspace):
+                    try:
+                        os.makedirs(_p, exist_ok=True)
+                    except OSError:
+                        pass
             if args and args[0] == "{PROGRAM}":
                 argv = list(program) + list(args[1:])
             else:
