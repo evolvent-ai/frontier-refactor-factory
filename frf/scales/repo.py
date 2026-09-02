@@ -1203,8 +1203,29 @@ class Repo:
                 # caller's cwd (the process runner executes from a fresh workspace).
                 resolved = [("\"$FRF_RUN_DIR" + x[1:] + "\"" if x.startswith("./") else x)
                             for x in command]
-                handle.write("#!/bin/sh\nFRF_RUN_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n"
-                             "exec " + " ".join(resolved) + " \"$@\"\n")
+                # STARTED IDENTICALLY TO HOW IT WAS OBSERVED. `integrity.restricted_argv` wraps
+                # the reference during the freeze as
+                #
+                #     sh -c 'unset ENV BASH_ENV; ulimit -u N; exec "$@"' -- <argv>
+                #
+                # and its own docstring says why: "the subject must be started identically for the
+                # reference and for the candidate, or the comparison measures the wrapper". This
+                # wrapper did not carry the first half, and the measurement was of the wrapper.
+                #
+                # `ENV` is the load-bearing part. This host sets `ENV=/etc/shinit_v2`, which runs
+                # dpkg, which writes a permission warning to STDERR -- a graded channel. Unset at
+                # freeze time and set in the delivered image, so stderr differed on every scenario
+                # while stdout and the file tree matched exactly. Measured across 75 in-image
+                # refusals: 47 at precisely 50% and 19 at precisely 25%, whole channels failing
+                # together, which is not what material variation looks like.
+                handle.write("#!/bin/sh\n"
+                             "# The reference was observed with these unset; a subject started "
+                             "differently is measured differently.\n"
+                             "unset ENV BASH_ENV\n"
+                             "ulimit -u %d 2>/dev/null || true\n"
+                             "FRF_RUN_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n"
+                             "exec " % integrity.PROCESS_CAP
+                             + " ".join(resolved) + " \"$@\"\n")
             os.chmod(run, 0o755)
         tests = os.path.join(path, "tests")
         os.makedirs(tests, exist_ok=True)

@@ -605,3 +605,29 @@ def test_the_workload_fallback_prefers_the_project_own_inputs(tmp_path):
     assert files[:2] == ["testdata/a.json", "testdata/b.json"], files
     assert "package.json" not in files and "README.md" not in files
     assert ".eslintrc.js" not in files, "a dotfile configures the repository, it is not a workload"
+
+
+def test_the_shipped_wrapper_starts_the_subject_the_way_it_was_observed():
+    """`restricted_argv` wraps the reference during the freeze and says why in its own docstring:
+
+        the subject must be started identically for the reference and for the candidate,
+        or the comparison measures the wrapper
+
+    The shipped `run.sh` did not carry the first half of that wrapper, and the comparison measured
+    the wrapper. `ENV` is the load-bearing part: this host sets `ENV=/etc/shinit_v2`, which runs
+    dpkg, which writes a permission warning to STDERR -- a graded channel.
+
+    Measured across 75 in-image refusals: 47 at precisely 50% and 19 at precisely 25%, with whole
+    channels failing together. One instrumented run gave the shape exactly --
+    `stdout 47/47 pass, tree 47/47 pass, exit_code 0/47, stderr 0/47`.
+    """
+    import frf.scales.repo as repo_module
+
+    source = open(repo_module.__file__, encoding="utf-8").read()
+    block = source[source.index('handle.write("#!/bin/sh'):]
+    block = block[:block.index("os.chmod(run, 0o755)")]
+
+    assert "unset ENV BASH_ENV" in block, "the freeze unsets these; the delivered task must too"
+    assert "ulimit -u" in block, "and it is started under the same process cap"
+    assert "integrity.PROCESS_CAP" in block, \
+        "one number, or the two drift and the drift is a graded channel"
