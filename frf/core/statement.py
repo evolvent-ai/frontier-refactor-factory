@@ -408,3 +408,132 @@ those will be appended automatically.
     # Validate structure; add any section the model omitted.
     text = _validate_and_repair(text, spec)
     return text
+
+
+# ---------------------------------------------------------------------------
+# LLM-based task name generation
+# ---------------------------------------------------------------------------
+
+# FrontierSWE naming examples used as few-shot calibration.
+_NAME_EXAMPLES = """
+Examples of high-quality task names (FrontierSWE style):
+  cranelift-codegen-opt        (Cranelift compiler backend, codegen optimisation)
+  pyright-type-checking-opt    (Pyright type checker, type-checking performance)
+  ffmpeg-swscale-to-rust       (FFmpeg libswscale, rewrite in Rust)
+  libexpat-to-x86asm           (libexpat XML parser, rewrite in x86 assembly)
+  notebook-compression-opt     (Jupyter notebook compressor, compression ratio)
+  revideo-rendering-opt        (Revideo, rendering pipeline performance)
+  jomini-save-parser-opt       (jomini, Paradox save-file parser performance)
+  gofeed-feed-parsing-opt      (gofeed, RSS/Atom/JSON feed parsing performance)
+  hucre-spreadsheet-engine-opt (hucre, spreadsheet engine performance)
+"""
+
+
+def _stem_from_identity(identity: str) -> str:
+    """Extract a clean kebab-case stem from a material identity string."""
+    # identity looks like: github:owner/repo-name@commit or owner/repo-name
+    stem = identity.rstrip("/").rsplit("/", 1)[-1].replace(".git", "").lower()
+    stem = stem.split("@", 1)[0] or stem
+    # Apply the same camel/underscore normalisation _slug uses
+    out = []
+    for i, ch in enumerate(stem):
+        if ch in "_. ":
+            out.append("-")
+        elif ch.isupper() and i and stem[i - 1].islower():
+            out.append("-")
+            out.append(ch.lower())
+        else:
+            out.append(ch.lower())
+    joined = "".join(out)
+    while "--" in joined:
+        joined = joined.replace("--", "-")
+    return joined.strip("-")
+
+
+def _try_generate_name(identity: str, description: str,
+                        target_language: str, is_cross: bool) -> str:
+    """One attempt at generating a task name via the model. Raises ModelError on failure."""
+    from . import model as _model
+
+    if is_cross:
+        action_guidance = (
+            "The task is a CROSS-LANGUAGE rewrite: the agent must reimplement the project in %s. "
+            "Use the suffix '-to-%s' (e.g. 'ffmpeg-swscale-to-rust', 'libexpat-to-x86asm')."
+            % (target_language, target_language.lower())
+        )
+    else:
+        action_guidance = (
+            "The task is an INPLACE performance optimisation: the agent must make the existing "
+            "implementation faster without changing behaviour. Use the suffix '-opt'."
+        )
+
+    stem = _stem_from_identity(identity)
+
+    prompt = """\
+Generate a short, readable task name for a software performance benchmark.
+
+Project repository stem: {stem}
+Project description: {description}
+
+{action_guidance}
+
+{examples}
+
+Rules:
+1. Format: <project>-<specific-aspect>-opt  OR  <project>-<component>-to-<lang>
+2. All lowercase kebab-case, no underscores, no uppercase.
+3. 3–6 words total (counting each hyphen-separated segment as one word).
+4. The specific aspect must come from the description — it names WHAT is being optimised or \
+rewritten, not just the project. Do not use generic words like "performance", "speed", \
+"implementation", or "code" as the aspect.
+5. Drop generic repository-namespace prefixes like "algorithm-practice-", "hacker-rank-", \
+"leet-code-", "javascript-algorithms-", "java-algorithms-implementation-", \
+"data-structures-and-algorithms-" from the project stem — they describe the repo collection, \
+not this task.
+6. Output ONLY the task name — no explanation, no punctuation, no quotes, no newline.
+""".format(
+        stem=stem,
+        description=description or "(no description)",
+        action_guidance=action_guidance,
+        examples=_NAME_EXAMPLES,
+    )
+
+    raw = _model.ask(prompt, system="Output only the task name, nothing else.", temperature=0.1)
+    name = raw.strip().lower().strip('"\'`').strip()
+    # Basic sanity: must look like kebab-case, no spaces, no capital letters
+    if not name or " " in name or name != name.lower() or len(name) < 4 or len(name) > 80:
+        raise _model.ModelError("generated name failed sanity check: %r" % name)
+    return name
+
+
+def generate_task_name(identity: str, description: str,
+                        target_language: str = "") -> str:
+    """Generate a high-quality task name using the LLM.
+
+    Tries twice before falling back to a cleaned stem + '-opt'/'-to-<lang>'.
+    The fallback exists only so the pipeline never crashes; quality names come
+    from the two model attempts.
+
+    Args:
+        identity: material identity string (e.g. 'github:owner/repo@commit')
+        description: human-readable description of the project/package
+        target_language: non-empty for cross-language rewrite tasks
+    """
+    from . import model as _model
+
+    is_cross = bool(target_language) and target_language.lower() != "same"
+    stem = _stem_from_identity(identity)
+    fallback = ("%s-to-%s" % (stem, target_language.lower())) if is_cross else ("%s-opt" % stem)
+
+    if not _model.available():
+        return fallback
+
+    for attempt in range(2):
+        try:
+            return _try_generate_name(identity, description, target_language, is_cross)
+        except Exception:                               # noqa: BLE001
+            if attempt == 0:
+                continue        # one retry
+            return fallback     # both attempts failed — use cleaned stem
+
+    return fallback

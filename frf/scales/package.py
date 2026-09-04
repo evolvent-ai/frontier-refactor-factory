@@ -722,15 +722,17 @@ def _slug(text: str) -> str:
 def _task_name(material: Material) -> str:
     """The package, and what is being asked of it. Not the revision.
 
-    THE COMMIT DOES NOT BELONG IN A NAME, which the repo scale already established and this one
-    missed: `gonum@8d8e8a102004-faster` is what a person has to read, type and compare, and two
-    revisions of one package produce names differing by twelve hex digits for no gain. The revision
-    is pinned in provenance, where it is exact and nobody has to read it.
+    Uses the LLM to produce a self-describing kebab-case name of the form
+    <project>-<specific-aspect>-opt (inplace) or <project>-to-<lang> (cross-language),
+    matching the naming quality of FrontierSWE benchmarks. Falls back to a cleaned
+    stem + '-opt' / '-to-<lang>' if the model is unavailable after two attempts.
+
+    The commit hash is never in the name: it is pinned in provenance and belongs there,
+    not in a string humans have to read and compare.
     """
-    stem = material.identity.rsplit("/", 1)[-1]
-    stem = stem.split("@", 1)[0] or stem
-    stem = _slug(stem)
-    return "%s-rewrite" % stem if material.target_language else "%s-faster" % stem
+    from frf.core.statement import generate_task_name
+    return generate_task_name(material.identity, material.description or "",
+                               material.target_language or "")
 
 def _install_commands(language: str) -> tuple:
     """How a package of `language` obtains its own dependencies. -> argv lists, run in the module.

@@ -2175,17 +2175,19 @@ for name, target in scripts.items():
 
 
 def _task_name(material: Material) -> str:
-    """A readable name for the task. The repository, not the revision.
+    """A readable name for the task, generated from the repository identity and description.
 
-    The commit is pinned in provenance and must not be in the NAME: `sh@d6550df7ed8d-faster` is
-    what a person has to read, type and compare, and two revisions of one repository producing
-    names that differ by twelve hex digits makes a batch report unreadable for no gain.
+    Uses the LLM to produce a self-describing kebab-case name of the form
+    <project>-<specific-aspect>-opt (inplace) or <project>-to-<lang> (cross-language),
+    matching the naming quality of FrontierSWE benchmarks. Falls back to a cleaned
+    stem + '-opt' / '-to-<lang>' if the model is unavailable after two attempts.
+
+    The commit hash is never in the name: it is pinned in provenance and belongs there,
+    not in a string humans have to read and compare.
     """
-    stem = material.identity.rstrip("/").rsplit("/", 1)[-1].replace(".git", "").lower()
-    stem = stem.split("@", 1)[0] or stem
-    if material.target_language:
-        return "%s-%s-rewrite" % (stem, material.target_language.lower())
-    return "%s-faster" % stem
+    from frf.core.statement import generate_task_name
+    return generate_task_name(material.identity, material.description or "",
+                               material.target_language or "")
 
 
 
