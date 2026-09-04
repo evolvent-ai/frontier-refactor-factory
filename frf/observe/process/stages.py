@@ -384,7 +384,7 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
 
     package = harbor.Package(
         name=spec.name, scale=spec.scale, description=spec.description,
-        instruction=statement.render(facts), source_language=spec.language,
+        instruction=statement.generate_instruction(spec), source_language=spec.language,
         target_language=spec.target_language,
         provenance={"origin": spec.environment.get("origin") or spec.name,
                     # The same three numbers the statement quotes. Passed explicitly because the
