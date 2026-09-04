@@ -293,6 +293,39 @@ def test_a_reference_that_never_ran_is_not_a_corpus():
     assert "never" in corpus.adequacy_note and "127" in corpus.adequacy_note
 
 
+class _FrozenStep:
+    """A frozen step derived from what the fake observer returned, for the three tests below.
+
+    The did-work gate reads the FROZEN CONSENSUS rather than the raw runs, so a fake that only counts
+    gradable points cannot express "this scenario worked" any more. This derives the two channels the
+    gate actually looks at from the observation the fake observer produced, which keeps each test
+    saying what it always said: the scenario's exit code and stdout decide whether it did work.
+    """
+
+    class _Channel:
+        def __init__(self, digest, line_count, graded):
+            self.digest, self.line_count, self.graded = digest, line_count, graded
+
+    def __init__(self, observed):
+        self._observed = observed[0]
+
+    def graded_points(self):
+        return 4
+
+    def channel(self, name):
+        from frf.observe.process.observation import _digest
+
+        if name == "exit_code":
+            code = getattr(self._observed, "exit_code", 1)
+            return self._Channel(_digest(str(code)), 1, True)
+        if name == "stdout":
+            stream = getattr(self._observed, "stdout", None)
+            lines = tuple(getattr(stream, "lines", ()) or ())
+            text = "\n".join(lines)
+            return self._Channel(_digest(text), len(lines), True)
+        return self._Channel(_digest(""), 0, False)
+
+
 def test_one_scenario_exiting_127_is_still_real_material(monkeypatch):
     """A scenario that exercises a missing-argument path may exit 127 by itself.
 
@@ -301,11 +334,8 @@ def test_one_scenario_exiting_127_is_still_real_material(monkeypatch):
     """
     from frf.observe.process import stages as process_stages
 
-    class _Step:
-        def graded_points(self):
-            return 4
-
-    monkeypatch.setattr(process_stages.obs, "freeze", lambda index, observed: _Step())
+    monkeypatch.setattr(process_stages.obs, "freeze",
+                        lambda index, observed: _FrozenStep(observed))
 
     class _Observation:
         def __init__(self, code):
@@ -351,11 +381,8 @@ def test_a_reference_that_only_printed_its_usage_is_not_a_corpus(monkeypatch):
     # corpus and can only be answered once every scenario has been observed. So the scenarios are
     # frozen and the corpus is then discarded -- what matters is that nothing ships, not that no
     # digest was computed.
-    class _Step:
-        def graded_points(self):
-            return 4
-
-    monkeypatch.setattr(process_stages.obs, "freeze", lambda index, observed: _Step())
+    monkeypatch.setattr(process_stages.obs, "freeze",
+                        lambda index, observed: _FrozenStep(observed))
 
     class _Stream:
         def __init__(self, text=""):
@@ -397,11 +424,8 @@ def test_an_error_path_is_material_when_the_corpus_also_works(monkeypatch):
     """
     from frf.observe.process import stages as process_stages
 
-    class _Step:
-        def graded_points(self):
-            return 4
-
-    monkeypatch.setattr(process_stages.obs, "freeze", lambda index, observed: _Step())
+    monkeypatch.setattr(process_stages.obs, "freeze",
+                        lambda index, observed: _FrozenStep(observed))
 
     class _Stream:
         def __init__(self, text=""):

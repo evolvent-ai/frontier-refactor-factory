@@ -33,8 +33,23 @@ TIMEOUT = float(os.environ.get("FRF_GENERATOR_TIMEOUT", "900"))
 # What the container is asked to run. The generator is written beside it and imported, rather than
 # concatenated into it, so a syntax error is reported against the generator's own line numbers.
 _HARNESS = '''\
+import builtins
 import json
 import sys
+
+# JSON'S THREE LITERALS, SPELLED AS PYTHON. A model asked for "code defining probes(n)" writes the
+# argument lists it is imagining as JSON, and JSON's null/true/false are not Python names -- the
+# generator then dies with `NameError: name 'null' is not defined` on a line that is otherwise
+# perfectly good Python. The repair path is a second model call, which is charged to our own budget
+# and can itself time out against the gateway; measured, that pair cost one python package candidate
+# its whole run.
+#
+# Bound on `builtins` rather than injected into the generator's source: the source is imported so a
+# syntax error still reports the generator's own line numbers, and rewriting text to add three names
+# would shift every one of them.
+builtins.null = None
+builtins.true = True
+builtins.false = False
 
 sys.path.insert(0, ".")
 from generator import probes                              # noqa: E402

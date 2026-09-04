@@ -140,6 +140,27 @@ def _freeze_stream(runs: list[Stream]) -> ChannelExpectation:
     return ChannelExpectation(runs[0].digest(masked), count, masked)
 
 
+def froze_work(steps: list) -> bool:
+    """Whether the corpus that will SHIP shows the reference doing something. -> True if it does.
+
+    `did_work` answers this about one raw observation; this answers it about the frozen consensus, and
+    the two can disagree. The gate has to read this one, because this is what a submission is graded
+    against -- judging the raw runs let a scenario be credited for a success that no expectation
+    records.
+    """
+    empty = _digest("")
+    for step in steps:
+        out = step.channel("stdout")
+        if out.graded and out.line_count > 0 and out.digest != empty:
+            return True
+        # A graded exit code of zero is work even with nothing on stdout: `fmt --write` rewrites files
+        # and says nothing, and that is a perfectly gradable thing to reproduce.
+        code = step.channel("exit_code")
+        if code.graded and code.digest == _digest("0"):
+            return True
+    return False
+
+
 def freeze(step: int, runs: list[Observation]) -> Expectation:
     """N observations of one step -> what may be graded on each of the four channels.
 
@@ -216,4 +237,16 @@ def did_work(observed) -> bool:
     lines = getattr(stream, "lines", ()) if stream is not None else ()
     if any(str(line).strip() for line in lines):
         return True
-    return int(getattr(observed, "exit_code", 1) or 0) == 0
+    # A MISSING EXIT CODE IS NOT A SUCCESSFUL ONE, and `int(code or 0) == 0` said it was: `None or 0`
+    # is `0`, so a run whose exit code was never captured -- a timeout, a killed process, a transport
+    # failure mid-observation -- answered "this program did work".
+    #
+    # That is the whole leak. Eight repo tasks emitted with EVERY graded step showing empty stdout and
+    # a non-zero exit, while the gate that exists to refuse exactly that stayed silent. The gate reads
+    # `worked & set(frozen)` and refuses when that is empty, so its silence PROVES `worked` was not
+    # empty -- something answered yes for scenarios whose frozen consensus was exit 2 with no output.
+    # A run that never reported an exit code is the only thing that fits.
+    #
+    # `is not None` before the comparison, so absence is absence and only a real zero is success.
+    code = getattr(observed, "exit_code", None)
+    return code is not None and int(code) == 0

@@ -204,12 +204,44 @@ def _untar_bytes(blob: bytes, local_dir: str) -> None:
     destination = os.path.abspath(local_dir)
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r:*") as archive:
         safe = []
+        # The names that survived the filter, so a hard link can be checked against what will really
+        # be written rather than against what the archive merely lists. `tar` emits the first copy of
+        # a file as a regular member and later ones as links to it, so a kept target always precedes
+        # its links here.
+        kept = set()
         for member in archive.getmembers():
-            if member.issym() or member.islnk():
+            # SYMLINKS STAY DROPPED, HARD LINKS DO NOT, and collapsing the two lost real programs.
+            # The reasoning above is about symlinks: their target is a PATH resolved at write time,
+            # so `escape -> /tmp/victim` followed by `escape/note.txt` writes outside the
+            # destination. A hard link cannot do that -- it names another MEMBER OF THIS ARCHIVE,
+            # which is validated by the same loop before anything is written.
+            #
+            # WHAT DROPPING THEM COST. `cargo build --release` hard-links `target/release/<name>`
+            # from the artefact it built in `target/release/deps/`, so the linked binary travels as
+            # a hard-link member -- and was silently discarded on the way out of the sandbox. The
+            # delivered task then contained `tr-lang.d`, `libtr_lang.d`, `build/`, `examples/` and
+            # NO `tr-lang`: every sibling of the program except the program. Its `run.sh` pointed at
+            # a path that did not exist, so the shipped verifier saw empty stdout and a non-zero
+            # exit on all 57 scenarios, and the task was refused for an image that could not run
+            # its own reference. Measured on one finished batch: 22 tasks whose frozen corpora were
+            # all form-OK, every one blocked here.
+            if member.issym():
                 continue
             target = os.path.abspath(os.path.join(destination, member.name))
-            if target == destination or target.startswith(destination + os.sep):
-                safe.append(member)
+            if not (target == destination or target.startswith(destination + os.sep)):
+                continue
+            if member.islnk():
+                # The link's own name is inside the destination; its TARGET must be too, and must be
+                # a member we are actually keeping. A hard link to a member that was itself rejected
+                # has nothing to point at, and `tarfile` raises `LinkFallbackError` for the whole
+                # extraction rather than skipping it -- so one dropped symlink with an alias beside it
+                # would lose the entire pull. Checked against `kept` rather than the archive listing
+                # because being present is not the same as surviving this filter.
+                linked = os.path.abspath(os.path.join(destination, member.linkname))
+                if not linked.startswith(destination + os.sep) or member.linkname not in kept:
+                    continue
+            kept.add(member.name)
+            safe.append(member)
         # `filter="data"` is the interpreter's own version of this reasoning and is used where it
         # exists; the explicit checks above stay because they are what runs on 3.10 and 3.11, which
         # this package supports.

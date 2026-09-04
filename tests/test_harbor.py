@@ -62,7 +62,7 @@ def test_the_factory_answer_key_is_caught_wherever_it_is():
     expectations can replay them for full marks.
     """
     for relative in ("tests/expectations.json", "deep/nested/verify.py",
-                     "scenarios.jsonl", "reference/subject.py"):
+                     "scenarios.jsonl", "reference/verify.py"):
         with tempfile.TemporaryDirectory() as root:
             environment = os.path.join(root, "environment")
             planted = os.path.join(environment, relative)

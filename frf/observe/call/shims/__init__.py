@@ -50,6 +50,17 @@ class Shim:
     run: tuple                     # argv that starts the server
     build: tuple = ()              # argv lists run once, in the workspace, before serving
     tool: str = ""                 # the executable that must exist for any of this to work
+    # WHAT THE RUNTIME LOADS, when that is not the file we wrote. Empty means the two are the same,
+    # which is true for every interpreted shim whose subject needs no compilation.
+    #
+    # TypeScript has always had this split and expressed it by repeating a literal: the subject is
+    # `subject.ts` and `tsc` emits `subject.js`, so the run argv named the second while `build` named
+    # the first. Naming it here instead makes the distinction available to callers -- which is what
+    # the package scale needs, because the file IT writes is a generated CommonJS dispatcher rather
+    # than mined source, and a package declaring `"type": "module"` makes every neighbouring `.js`
+    # file ESM. That dispatcher then dies on its own first line with `exports is not defined in ES
+    # module scope`, which is what 50 of one batch's javascript package candidates did.
+    served: str = ""
     # Where a GENERATED BRIDGE is written, for a shim that cannot bind a mined symbol itself. Empty
     # for the dynamic shims, which need none.
     #
@@ -86,7 +97,8 @@ class Shim:
     # -- and, once the package name was fixed by hand, `undefined: Entry` underneath it.
     binds_symbol: bool = False
 
-    def commands(self, workdir: str, symbol: str = "entry", *, bridged: bool = False) -> tuple:
+    def commands(self, workdir: str, symbol: str = "entry", *, bridged: bool = False,
+                 subject_name: str = "", served_name: str = "") -> tuple:
         """-> (build argv lists, run argv), resolved against a real directory.
 
         `symbol` is WHICH function to serve, and it travels to the shim as an argument rather than
@@ -99,9 +111,24 @@ class Shim:
         it resolves `workdir="."` so the run.sh it writes is portable, and the check then asked about
         the factory's own working directory rather than the room the commands will run in.
         """
+        # `subject` is the file WE WRITE; `served` is the file the runtime LOADS. They differ when a
+        # build step renames it (tsc: `subject.ts` -> `subject.js`) and when a caller overrides the
+        # subject's name to control how the runtime parses it (the package scale writes a CommonJS
+        # dispatcher as `.cjs`). Defaulting `served` to `subject` keeps every other shim unchanged.
+        #
+        # A `subject_name` override renames the file we write, and for an INTERPRETED shim that also
+        # renames what the runtime loads -- there is no build step in between to rename it back. A
+        # compiled shim keeps its declared `served`, because the compiler decides that name.
+        subject = subject_name or self.subject
+        # A COMPILED shim needs both names overridden together, because the compiler decides the output
+        # name from the input's extension: `tsc` given `subject.cts` emits `subject.cjs`, and a caller
+        # that renamed only the input would build one file and then run a stale other one.
+        served = served_name or self.served or subject
         slots = {"entry": os.path.join(workdir, self.template),
-                 "subject": os.path.join(workdir, self.subject),
-                 "module": os.path.splitext(self.subject)[0],
+                 "subject": os.path.join(workdir, subject),
+                 "served": os.path.join(workdir, served),
+                 "served_name": served,
+                 "module": os.path.splitext(subject)[0],
                  "symbol": symbol,
                  "binary": os.path.join(workdir, "serve.bin"),
                  # Present even when this shim needs no bridge, so that `format` cannot raise
@@ -148,7 +175,7 @@ TEMPLATES = {
     # the shim can load either kind and neither has to pretend to be the other.
     "javascript": Shim("serve.cjs", "subject.js",
                        ("node", "--experimental-specifier-resolution=node", "{entry}",
-                        "subject.js", "{symbol}"), tool="node", binds_symbol=True),
+                        "{served_name}", "{symbol}"), tool="node", binds_symbol=True),
     # TypeScript is compiled inside the sandbox with the toolchain declared by the image. This is
     # stable across Node versions and does not depend on experimental runtime flags.
     #
@@ -160,9 +187,12 @@ TEMPLATES = {
     # Same split as javascript: the shim is `.cjs`, and `tsc`'s output keeps the name it emits.
     "typescript": Shim("serve.cjs", "subject.ts",
                        ("node", "--experimental-specifier-resolution=node", "{entry}",
-                        "subject.js", "{symbol}"),
+                        "{served_name}", "{symbol}"),
                        build=(("tsc", "--target", "ES2022", "--module", "commonjs",
                                "--skipLibCheck", "--outDir", "{workdir}", "{subject}"),),
+                       # `tsc` emits `.js` beside the `.ts` it was given, so what runs is not what
+                       # was written. Stated rather than repeated as a literal in `run`.
+                       served="subject.js",
                        tool="tsc", binds_symbol=True),
     # RUBY NEEDED NO BRIDGE, ONLY THE SYMBOL. It was briefly recorded as unable to bind, which was
     # true of the file and not of the language: the splat was always general, but the NAME was
@@ -278,7 +308,8 @@ def source(shim: Shim) -> str:
 
 
 def materialise(workdir: str, language: str, subject_path: str,
-                symbol: str = "entry", *, binding: dict | None = None) -> tuple:
+                symbol: str = "entry", *, binding: dict | None = None,
+                subject_name: str = "", served_name: str = "") -> tuple:
     """Put a subject and its shim in one directory. -> (build argv lists, run argv).
 
     One implementation because there are two callers -- serving a subject and measuring its
@@ -290,11 +321,20 @@ def materialise(workdir: str, language: str, subject_path: str,
     generated beside the subject and the subject is reconciled so the two can compile together.
     Omitted -- and it always is for python/javascript/typescript, whose shims bind a symbol
     themselves -- nothing extra is written and the behaviour is exactly as before.
+
+    `subject_name` OVERRIDES WHAT THE SUBJECT IS CALLED, and exists because the table's name is right
+    for mined source and wrong for generated source. A javascript subject is normally `subject.js`,
+    which is correct for a mined ESM function -- renaming that to `.cjs` would make Node parse
+    `export function ...` as CommonJS and fail. But the PACKAGE scale does not write mined source; it
+    writes a dispatcher this factory generated, in CommonJS, and a package declaring
+    `"type": "module"` makes every neighbouring `.js` file ESM, so that dispatcher fails on its own
+    first line. The caller knows which of the two it is holding; this function cannot.
     """
     shim = load(language)
     os.makedirs(workdir, exist_ok=True)
     bridged = bool(binding and shim.bridge)
-    destination = os.path.join(workdir, shim.subject)
+    name = subject_name or shim.subject
+    destination = os.path.join(workdir, name)
     generated = ""
     if bridged:
         # Imported here rather than at module scope: `bridge` is a sibling in this package and only
@@ -339,4 +379,5 @@ def materialise(workdir: str, language: str, subject_path: str,
         shutil.copyfile(subject_path, destination)
     with open(os.path.join(workdir, shim.template), "w", encoding="utf-8") as handle:
         handle.write(source(shim))
-    return shim.commands(workdir, symbol, bridged=bridged)
+    return shim.commands(workdir, symbol, bridged=bridged, subject_name=subject_name,
+                         served_name=served_name)

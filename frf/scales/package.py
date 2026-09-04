@@ -124,7 +124,9 @@ class Observer:
         adapter = os.path.join(destination, _subject_name(spec.language))
         with open(adapter, "w", encoding="utf-8") as handle:
             handle.write(_dispatcher_source(spec.language, dispatch))
-        build, self._argv = shims.materialise(destination, spec.language, adapter, "entry")
+        build, self._argv = shims.materialise(destination, spec.language, adapter, "entry",
+                                              subject_name=_subject_name(spec.language),
+                                              served_name=_served_name(spec.language))
 
         # A COMPILED LANGUAGE HAS TO BE COMPILED, and this scale never did it. `Observer.build` wrote
         # the files and stopped; `RemoteSubject` pushes a tree and executes argv. For Go that argv is
@@ -133,12 +135,31 @@ class Observer:
         # different answers and discarded 100% of the corpus as unstable MATERIAL. Eight of eight Go
         # candidates in every batch, for a build step that did not exist. The module scale has always
         # compiled here; this is that same step, which the package scale was missing.
-        if not build:
+        # A PACKAGE'S DEPENDENCIES ARE PART OF WHAT IT IS, and nothing here installed them. The
+        # material arrives from `github_package._materialise`, which runs `git init`, `fetch --depth 1`
+        # and `checkout` -- and stops. So a package that imports anything beyond its standard library
+        # could never be served: the shim loaded it, the import failed, and every probe came back
+        # `ok=False` with the same message.
+        #
+        # THAT IS WHY THIS SCALE IS PYTHON AND GO. Of 53 attested package tasks, 36 are python, 9 go,
+        # 8 javascript -- and every one of them has a pure-stdlib dependency closure. It read as a
+        # sourcing bias and it was not: 102 attempts across javascript, typescript, ruby and rust
+        # emitted NOTHING, and the javascript and typescript failures were all one error.
+        # `observation.digest` normalises `Cannot find module` and `ERR_MODULE_NOT_FOUND` to
+        # `Error: module resolution failed`, which is the exact text `package/algebra-latex-faster`
+        # shipped 57 frozen probes of.
+        #
+        # INSIDE THE SANDBOX, for the same reason the compile below is: an install on the factory host
+        # resolves against the host's toolchain and registry, and the expectation would then describe
+        # a package the delivered image does not contain. The sandbox has a network -- it clones from
+        # GitHub here too, which is what `shims/__init__` records about `GOPROXY=off` being wrong.
+        install = _install_commands(spec.language)
+        if not build and not install:
             return
         if self._backend is None or getattr(self._backend, "name", "") == "local-process":
             raise RuntimeError(
-                "%s is a compiled language and needs a sandbox to build in; refusing to compile on "
-                "the host, whose toolchain is not what the task ships with" % spec.language)
+                "%s needs a sandbox to prepare its subject in; refusing to build or install on the "
+                "host, whose toolchain is not what the task ships with" % spec.language)
         remote = "/tmp/frf-package-build-%s" % uuid.uuid4().hex[:12]
         self._backend.push(self.workspace, remote)
         # THE BUILD RUNS INSIDE THE MODULE, not at the pushed root. Go resolves `go.mod` by walking
@@ -146,13 +167,30 @@ class Observer:
         # the tree that was pushed. Building from the root reported `go.mod file not found in current
         # directory or any parent directory` for every imported package.
         module_root = remote + "/" + self.material.package_name
+        # DEPENDENCIES BEFORE THE COMPILE, because a TypeScript compile resolves imports through
+        # `node_modules` and would otherwise report every one of them as missing.
+        #
+        # BEST EFFORT, DELIBERATELY. `npm install` fetches devDependencies too, so one broken
+        # development tool would refuse a package whose runtime dependencies are perfectly fine.
+        # A package that genuinely cannot import itself is caught a stage later, by the freeze gate
+        # that asks whether the subject ever answered -- and that gate reports the subject's own
+        # error, which is a better diagnosis than an installer's exit code. What is NOT acceptable is
+        # the old behaviour: not trying at all, and calling the resulting import failure material.
+        for command in install:
+            done = self._backend.run(command, workdir=module_root, timeout=BUILD_TIMEOUT)
+            if not done.ok:
+                print("[package] %s: %s did not complete: %s"
+                      % (self.material.identity, " ".join(command[:2]), done.tail(300)), flush=True)
         for command in build:
             remote_command = [part.replace(self.workspace, remote) if isinstance(part, str) else part
                               for part in command]
             done = self._backend.run(remote_command, workdir=module_root, timeout=BUILD_TIMEOUT)
             if not done.ok:
                 raise RuntimeError("%s did not build: %s" % (self.material.identity, done.tail(800)))
-        # Bring the built artefact back, so the workspace the freeze pushes carries it.
+        # Bring the built artefact AND THE INSTALLED DEPENDENCIES back, so the workspace the freeze
+        # pushes carries them. `RemoteSubject.__enter__` already keeps `node_modules` when it pushes
+        # -- its comment says the dependency tree "is part of the contract" -- but until now there was
+        # never anything there to keep.
         self._backend.pull(remote, self.workspace)
 
     def subject(self, spec: Spec | None = None, *, mutated: bool = False,
@@ -168,7 +206,14 @@ class Observer:
                                        mutant=attempt)
             with open(adapter, "w", encoding="utf-8") as handle:
                 handle.write(wrong)
-            _, argv = shims.materialise(room, spec.language, adapter, "entry")
+            # THE SAME OVERRIDE AS THE REAL SUBJECT, or the mutation is not what gets served. This
+            # room is a COPY of the built workspace, so the original dispatcher is already sitting in
+            # it; writing the wrong one under a different name and then serving the table's name
+            # would run the correct dispatcher and score the mutant as identical to the reference --
+            # E3 would report that no channel discriminates, for a mutant that was never loaded.
+            _, argv = shims.materialise(room, spec.language, adapter, "entry",
+                                        subject_name=_subject_name(spec.language),
+                                        served_name=_served_name(spec.language))
         if getattr(self._backend, "name", "") in ("docker", "remote"):
             return RemoteSubject(argv, workspace=room, backend=self._backend,
                                  timeout=PROBE_TIMEOUT)
@@ -300,7 +345,13 @@ class Package:
                 "execute inside a container; Package(run_generator=...) is how that is supplied.")
         try:
             print("[package] running probe generator for %s" % self._material.identity, flush=True)
-            requested = 80 if self._material.language in ("javascript", "typescript") else PROBE_COUNT
+            # ASKED FOR ENOUGH THAT 60 DISTINCT IS REACHABLE. Bounded batches exist because every
+            # probe is one round trip into the sandbox, and 200 of them on a native surface was slow
+            # enough to be worth capping -- but 80 asked against 60 needed demands 75% of a
+            # generator's output be unique, where every other language is asked for 200 and needs the
+            # same 60, a 30% bar. Measured: `xyflow` offered 120 and kept 40; `jsoncrack.com` offered
+            # 60 and kept 52. Both were refused for duplication while being asked for the least.
+            requested = 140 if self._material.language in ("javascript", "typescript") else PROBE_COUNT
             drawn = self._run_generator(self._material.generator, requested)
             print("[package] probe generator completed for %s" % self._material.identity, flush=True)
         except Exception as exc:
@@ -332,21 +383,70 @@ class Package:
         if isinstance(labels, list):
             labels = ["error" if label == "invalid" else label for label in labels]
         probes = _as_argument_lists(drawn)
-        if len(probes) < 60 and self._material.language in ("javascript", "typescript"):
-            # Native JS packages often expose functions without machine-readable signatures. Add a
-            # bounded JSON-safe boundary battery rather than emitting a tiny, lucky corpus; the
-            # reference still decides which cases are valid and freeze/replay can reject it.
+        # TOPPED UP AGAINST THE NUMBER THE AUDIT WILL JUDGE, which is the DISTINCT count. Measuring
+        # the raw count here made the battery useless exactly when it was needed: `jsoncrack.com`
+        # offered 60 probes of which 52 were distinct, so `len(probes) < 60` was false, the battery
+        # declined to help, and the audit then refused the package for having 52. The rescue and the
+        # condemnation have to be reading the same number.
+        #
+        # EVERY LANGUAGE, not just javascript and typescript. The original comment justified the
+        # restriction by JS packages lacking machine-readable signatures -- true, and not the only way
+        # to end up short. Measured across a run of the languages this scale still needs: ruby
+        # generators returned 15 and 40 distinct probes against the same bar, and were refused with
+        # the battery sitting unused because of the language check rather than because of anything
+        # about ruby.
+        # THE AUDIT HAS TWO FLOORS, so the battery has to clear both. Filling toward the total alone
+        # left the second one failing for a different reason than before: `jsoncrack.com` reached 60
+        # distinct probes and was then refused with `did not cover operations with at least two
+        # probes: JPathModal, JQModal, JSONCrack, TypeModal, activate, ...` -- eight operations that
+        # got nothing because the loop stopped counting at sixty and they came last in the surface.
+        #
+        # So the per-operation floor is filled FIRST, for every operation, and only then is the total
+        # topped up. Fixing this the other way round would keep re-discovering the same shape of bug:
+        # a rescue that measures one thing while the condemnation measures another.
+        unique_count = len(_distinct(probes))
+        per_operation = _operation_counts(probes)
+        names = [str(entry.get("name")) for entry in self._material.dispatch
+                 if entry.get("name")]
+        thin = [name for name in names if per_operation.get(name, 0) < 2]
+        if unique_count < 60 or thin:
             expanded = list(probes)
             labels_out = list(labels) if labels is not None else ["valid"] * len(probes)
+            # ONLY GENUINELY NEW CASES COUNT. Appending a probe the generator already emitted moves
+            # the raw count and leaves the distinct count where it was, which is the same confusion
+            # one layer down.
+            present = {_probe_key(args) for args in expanded}
+            counts = dict(per_operation)
             cases = [([], "boundary"), ([None], "error"), ([0], "boundary"), ([""], "boundary"),
-                     ([[]], "error"), ([{}], "error")]
-            for entry in self._material.dispatch:
-                name = str(entry.get("name"))
+                     ([[]], "error"), ([{}], "error"), ([-1], "boundary"), ([" "], "boundary"),
+                     ([True], "boundary"), ([[None]], "error")]
+
+            def offer(name: str, args: list, label: str) -> bool:
+                candidate = [name] + args
+                key = _probe_key(candidate)
+                if key in present:
+                    return False
+                present.add(key)
+                expanded.append(candidate)
+                labels_out.append(label)
+                counts[name] = counts.get(name, 0) + 1
+                return True
+
+            # PASS ONE: every operation to two distinct probes, whatever the total reaches. An
+            # operation carried by one probe proves only that it can be named.
+            for name in names:
                 for args, label in cases:
-                    if len(expanded) >= 60:
+                    if counts.get(name, 0) >= 2:
                         break
-                    expanded.append([name] + args)
-                    labels_out.append(label)
+                    offer(name, args, label)
+            # PASS TWO: the total, spread across operations rather than poured into the first.
+            for args, label in cases:
+                if len(present) >= 60:
+                    break
+                for name in names:
+                    if len(present) >= 60:
+                        break
+                    offer(name, args, label)
             probes, labels = expanded, labels_out
         _audit_probe_contract(probes, self._material.dispatch, labels=labels)
         # THE CORPUS IS THE DISTINCT PROBES. The audit judges them, so freezing anything else would
@@ -356,11 +456,9 @@ class Package:
         if labels and len(labels) == len(probes):
             paired = {}
             for args, label in zip(probes, labels):
-                key = json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
-                paired.setdefault(key, label)
+                paired.setdefault(_probe_key(args), label)
             probes = _distinct(probes)
-            labels = [paired[json.dumps(a, sort_keys=True, separators=(",", ":"), default=str)]
-                      for a in probes]
+            labels = [paired[_probe_key(a)] for a in probes]
         else:
             probes = _distinct(probes)
         from dataclasses import replace
@@ -489,6 +587,18 @@ def _as_argument_lists(drawn) -> list:
                              % (index, type(item).__name__))
     return drawn
 
+def _probe_key(args) -> str:
+    """How two probes are told apart. -> a stable string.
+
+    ONE DEFINITION, because three places depend on agreeing about what "the same probe" means: the
+    deduplication below, the boundary battery that tops a short corpus up, and the pairing that keeps
+    a label with its probe. When the battery measured raw probes while the audit measured distinct
+    ones, a package offering sixty probes of which fifty-two were distinct was refused with the
+    battery sitting unused -- neither number was wrong, they were answers to different questions.
+    """
+    return json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
+
+
 def _distinct(probes: list) -> list:
     """The probes with repeats removed, in the order they were first offered.
 
@@ -497,12 +607,27 @@ def _distinct(probes: list) -> list:
     """
     seen, kept = set(), []
     for args in probes:
-        key = json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
+        key = _probe_key(args)
         if key in seen:
             continue
         seen.add(key)
         kept.append(args)
     return kept
+
+
+def _operation_counts(probes: list) -> dict:
+    """How many DISTINCT probes each operation carries. -> {operation: count}.
+
+    Counted over the distinct probes for the same reason `_audit_probe_contract` judges them there:
+    an operation "covered" by the same probe twice has one piece of evidence written down twice. The
+    battery that tops a short corpus up needs this exact number, because the floor it has to clear
+    is the one the audit will apply.
+    """
+    counts: dict = {}
+    for args in _distinct(probes):
+        if args and isinstance(args[0], str):
+            counts[args[0]] = counts.get(args[0], 0) + 1
+    return counts
 
 
 
@@ -607,6 +732,118 @@ def _task_name(material: Material) -> str:
     stem = _slug(stem)
     return "%s-rewrite" % stem if material.target_language else "%s-faster" % stem
 
+def _install_commands(language: str) -> tuple:
+    """How a package of `language` obtains its own dependencies. -> argv lists, run in the module.
+
+    WHAT DECIDES WHAT BELONGS HERE: the install must land INSIDE the workspace tree. The tree is
+    pulled back out of the build sandbox and pushed again into a fresh one for the freeze, so
+    anything written outside it -- `~/.npm`, `~/.cargo`, a global gem path, the Go module cache --
+    is gone by the time the subject is served. `node_modules/` and `vendor/bundle/` are in the tree
+    and survive; a module cache in `$HOME` does not.
+
+    That is also why this table is short rather than one entry per language:
+
+    * javascript / typescript -- `node_modules/` is in the tree. THE BLOCKER, measured: every one of
+      2882 package checkouts had none, so any package importing anything at all failed to load.
+    * ruby -- `vendor/bundle` is in the tree, with `--local` refused so it may actually fetch.
+    * go -- ABSENT ON PURPOSE. Its dependencies reach the subject through the compiled binary, which
+      the pull already carries, and `go build` fetches them itself. Adding `go mod vendor` here would
+      rewrite the manifest of a scale that has nine attested tasks working exactly as it is.
+    * rust -- ABSENT, and not because it works. Its 29 build failures are OURS: `_static_rust`
+      discards the `klass` the miner gives it and emits unqualified calls, so a mined METHOD becomes
+      `cannot find function `rfind` in this scope` at `subject.rs:271`. The same generated line failed
+      across kalker, memchr, faer-rs and TheAlgorithms/Rust -- one template bug, not four packages.
+      An install would not move that.
+    * python -- ABSENT. It is the one language that already works here (36 attested tasks), and it is
+      four times over the per-language cap, so widening its supply serves no goal.
+
+    BEST EFFORT AT THE CALL SITE, not here: see `Observer.build`. These commands may fail without
+    refusing the candidate, because a broken devDependency must not condemn a package whose runtime
+    imports are fine -- the freeze's "did the subject ever answer" gate is what judges that, and it
+    reports the subject's own error rather than an installer's exit code.
+    """
+    # NEVER `cmd | tail`: A PIPELINE'S STATUS IS ITS LAST COMMAND'S. `tail` always succeeds, so
+    # `npm ci ... | tail -20 || npm install ...` reports success however npm did -- which broke both
+    # halves at once. The `||` fallback became unreachable, so a stale lockfile was never retried, and
+    # `done.ok` was always true, so the caller's failure report never printed. The first run of this
+    # showed `install-failure prints: 0` beside three subjects that still could not resolve their
+    # imports, and the two facts could not be reconciled because one of them was a lie.
+    #
+    # So output goes to a file, the status is captured explicitly, and the tail is printed afterwards.
+    # Bounded output AND a truthful exit code; the pipe bought the first by destroying the second.
+    if language in ("javascript", "typescript"):
+        # THE LOCKFILE CHOOSES THE INSTALLER, because npm is not a superset of the others. Counted
+        # across the 1197 js/ts checkouts on disk:
+        #
+        #     package-lock.json  603     npm ci works
+        #     yarn.lock          218     npm ci refuses: no package-lock
+        #     pnpm-lock.yaml     108     npm ci refuses, and `workspace:` deps make npm fail
+        #                                 EUNSUPPORTEDPROTOCOL
+        #     no lockfile        300     npm ci refuses outright
+        #
+        # So `npm ci` alone reaches half the supply, and `npm ci || npm install` reaches most of it
+        # while resolving yarn and pnpm trees from scratch -- which is where ERESOLVE came from.
+        #
+        # `--legacy-peer-deps` IS THE POINT OF THE FALLBACK. npm 7+ treats a peer-dependency conflict
+        # as fatal, and a repository pinned to an arbitrary commit has them routinely; the first run
+        # that could report its own failures showed ERESOLVE as the top cause. We are not publishing
+        # this tree, only importing from it, so a peer-range disagreement is not a reason to refuse a
+        # package.
+        #
+        # SCRIPTS ARE NOT SUPPRESSED. `--ignore-scripts` would block the `prepare` step a package uses
+        # to build itself -- the same mistake as `npm install --offline` against an empty cache:
+        # removing what the program needs and then blaming the program.
+        #
+        # `command -v` FIRST for each, so "the toolchain is absent" stays a different message from
+        # "the install failed". Those need different fixes and the log has to say which.
+        return (["sh", "-c",
+                 "L=/tmp/frf-install.log; "
+                 "if [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then "
+                 "  pnpm install --no-frozen-lockfile >$L 2>&1; "
+                 "elif [ -f yarn.lock ] && command -v yarn >/dev/null 2>&1; then "
+                 "  yarn install --non-interactive >$L 2>&1; "
+                 "elif command -v npm >/dev/null 2>&1; then "
+                 "  if [ -f package-lock.json ]; then "
+                 "    npm ci --no-audit --no-fund --legacy-peer-deps >$L 2>&1 || "
+                 "    npm install --no-audit --no-fund --legacy-peer-deps >$L 2>&1; "
+                 "  else "
+                 "    npm install --no-audit --no-fund --legacy-peer-deps >$L 2>&1; "
+                 "  fi; "
+                 "else echo 'no node package manager in this sandbox'; exit 127; fi; "
+                 "status=$?; tail -25 $L; exit $status"],)
+    if language == "ruby":
+        # A GEM DECLARES ITS DEPENDENCIES IN THE GEMSPEC, NOT IN A GEMFILE, and this used to give up
+        # unless a Gemfile was already there: `if [ ! -f Gemfile ]; then exit 0; fi`. The material
+        # this scale sources is published gems, and a library normally ships a `.gemspec` with
+        # `add_dependency` lines and no Gemfile at all -- Gemfiles belong to applications. So nothing
+        # was installed, the subject's own `require` raised `LoadError`, and the shim died before it
+        # could answer. Measured: 17 of one batch's freeze refusals, every one ruby.
+        #
+        # `gemspec` IN A GENERATED GEMFILE is bundler's own mechanism for exactly this: it reads the
+        # gemspec in the current directory and resolves what it declares. Written only when there is
+        # no Gemfile, so a project that has one keeps it.
+        #
+        # Installed into `vendor/bundle` because only what is INSIDE the tree survives the push to
+        # the sandbox that freezes it; the system gem home does not travel.
+        return (["sh", "-c",
+                 "L=/tmp/frf-install.log; "
+                 "if ! command -v bundle >/dev/null 2>&1; then "
+                 "  echo 'bundler is not in this sandbox' >$L; tail -5 $L; exit 0; fi; "
+                 "if [ ! -f Gemfile ] && ls *.gemspec >/dev/null 2>&1; then "
+                 "  printf 'source \"https://rubygems.org\"\\ngemspec\\n' > Gemfile; fi; "
+                 "if [ ! -f Gemfile ]; then echo 'no Gemfile and no gemspec' >$L; tail -5 $L; exit 0; fi; "
+                 "bundle config set --local path vendor/bundle >$L 2>&1; "
+                 "bundle install --jobs 4 --retry 1 >>$L 2>&1 || "
+                 "bundle install --jobs 4 --retry 1 --no-deployment >>$L 2>&1; "
+                 "tail -20 $L; "
+                 "[ -d vendor/bundle ] || echo '[install] vendor/bundle absent afterwards'; "
+                 # Best effort, as for the other languages: a broken development dependency must not
+                 # refuse a gem whose runtime requires are fine. The freeze decides that, and it now
+                 # sees the subject's own error rather than a dead process.
+                 "exit 0"],)
+    return ()
+
+
 def _subject_name(language: str) -> str:
     """What the subject file is called, asked of the shim that will serve it.
 
@@ -615,7 +852,39 @@ def _subject_name(language: str) -> str:
     moment a language is added -- and it already disagreed with the TypeScript
     shim, which serves `subject.ts`.
     """
+    # `.cjs` FOR JAVASCRIPT, BECAUSE THIS SUBJECT IS OURS. The table says `subject.js`, which is right
+    # for a MINED function -- that is usually ESM (`export function ...`) and renaming it would make
+    # Node parse it as CommonJS and fail on the export. What the package scale writes is not mined
+    # source: it is the dispatcher `dispatch.source()` generates, in CommonJS (`exports.entry = ...`).
+    # A package declaring `"type": "module"` makes every neighbouring `.js` file ESM, so that
+    # dispatcher dies on its own first line with `exports is not defined in ES module scope`.
+    # Measured: 50 of one batch's javascript package candidates, every one of them.
+    #
+    # `.cjs` is the escape hatch the shim itself already uses (`serve.cjs`): CommonJS whatever the
+    # package declares. TypeScript is NOT included -- its dispatcher is written as `.ts` and compiled
+    # by `tsc --module commonjs`, so what Node loads is already CommonJS and renaming the input would
+    # only confuse the compiler about what it was given.
+    if language == "javascript":
+        return "subject.cjs"
+    # TYPESCRIPT HAS THE SAME DEFECT, and excluding it was a mistake I made on a wrong reading: I
+    # argued that `tsc --module commonjs` makes the OUTPUT CommonJS so nothing was at risk. The
+    # content being CommonJS is exactly the problem -- Node decides how to PARSE a file from its
+    # extension, not its content, so `subject.js` under `"type": "module"` is read as ESM and the
+    # CommonJS the compiler just wrote fails on `exports`. TypeScript's own answer is the `.cts`
+    # extension, which `tsc` compiles to `.cjs`; see `_served_name` for the other half.
+    if language == "typescript":
+        return "subject.cts"
     return shims.TEMPLATES[language].subject
+
+
+def _served_name(language: str) -> str:
+    """What the runtime loads, when the compiler renames what we wrote. -> a filename, or "".
+
+    Only typescript needs this: `tsc` derives its output name from the input's extension, so handing it
+    `subject.cts` produces `subject.cjs`, and the run argv has to name the second. Empty for everything
+    else, which leaves each shim's own declared name alone.
+    """
+    return "subject.cjs" if language == "typescript" else ""
 
 
 def _dispatcher_source(language: str, dispatch: dict,

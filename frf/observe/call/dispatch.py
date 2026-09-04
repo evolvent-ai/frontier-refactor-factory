@@ -612,12 +612,23 @@ def source(language: str, dispatch: dict, *, mutant: int | None = None) -> str:
                     for name, pair in dispatch.items()}
     output = generator(dispatch, wrong)
     if language == "typescript":
-        # The dispatcher is GENERATED COMMONJS (exports/require). When it is written to a .ts file
-        # and passed to tsc, the compiler refuses `exports` and `require` as undeclared names --
-        # no @types/node in the offline sandbox. The declarations below are stripped by tsc and
-        # cost nothing at runtime, but they let the compiler see what this generated module means.
-        output = ("declare var exports: any;\n"
-                  "declare function require(mod: string): any;\n" + output)
+        # The dispatcher is GENERATED COMMONJS (`exports`, `require`) written to a .ts file, so tsc
+        # has an opinion about names this module never declares.
+        #
+        # DECLARING THEM WAS WRONG IN BOTH DIRECTIONS, and it took installing dependencies to see the
+        # second one. `declare var exports` / `declare function require` fixed "undeclared name" while
+        # @types/node was absent -- which it always was, because nothing installed a package's
+        # dependencies. Once `_install_commands` did, @types/node arrived, declared `require` itself,
+        # and every TypeScript candidate failed with `subject.ts(2,18): error TS2300: Duplicate
+        # identifier 'require'` -- pointing at the line right here. A declaration cannot be both
+        # present and absent, so it must be neither.
+        #
+        # `@ts-nocheck` INSTEAD, because there is nothing here for a type checker to protect: this
+        # file is machine-generated glue whose whole job is to hand JSON to a symbol the miner already
+        # verified. Type-checking it can only produce errors ABOUT THE GLUE, and the subject's own
+        # sources are separate files that tsc still checks normally. Must be the first line to apply.
+        output = ("// @ts-nocheck -- generated CommonJS glue; see dispatch.source()\n"
+                  + output)
     return output
 
 

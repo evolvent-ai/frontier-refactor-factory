@@ -31,6 +31,8 @@ class LedgerRecord:
     identity: str
     scale: str
     status: str
+    source_language: str = ""
+    target_language: str = ""
     stage: str = ""
     reason: str = ""
     fault: str = ""

@@ -55,6 +55,72 @@ PROBE_TIMEOUT = 60.0
 # question with a printable answer, and adding one is a row.
 #
 # `{name}` is the repository's own name, which is what these tools call their output by default.
+# HOW AN INTERPRETED PROJECT OBTAINS ITS DEPENDENCIES, as one shell command per ecosystem.
+#
+# BEST EFFORT ON PURPOSE -- both end in `exit 0`. A build command that fails refuses the candidate,
+# and that is right for `cargo build`: a compiler error means there is no program. An installer is
+# different. `npm install` fetches devDependencies too, so one broken development tool would refuse a
+# repository whose runtime imports are perfectly fine. What actually judges a subject that cannot load
+# is the freeze's `did_work` gate, one stage later, and it reports THE PROGRAM'S OWN error rather than
+# an installer's exit code -- a better diagnosis for whoever reads the refusal.
+#
+# The status is still captured and printed rather than swallowed: `cmd | tail` would report the exit
+# code of `tail`, which is how a previous version of this made its `||` fallback unreachable and its
+# failure reports invisible at the same time.
+_INSTALL_JS = ("sh", "-c",
+               "L=/tmp/frf-repo-install.log; "
+               "if [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then "
+               "  pnpm install --no-frozen-lockfile >$L 2>&1; "
+               "elif [ -f yarn.lock ] && command -v yarn >/dev/null 2>&1; then "
+               "  yarn install --non-interactive >$L 2>&1; "
+               "elif command -v npm >/dev/null 2>&1; then "
+               "  if [ -f package-lock.json ]; then "
+               "    npm ci --no-audit --no-fund --legacy-peer-deps >$L 2>&1 || "
+               "    npm install --no-audit --no-fund --legacy-peer-deps >$L 2>&1; "
+               "  else npm install --no-audit --no-fund --legacy-peer-deps >$L 2>&1; fi; "
+               "else echo 'no node package manager in this sandbox' >$L; fi; "
+               "tail -15 $L; "
+               # The one fact worth asserting: whether the tree now has what a `require()` will look
+               # for. An installer can print warnings and still have worked, or exit 0 having done
+               # nothing useful; this says which happened, in the log, where the next refusal can be
+               # read against it.
+               "[ -d node_modules ] || echo '[install] node_modules absent afterwards'; "
+               "exit 0")
+
+# IN-TREE ON PURPOSE (`--path vendor/bundle`). Bundler's default installs into the system gem home,
+# which lives outside the checkout -- and only what is INSIDE the tree travels to the delivered image,
+# as the missing `target/release` binary taught at some expense. Gems under `vendor/bundle` ship with
+# everything else, so the image can run the reference it was built from.
+#
+# `bundle install` when there is a Gemfile.lock to honour, `bundle lock` first when there is not,
+# because `bundle install` on an unlocked Gemfile resolves against the network and can pick versions
+# the repository never saw. Failure is tolerated for the same reason as the other two: a broken
+# development gem should not refuse a repository whose runtime requires are fine.
+_INSTALL_RB = ("sh", "-c",
+               "L=/tmp/frf-repo-install.log; "
+               "if command -v bundle >/dev/null 2>&1; then "
+               "  bundle config set --local path vendor/bundle >$L 2>&1; "
+               "  bundle install --jobs 4 --retry 1 >>$L 2>&1 || "
+               "  bundle install --jobs 4 --retry 1 --no-deployment >>$L 2>&1; "
+               "elif command -v gem >/dev/null 2>&1; then "
+               "  for spec in *.gemspec; do "
+               "    [ -f \"$spec\" ] && gem build \"$spec\" >>$L 2>&1; "
+               "  done; "
+               "else echo 'no ruby package manager in this sandbox' >$L; fi; "
+               "tail -15 $L; "
+               "[ -d vendor/bundle ] || echo '[install] vendor/bundle absent afterwards'; "
+               "exit 0")
+
+# `-e .` rather than `-r requirements.txt`: it installs the project's declared dependencies AND puts
+# its console scripts on PATH, which is the same thing the entry-point search is looking for.
+_INSTALL_PY = ("sh", "-c",
+               "L=/tmp/frf-repo-install.log; "
+               "if command -v pip >/dev/null 2>&1; then "
+               "  pip install --no-input -e . >$L 2>&1 || "
+               "  pip install --no-input . >$L 2>&1; "
+               "else echo 'no pip in this sandbox' >$L; fi; "
+               "tail -15 $L; exit 0")
+
 BUILDERS = (
     ("Cargo.toml", "rust", (("cargo", "build", "--release"),), "target/release/{name}"),
     ("go.mod", "go", (("go", "build", "-o", "{name}", "./..."),), "{name}"),
@@ -62,11 +128,38 @@ BUILDERS = (
      "build/{name}"),
     ("Makefile", "c", (("make",),), "{name}"),
     ("configure", "c", (("./configure",), ("make",)), "{name}"),
-    # Interpreted projects build nothing; what matters is finding the entry point, which is done
-    # separately because a Python project can be invoked half a dozen ways.
-    ("pyproject.toml", "python", (), ""),
-    ("setup.py", "python", (), ""),
-    ("package.json", "javascript", (), ""),
+    # INTERPRETED PROJECTS COMPILE NOTHING, WHICH IS NOT THE SAME AS NEEDING NOTHING. These three rows
+    # held `()` and the comment said "interpreted projects build nothing" -- true about compilation and
+    # false about dependencies, and the difference decided which languages this scale could produce.
+    #
+    # A compiled program is a self-contained binary: once `cargo build` has run, the artefact needs
+    # nothing from the tree around it. `node bin/cli.js` is not that. Its first `require()` of a
+    # dependency looks for `node_modules` beside it, finds nothing, and the process dies before it can
+    # read its arguments -- so EVERY scenario freezes as empty stdout with a non-zero exit, including
+    # `--help`, which is the tell: a CLI that cannot even print its usage was never running.
+    #
+    # MEASURED across the attested repo corpus, and the split is total:
+    #
+    #     form-OK    go 9, rust 4, python 2, c 1     -- all self-contained binaries
+    #     form-BAD   python 54, rust 38, javascript 21, typescript 17, go 7
+    #
+    # Twenty-one javascript and seventeen typescript tasks, not one of them usable. They passed 8/8
+    # evidence because reproducing a load failure is perfectly reproducible: five freeze runs agree,
+    # every channel freezes, and the reference scores full marks against its own crash.
+    #
+    # THE LOCKFILE CHOOSES THE INSTALLER because npm is not a superset of the others -- counted over
+    # 1197 js checkouts: 603 package-lock, 218 yarn.lock, 108 pnpm-lock, 300 none. `--legacy-peer-deps`
+    # because npm 7+ treats a peer conflict as fatal and a repository pinned to an arbitrary commit has
+    # them routinely; we import from this tree rather than publishing it. Scripts are NOT suppressed:
+    # `prepare` is often how a package builds itself.
+    ("pyproject.toml", "python", (_INSTALL_PY,), ""),
+    ("setup.py", "python", (_INSTALL_PY,), ""),
+    ("package.json", "javascript", (_INSTALL_JS,), ""),
+    # RUBY HAD NO ROW AT ALL, which is why it never appeared among the languages that ship. Without a
+    # marker here the checkout is never even classified as ruby, so no install ran, `bundle exec` found
+    # no gems, and every scenario froze as a load failure -- four of six emit refusals in one batch were
+    # ruby repositories (cache-crispies, rubocop-changed, jsonapi-utils, safepush).
+    ("Gemfile", "ruby", (_INSTALL_RB,), ""),
 )
 
 # Where a program's own tests tend to live. Used only to find scripts worth reading for scenarios;

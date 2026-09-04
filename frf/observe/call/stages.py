@@ -167,22 +167,79 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
                       unusable_reason="the subject never answered: %s" % str(failure)[:600])
 
     report = obs.freeze_corpus(observed)
-    timed = _pick_timed(report.expectations)
+
+    # DID THE SUBJECT EVER ANSWER? The process seam asks this (`did_work`); this seam did not, and
+    # the omission shipped tasks. A subject whose module never loads refuses every probe identically
+    # -- `ok=False, error="ModuleNotFoundError: No module named 'numpy'"` -- and that is PERFECTLY
+    # reproducible: five runs agree, every probe freezes, E1 scores the reference 100% against its
+    # own frozen failure, and E7 replays it happily.
+    #
+    # FLOOR does not catch it either, and the reason is worth naming: the three trivial submissions
+    # all answer `ok=True`, so their digests never match a corpus of refusals. The floor measures 0%
+    # and the gate concludes the task is hard to guess, when in fact nothing was measured at all.
+    #
+    # Measured on what shipped: `package/algebra-latex-faster` froze 57 probes as
+    # `Error: module resolution failed`; `package/classy-blocks-faster` froze 197 as
+    # `No module named 'numpy'`. Both passed 8/8 evidence checks.
+    #
+    # `any` rather than `all`, for the same reason the process seam keeps error paths: how a subject
+    # rejects bad input is part of its contract, and a corpus may legitimately contain refusals. What
+    # cannot be material is a corpus in which the subject never once succeeded.
+    answered = {probe_id for probe_id, runs in observed.items()
+                if runs and any(getattr(one, "ok", False) for one in runs)}
+    if inputs and not answered:
+        sample = next((getattr(one, "error", "") for runs in observed.values()
+                       for one in runs if getattr(one, "error", "")), "")
+        return Corpus(inputs=inputs, discard_rate=1.0, usable=False,
+                      unusable_reason="the subject refused every probe -- it was reached but never "
+                                      "answered successfully, so nothing about it was measured: %s"
+                                      % (sample[:300] or "(no message)"))
+
+    timed = _pick_timed(report.expectations, answered=answered)
     graded = [e for e in report.expectations if e.probe_id not in set(timed)]
+
+    # ASKED OF WHAT SURVIVED, not of what was tried. A probe the subject answered and the freeze then
+    # discarded says nothing about what is left to grade -- the lesson the process seam learned the
+    # expensive way.
+    if graded and not (answered & {e.probe_id for e in graded}):
+        return Corpus(inputs=inputs, discard_rate=1.0, usable=False,
+                      unusable_reason="every probe the subject answered was discarded or held out "
+                                      "for timing; the graded corpus is refusals only")
+
+    # AND CAN THE CORPUS TELL TWO SUBMISSIONS APART? Distinct inputs that all freeze to one digest
+    # grade nothing: a submission returning that one constant scores full marks. This is not the
+    # floor check -- the floor tries three specific constants and can miss the one that matters.
+    distinct = {e.digest for e in graded if e.graded()}
+    if graded and len(distinct) < 2:
+        return Corpus(inputs=inputs, discard_rate=1.0, usable=False,
+                      unusable_reason="all %d graded probes froze to a single result; a submission "
+                                      "returning that one constant would score full marks"
+                                      % len(graded))
 
     return Corpus(expectations=graded, inputs=inputs, discard_rate=report.discard_rate,
                   usable=report.usable, timed=timed)
 
 
-def _pick_timed(expectations: list, count: int = 3) -> list:
+def _pick_timed(expectations: list, count: int = 3, *, answered: set | None = None) -> list:
     """Which probes become the timing workload.
 
     Taken from the end rather than the start only to be deterministic; nothing here predicts which
     probe is heavy. Choosing by measured cost would be a headroom prediction, and the design says
     that is the solver's discovery rather than ours -- we promise only that the clock can read the
     workload, never that the subject can be made faster on it.
+
+    `answered` KEEPS THE HOLDOUT OFF THE REFUSALS. Timing a probe the subject rejects measures how
+    fast it raises an exception, and taking the tail blindly is how that happened: the probes a
+    generator emits last are the awkward ones -- empty inputs, wrong types -- which are exactly the
+    ones a subject refuses. One answered probe is always left behind to be graded.
     """
-    return [e.probe_id for e in expectations[-count:]] if len(expectations) > count else []
+    if not answered:
+        return [e.probe_id for e in expectations[-count:]] if len(expectations) > count else []
+    usable = [e.probe_id for e in expectations if e.probe_id in answered]
+    available = max(0, len(usable) - 1)
+    if available <= 0:
+        return []
+    return usable[-min(count, available):]
 
 
 def audit(spec: Spec, observer, corpus: Corpus) -> Corpus:

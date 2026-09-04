@@ -163,6 +163,20 @@ def available() -> bool:
     return bool(credentials.get("LLM_BASE_URL") and credentials.get("LLM_API_KEY"))
 
 
+def _rejects_temperature(message: str) -> bool:
+    """Whether a gateway refusal is ABOUT the temperature we sent. -> bool.
+
+    Matched on the wording litellm emits rather than on the header, because the specific phrase is
+    stable across the models this factory talks to (`does not support temperature=`), while the
+    wrapping varies. A 400 for any other reason must NOT be retried at temperature=1 -- a malformed
+    prompt would then get a second attempt at a different temperature and, worse, hide its real cause
+    under a misleading message.
+    """
+    return ("temperature" in message and
+            ("does not support" in message or "only the default" in message or
+             "unsupported" in message.lower() or "drop_params" in message))
+
+
 def ask(prompt: str, *, system: str = "", temperature: float = 0.2,
         model: str = "", timeout: float = TIMEOUT) -> str:
     """One completion. -> what the model said, as text.
@@ -179,15 +193,22 @@ def ask(prompt: str, *, system: str = "", temperature: float = 0.2,
 
     messages = ([{"role": "system", "content": system}] if system else [])
     messages.append({"role": "user", "content": prompt})
-    body = json.dumps({
-        "model": model or credentials.get("LLM_MODEL") or DEFAULT_MODEL,
-        "messages": messages,
-        "temperature": temperature,
-    }).encode("utf-8")
 
-    request = urllib.request.Request(
-        "%s/chat/completions" % base, data=body,
-        headers={"Content-Type": "application/json", "Authorization": "Bearer %s" % key})
+    def _request(at_temperature):
+        """The same question at a given temperature. -> a prepared urllib request.
+
+        Rebuildable because some models accept only one temperature and say so in a 400, and the
+        answer to that is to ask again the way they accept rather than to lose the call.
+        """
+        payload = {"model": model or credentials.get("LLM_MODEL") or DEFAULT_MODEL,
+                   "messages": messages}
+        if at_temperature is not None:
+            payload["temperature"] = at_temperature
+        return urllib.request.Request(
+            "%s/chat/completions" % base, data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer %s" % key})
+
+    request = _request(temperature)
 
     # BOUND OURSELVES BEFORE BLAMING THE GATEWAY. Twenty-six candidate workers each asking two or
     # three times put twenty-six concurrent requests on one gateway, and a degraded gateway then
@@ -201,7 +222,22 @@ def ask(prompt: str, *, system: str = "", temperature: float = 0.2,
     gate = _sync_gate()
     with gate if gate is not None else _nothing():
         deadline = time.monotonic() + max(0.1, float(timeout))
-        return _ask_within(request, deadline)
+        try:
+            return _ask_within(request, deadline)
+        except ModelError as first:
+            # ASKED THE WAY THIS MODEL ACCEPTS, rather than losing the call to a parameter. Some models
+            # published through the gateway support exactly one temperature and reject anything else
+            # with a 400 naming it: "temperature: 0.2 -- only the default (1) is supported". That is a
+            # fact about the model, not about the question, and the question is still worth asking.
+            #
+            # WHY THIS MATTERS MORE THAN IT LOOKS: when the primary model is down, these are the
+            # fallbacks. Measured with three configured models -- two returned 503 "Service temporarily
+            # unavailable ... Available Model Group Fallbacks=None" and the third returned this 400. So
+            # the one model that was actually up was being refused by our own request body, and the
+            # package scale lost 79 of 100 generator calls while a usable model sat behind a parameter.
+            if not _rejects_temperature(str(first)) or temperature == 1:
+                raise
+            return _ask_within(_request(1), deadline)
 
 
 class _nothing:

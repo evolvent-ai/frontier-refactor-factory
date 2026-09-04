@@ -91,7 +91,13 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
     # Whether the reference was ever actually executed, and whether it ever did any WORK.
     # See the two refusals below; they are the same question asked one level apart.
     ever_ran = False
-    ever_worked = False
+    # WHICH scenarios did work, not merely WHETHER any did. A boolean was credited before the
+    # scenario had been accepted into the corpus, so one that did work and was then discarded for
+    # being irreproducible still opened the gate -- and what remained to be graded could be error
+    # paths exclusively. Measured: four tasks emitted after the gate existed had empty stdout and a
+    # non-zero exit on every graded step. The same set also answers the timing holdout, which takes
+    # scenarios OUT of grading after this loop has finished.
+    worked: set = set()
     why: dict = collections.Counter()
 
     batched = getattr(observer, "run_many", None)
@@ -116,12 +122,26 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
         # DID IT DO ANYTHING? A program invoked wrongly prints its usage to stderr, writes nothing
         # to stdout, changes no file and exits non-zero -- every time, identically. See the refusal
         # below for what that costs.
-        if any(obs.did_work(one) for observed in runs_observed for one in observed):
-            ever_worked = True
         steps = [obs.freeze(index, [observed[index] for observed in runs_observed])
                  for index in range(len(scenario.steps))]
         if any(step.graded_points() for step in steps):
             frozen[scenario.probe_id] = steps
+            # ASKED OF THE FROZEN CONSENSUS, AND ONLY ONCE THE SCENARIO IS ACTUALLY KEPT. This used to
+            # read `any(did_work(one) for observed in runs_observed for one in observed)` above the
+            # freeze, which was wrong twice over:
+            #
+            #   - it ORed across all five runs, so one lucky success among five failures opened the
+            #     gate while the frozen consensus -- the thing that ships -- recorded the failure;
+            #   - it credited the scenario before line 129 decided whether to keep it, so a scenario
+            #     that did work and was then dropped for having no gradable channel still vouched for
+            #     a corpus it is absent from.
+            #
+            # MEASURED: `repo/hucre-faster` emitted with 79 graded steps and not one doing work, with
+            # no installer error to explain it -- this gate was credited by runs whose own frozen
+            # expectations disagree. Judging what ships is the only question worth asking, because that
+            # is what a submission is graded against.
+            if obs.froze_work(steps):
+                worked.add(scenario.probe_id)
         else:
             dropped += 1
             # WHY IT WAS DROPPED, not only that it was. `100% of probes were discarded` names the
@@ -165,16 +185,30 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
     # The rule is corpus-level, not per-scenario, on purpose: a program's error path is real
     # material when the corpus also contains it working. What is not material is a corpus made
     # entirely of error paths.
-    if scenarios and ever_ran and not ever_worked:
+    # ASKED OF THE SCENARIOS THAT SURVIVED, not of every scenario that was tried. A scenario that
+    # did work and was then dropped for being irreproducible says nothing about what is left to
+    # grade, and crediting it here is how four tasks shipped whose every graded step had empty
+    # stdout and a non-zero exit.
+    if scenarios and ever_ran and not (worked & set(frozen)):
         return Corpus(scenarios=[], expectations={}, discard_rate=1.0, usable=False,
                       adequacy_note="the reference wrote nothing to stdout and exited non-zero on "
-                                    "every scenario -- it was invoked but never did any work",
+                                    "every scenario that froze -- it was invoked but never did any "
+                                    "work",
                       timed=[], runs=runs)
 
     attempted = len(scenarios)
     rate = (dropped / attempted) if attempted else 0.0
-    timed = _pick_timed(list(frozen))
+    timed = _pick_timed(list(frozen), worked=worked)
     graded = {pid: steps for pid, steps in frozen.items() if pid not in set(timed)}
+
+    # AND THE HOLDOUT MUST NOT HAVE TAKEN THE ONLY WORKING SCENARIO. `_pick_timed` keeps one back,
+    # but it can only do so from what it was given; if every working scenario is also the only
+    # material for timing there is nothing to grade that shows the program working.
+    if graded and not (worked & set(graded)):
+        return Corpus(scenarios=[], expectations={}, discard_rate=1.0, usable=False,
+                      adequacy_note="every scenario that did real work was held out for timing, so "
+                                    "the graded corpus contains only error paths",
+                      timed=[], runs=runs)
 
     usable = bool(graded) and rate <= 0.25
     reason = ""
@@ -187,14 +221,30 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
                   usable=usable, timed=timed, runs=runs)
 
 
-def _pick_timed(probe_ids: list, count: int = 3) -> list:
+def _pick_timed(probe_ids: list, count: int = 3, *, worked: set | None = None) -> list:
     """Which scenarios become the timing workload, held out of grading.
 
     Held out because correctness runs first: a scenario that is both graded and timed can be
     answered honestly, cached by argv, and replayed when the clock starts -- full marks and an
     arbitrary speedup with nothing implemented.
+
+    `worked` NAMES THE SCENARIOS WORTH TIMING, and taking the tail blindly got that backwards twice
+    over. The tail is where the stdin cases land, which are the ones a program run without arguments
+    rejects -- so the holdout was made of error paths, and timing measured how fast the reference
+    prints its usage. Meanwhile the scenarios that did real work stayed in the graded set only by
+    luck; when the luck ran the other way the graded set was error paths exclusively.
+
+    So the holdout is drawn from working scenarios, and at least one is always left behind to be
+    graded: a corpus needs both halves to show the program working.
     """
-    return probe_ids[-count:] if len(probe_ids) > count else []
+    if not worked:
+        return probe_ids[-count:] if len(probe_ids) > count else []
+    working = [pid for pid in probe_ids if pid in worked]
+    # One stays behind, whatever else happens -- see the second gate in `freeze`.
+    available = max(0, len(working) - 1)
+    if available <= 0:
+        return []
+    return working[-min(count, available):]
 
 
 def audit(spec: Spec, observer, corpus: Corpus) -> Corpus:

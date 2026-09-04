@@ -30,6 +30,71 @@ from .observation import Observation, Stream
 # it happened to run.
 WORKSPACE_TOKEN = "<workspace>"
 
+# THE ENVIRONMENT A SUBJECT IS OBSERVED IN. DECLARED, NEVER INHERITED.
+#
+# Three places run the subject and all three must agree: the local runner, the remote runner that
+# every sandboxed freeze uses, and the verifier shipped inside the task. Each of them built its
+# environment from `dict(os.environ)` -- and those are three DIFFERENT environments. The freeze
+# pushed the factory host's 54 variables into the sandbox; the shipped verifier read the delivered
+# image's own. So the reference was observed under one environment and graded under another.
+#
+# WHAT THAT COST, and the signature is unmistakable. Of 150 tasks refused at
+# `does-not-reproduce-in-its-own-image`, 145 matched EXACTLY one or two of the four graded channels:
+# 76 at 2/4, 69 at 1/4. Material variation does not land on quarter boundaries -- a whole channel
+# failing on every scenario is an environment difference. `TERM=xterm-256color` is enough on its own:
+# a program that colours its output when a terminal is present and does not otherwise diverges on
+# stdout AND stderr, on every scenario, while exit code and file tree still match.
+#
+# `ENV` and `BASH_ENV` were removed from the inherited copy for exactly this reason -- a profile that
+# ran dpkg and wrote a warning to a graded channel. That fix named two variables. INHERITING AT ALL
+# is the defect, and this makes the class impossible instead of enumerating its members.
+#
+# Set rather than merely unset, because "absent here, present there" is the bug. A value that is
+# written down is one a reader of the shipped task can see.
+SUBJECT_ENV = {
+    # Locale decides number formatting, collation and case folding. Left to the machine, sorted
+    # output differs between the sandbox and the image.
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    # Timestamps a program prints itself. Not the same as an unstable clock, which masking handles.
+    "TZ": "UTC",
+    # No terminal, so no colour and no width-dependent wrapping. The four below say the same thing
+    # to different libraries; a program obeys whichever one it knows.
+    "TERM": "dumb",
+    "COLUMNS": "80",
+    "LINES": "24",
+    "NO_COLOR": "1",
+    "CLICOLOR": "0",
+    "CLICOLOR_FORCE": "0",
+    "FORCE_COLOR": "0",
+    # Python subjects otherwise pick an encoding from the locale, which differs per image.
+    "PYTHONIOENCODING": "utf-8",
+}
+
+# The only variables taken from the surroundings, and they must come from WHERE THE PROGRAM RUNS
+# rather than from this process. A host `PATH` of `/root/.vscode-server/...` means nothing inside a
+# sandbox, and forwarding it replaces the one that would have found the program.
+INHERITED_ENV = ("PATH", "HOME")
+
+
+def subject_environment(scenario_env: dict | None = None, *, inherit_from: dict | None = None) -> dict:
+    """The environment for one observation. -> a fresh dict.
+
+    `inherit_from` is the environment of the machine that will RUN the subject -- `os.environ` for
+    the local runner and for the shipped verifier, and NOTHING for the remote runner, where the
+    sandbox already has its own and the SDK adds these on top of it.
+    """
+    environment = {}
+    for name in INHERITED_ENV:
+        value = (inherit_from or {}).get(name)
+        if value:
+            environment[name] = value
+    environment.update(SUBJECT_ENV)
+    # The scenario's own declarations win: they are part of what was harvested and are recorded in
+    # the shipped corpus, so a reader can see them.
+    environment.update(scenario_env or {})
+    return environment
+
 DEFAULT_STEP_TIMEOUT = 300.0
 PROGRAM_TOKEN = "{PROGRAM}"
 
@@ -160,17 +225,11 @@ def run_scenario(scenario: Scenario, program: list, *, fixtures_dir: str | None 
         if scenario.fixture and fixtures_dir:
             shutil.unpack_archive(os.path.join(fixtures_dir, scenario.fixture), workspace)
 
-        environment = dict(os.environ)
-        # WHAT A SHELL SOURCES AT STARTUP IS NOT THE SUBJECT'S BEHAVIOUR. `sh` reads $ENV and bash
-        # reads $BASH_ENV before running anything, so on a host that points them at a system profile
-        # the profile's output lands on a GRADED channel: this machine sets ENV=/etc/shinit_v2,
-        # which runs dpkg, which warns about a file it cannot read. Frozen, that warning becomes
-        # part of the expectation, and a submission is then judged on whether it reproduces our
-        # harness's noise on our machine. Removed here rather than filtered from the output,
-        # because a channel must record what the subject did.
-        environment.pop("ENV", None)
-        environment.pop("BASH_ENV", None)
-        environment.update(scenario.environment)
+        # DECLARED, NOT INHERITED -- see SUBJECT_ENV. This runs on the factory host, so `PATH` and
+        # `HOME` come from here; everything else that could reach a graded channel is written down.
+        # `ENV` and `BASH_ENV` are gone by construction rather than by being popped: they are not in
+        # SUBJECT_ENV, so a shell started here sources nothing.
+        environment = subject_environment(scenario.environment, inherit_from=os.environ)
         for step in scenario.steps:
             cwd = os.path.normpath(os.path.join(workspace, step.cwd))
             os.makedirs(cwd, exist_ok=True)
@@ -278,9 +337,11 @@ def run_remote_many(scenarios: list[Scenario], *, backend, remote_program: list,
         # Individual commands record their own exit code; a missing fixture or one bad probe must
         # not make the shell batch's final status look like a factory transport failure.
         script.append("true")
-        environment = dict(os.environ)
-        environment.pop("ENV", None)
-        environment.pop("BASH_ENV", None)
+        # NOTHING INHERITED HERE. This runs in the sandbox, which has its own `PATH` and `HOME`, and
+        # the SDK layers these on top of them -- so forwarding the factory host's would REPLACE the
+        # ones that find the program with paths like `/root/.vscode-server/...` that do not exist
+        # there.
+        environment = subject_environment()
         done = backend.run(["sh", "-c", "\n".join(script)], env=environment,
                            timeout=timeout * max(1, sum(len(s.steps) for s in scenarios)))
         if not done.ok:
@@ -326,10 +387,11 @@ def _run_remote_scenario(scenario: Scenario, program: list, *, backend,
                                   (_shell_quote(archive), _shell_quote(workspace))], timeout=120)
             if not unpack.ok:
                 raise RuntimeError("remote fixture unpack failed: %s" % unpack.tail())
-        environment = dict(os.environ)
-        environment.pop("ENV", None)
-        environment.pop("BASH_ENV", None)
-        environment.update(scenario.environment)
+        # NOTHING INHERITED -- the sandbox supplies `PATH` and `HOME`. This is the path EVERY
+        # sandboxed freeze takes, so it is the one that decided what got frozen: it was pushing 54
+        # host variables, `TERM=xterm-256color` among them, into the environment the reference was
+        # observed in, while the shipped verifier read the delivered image's own.
+        environment = subject_environment(scenario.environment)
         results = remote_root + "/results"
         script = ["set +e", "mkdir -p %s" % _shell_quote(results)]
         joined = " ".join(_shell_quote(x) for x in remote_program)

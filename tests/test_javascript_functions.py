@@ -95,7 +95,15 @@ def test_typescript_shim_uses_compiler_output_instead_of_node_strip_flag():
     # COMPILED IN PLACE, not into a compiled/ subdirectory, so a package dispatcher's relative
     # imports resolve from the workspace root where the module tree lives. (The compiled/ form
     # moved that root and every package/ts candidate died in E3 with ERR_MODULE_NOT_FOUND.)
-    assert "subject.js" in shim.run
+    #
+    # ASSERTED ON THE RESOLVED COMMAND rather than on the template. The name of what `tsc` emits used
+    # to be a literal repeated inside `run`; it is now the `served` field, so a template check reads
+    # `{served_name}` and proves nothing. What matters has not changed and is what this asks: the
+    # compiler is handed the `.ts` and Node is handed the `.js` that comes out of it.
+    assert shim.served == "subject.js"
+    build, run = shim.commands("/w", "entry")
+    assert "subject.js" in run, run
+    assert "/w/subject.ts" in build[0], build
 
 
 def test_the_shim_is_commonjs_whatever_the_package_declares():

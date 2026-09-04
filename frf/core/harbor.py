@@ -441,7 +441,15 @@ def deterministic_quality(path: str) -> list[str]:
 # What the factory writes as its answer key, relative to the task root's `tests/`. A copy of any of
 # these inside the solver's tree is a leak; the names are listed once so the check and the writer
 # cannot drift apart.
-_ANSWER_KEY = ("expectations.json", "verify.py", "scenarios.jsonl", "reference")
+#
+# "reference" IS DELIBERATELY NOT HERE anymore, and removing it was a correction. The check walks
+# the WHOLE upstream checkout under `environment/`, and "reference" is a common upstream directory
+# name (`crates/cli/reference`, `docs/reference`, `pkg/.../reference` -- measured on lisette, guac,
+# pygaeb and 13 more form-OK tasks, all refused at emit). The factory never writes anything named
+# `reference` into `environment/`; its runnable reference copy lives under `tests/`, which is the
+# verifier's sealed directory. So matching "reference" at any depth in `environment/` only ever
+# condemns the repository's own code.
+_ANSWER_KEY = ("expectations.json", "verify.py", "scenarios.jsonl")
 
 
 def answer_key_leaks(environment: str) -> list[str]:
@@ -455,10 +463,18 @@ def answer_key_leaks(environment: str) -> list[str]:
     the project's own tests, which belong in a faithful checkout.
 
     What actually matters is whether the FACTORY's answer key is reachable from the submission: the
-    frozen expectations, the verifier, the scenario list, and the runnable reference copy. Those live
-    at the task root under `tests/` and are readable only by the verifier; a copy of one inside
-    `environment/` would let a submission read the answers and replay them for full marks. So they
-    are searched for by name at any depth, and an upstream test suite is left alone.
+    frozen expectations, the verifier, and the scenario list. Those live at the task root under
+    `tests/` and are readable only by the verifier; a copy of one inside `environment/` would let a
+    submission read the answers and replay them for full marks. So they are searched for by name at
+    any depth, and an upstream test suite is left alone.
+
+    A directory NAMED `reference` is NOT the answer key, for the same reason an upstream `tests/`
+    isn't: `reference` is a common upstream directory name (`crates/cli/reference`, `docs/reference`,
+    `pkg/.../reference` -- measured on lisette, guac, pygaeb and more form-OK tasks, all refused at
+    emit). The factory's own runnable reference copy lives under `tests/`, which is the verifier's
+    sealed directory, never under `environment/`. So only the FILES are matched, at any depth --
+    and a `reference/` directory containing one of them is still caught, because the file itself is
+    what lets a submission replay the answers.
     """
     if not os.path.isdir(environment):
         return []
@@ -466,7 +482,7 @@ def answer_key_leaks(environment: str) -> list[str]:
     for dirpath, dirnames, filenames in os.walk(environment):
         dirnames[:] = [d for d in dirnames if d not in ("__pycache__", ".git")]
         for name in _ANSWER_KEY:
-            if name in filenames or name in dirnames:
+            if name in filenames:
                 relative = os.path.relpath(os.path.join(dirpath, name), environment)
                 found.append("runtime environment contains the answer key: %s" % relative)
     return found

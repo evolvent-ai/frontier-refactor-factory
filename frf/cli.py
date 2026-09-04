@@ -453,6 +453,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list | None = None) -> int:
+    # KEEP THIS PROCESS FROM TAKING THE MACHINE WITH IT. The E2B 2.x SDK keeps a global tokio runtime
+    # whose handles accumulate as candidates are processed; over an hour of running, frf grows from
+    # ~0.3G to 2-6G of RSS with no recovery, and the kernel OOM killer then chooses a victim --
+    # measured on this host, it killed the frf MainThread at 6.26GB RSS and the whole batch died with
+    # the machine. A batch that fails on its own budget is a data point; a batch that kills the host
+    # stops every other batch too.
+    #
+    # The cap is a HARD CEILING, not a graceful target: RLIMIT_AS raises MemoryError inside the
+    # process rather than letting the kernel pick. That error is caught nowhere, so frf dies with a
+    # traceback instead of the host -- which is exactly the trade being made. The ceiling sits above
+    # what a healthy run reached (~2.2G at 1h45m) so a normal batch is never cut off, and below the
+    # 6G at which the kernel actually killed it.
+    MAX_PROCESS_BYTES = 6 * 1024 * 1024 * 1024  # 6 GiB
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_AS, (MAX_PROCESS_BYTES, MAX_PROCESS_BYTES))
+    except (ImportError, OSError, ValueError):
+        # Not fatal: a platform without a settable RLIMIT_AS just runs without the guard.
+        pass
     args = build_parser().parse_args(argv)
     try:
         return args.run(args)

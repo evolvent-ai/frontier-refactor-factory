@@ -94,6 +94,8 @@ class Refused:
     fault: Fault
     detail: str = ""
     identity: str = ""
+    source_language: str = ""
+    target_language: str = ""
 
     ok = False
 
@@ -110,6 +112,8 @@ class Emitted:
     graded_points: int
     probes: int
     discard_rate: float
+    source_language: str = ""
+    target_language: str = ""
     battery: list = field(default_factory=list)
 
     ok = True
@@ -181,7 +185,8 @@ def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
     except Stage as refusal:
         log("refused at %s: %s (%s): %s" %
             (refusal.stage, refusal.reason, refusal.fault.value, refusal.detail[:400]))
-        return Refused(refusal.stage, refusal.reason, refusal.fault, refusal.detail, candidate.identity)
+        return Refused(refusal.stage, refusal.reason, refusal.fault, refusal.detail, candidate.identity,
+                      candidate.language, "")
     except KeyboardInterrupt:
         # An operator stopping a batch is not a candidate failing. Re-raised so that Ctrl-C is not
         # silently recorded as twenty unsuitable packages.
@@ -192,7 +197,8 @@ def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
         # full diagnostic and do not poison a multilingual batch's factory trust signal.
         if type(unexpected).__name__ == "SubjectFailed":
             log("refused at subject: %s (material)" % detail.splitlines()[0][:160])
-            return Refused("subject", "subject-failed", Fault.MATERIAL, detail[:2000], candidate.identity)
+            return Refused("subject", "subject-failed", Fault.MATERIAL, detail[:2000], candidate.identity,
+                          candidate.language, "")
         # ONE CANDIDATE MAY NEVER END A BATCH -- and this used to be unreachable code. The clause
         # above ended in `raise`, which leaves the WHOLE try statement rather than falling through
         # to the sibling `except BaseException` that followed it, so every unexpected exception
@@ -200,7 +206,8 @@ def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
         # timeout during E7, after other candidates had already passed every gate. The refusal is
         # recorded as OURS because an exception nobody anticipated is our bug until shown otherwise.
         log("refused at unclassified: %s (factory)" % detail.splitlines()[0][:160])
-        return Refused("unclassified", type(unexpected).__name__, Fault.FACTORY, detail[:2000], candidate.identity)
+        return Refused("unclassified", type(unexpected).__name__, Fault.FACTORY, detail[:2000], candidate.identity,
+                      candidate.language, "")
 
 
 # Errors that only a generator we wrote can raise. A package refusing an ordinary input raises from
@@ -441,7 +448,7 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     log("emitted %s" % path)
 
     return Emitted(spec.name, path, spec.scale, report.graded_points, report.probes,
-                   report.discard_rate, battery.to_json())
+                   report.discard_rate, spec.language, spec.target_language, battery.to_json())
 
 
 def _purge_task_bytecode(task_path: str) -> None:

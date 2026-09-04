@@ -197,7 +197,19 @@ def drive(path: str, *, backend=None) -> tuple:
     if backend is not None and getattr(backend, "name", "") == "remote":
         import uuid
         remote_root = "/tmp/frf-package-replay-%s" % uuid.uuid4().hex[:12]
-        backend.push(path, remote_root)
+        # THE SAME TREE THE FREEZE SAW, and this push did not send it. `backend.push` defaults to
+        # `containers.EXCLUDED`, which drops `node_modules` and `target` because a repo-scale checkout
+        # does not need them -- while `RemoteSubject.__enter__` passes a NARROWER set for exactly the
+        # opposite reason: on this seam the dependency tree is part of the contract, since the package
+        # imports it at runtime.
+        #
+        # So the freeze served a subject with its dependencies and the replay served one without,
+        # which is a task refused for not reproducing itself when the difference was ours. It was
+        # invisible while nothing installed dependencies (there was no `node_modules` to drop, and 53
+        # candidates were refused at `package-reference-replay-failed` for other reasons); it becomes
+        # load-bearing now that `_install_commands` creates one.
+        backend.push(path, remote_root,
+                     exclude={'.git', '.hg', '__pycache__', '.pytest_cache', '.venv'})
         result = backend.run(
             ["python3", "%s/tests/verify.py" % remote_root,
              "--task-root", "%s/tests" % remote_root,

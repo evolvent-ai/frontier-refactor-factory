@@ -519,6 +519,8 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
                 ledger.append(LedgerRecord(
                     identity=getattr(outcome, "identity", getattr(outcome, "name", "")),
                     scale=name, status="emitted" if outcome.ok else "refused",
+                    source_language=getattr(outcome, "source_language", ""),
+                    target_language=getattr(outcome, "target_language", ""),
                     stage=getattr(outcome, "stage", ""), reason=getattr(outcome, "reason", ""),
                     fault=getattr(getattr(outcome, "fault", None), "value", ""),
                     path=getattr(outcome, "path", ""),

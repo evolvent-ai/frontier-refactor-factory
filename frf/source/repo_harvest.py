@@ -43,7 +43,25 @@ _CI_SUFFIXES = (".yml", ".yaml")
 # 46% of the candidates that got past the build were refused for having no invocation that ran. The
 # harvest was reading scripts, READMEs and CI, and walking past the two files in the root.
 _SCRIPT_FILES = ("Makefile", "makefile", "GNUmakefile", "package.json")
-_INPUT_SUFFIXES = (".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".txt", ".csv", ".c", ".h", ".go", ".rs", ".py", ".js", ".ts")
+# A SOURCE FILE IS AN INPUT to the programs this scale sources -- parsers, formatters, linters,
+# transpilers -- which is why `.go`, `.rs`, `.py`, `.js` and `.ts` are here beside `.json`.
+#
+# THE LIST WAS ASYMMETRIC, and the asymmetry decided which languages could produce a task. `.py` was
+# harvested and `.rb` was not; `.c` and `.h` were and `.cpp`, `.cc`, `.hpp` were not. Measured across
+# 276 checkouts: 3163 `.rb` files sat inside corpus directories that the harvest walked straight past,
+# and ruby and cpp were the only two languages whose harvestable count did not move when the corpus
+# DIRECTORY names were widened. They were not short of material; we were not reading it.
+#
+# `.md` IS DELIBERATELY ABSENT. It is what a repository has most of and what a program wants least:
+# feeding `README.md` to a PEG compiler is how 27 repo tasks came to freeze `stdout` empty and a
+# non-zero exit on every graded scenario. A markdown formatter that genuinely takes `.md` will be
+# served by its own `testdata`, and the cost of missing it is one task rather than a class of junk.
+_INPUT_SUFFIXES = (".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".txt", ".csv",
+                   ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh",
+                   ".go", ".rs", ".py", ".rb", ".js", ".ts", ".java",
+                   # Golden-file conventions: the expected output of a previous run, kept in the tree
+                   # precisely because it is stable input/output material.
+                   ".golden", ".expected", ".snap")
 
 
 @dataclass
@@ -54,6 +72,7 @@ class HarvestStats:
     skipped_shell: int = 0
     scenarios_built: int = 0
     inputs_found: int = 0
+    skipped_missing_input: int = 0
 
 
 @dataclass(frozen=True)
@@ -62,6 +81,41 @@ class Harvested:
     argv: tuple[str, ...]
     line: int
 
+
+
+def paths_exist(root: str, argv: tuple) -> bool:
+    """Whether a lifted command's file arguments are actually present. -> True if it can run.
+
+    AT LEAST ONE, NOT ALL, and the difference matters. `{PROGRAM} input.md output.html` names two
+    paths of which only the first should exist -- demanding both would refuse every command that
+    writes a file, which is a large share of the programs this scale is for. What cannot be salvaged
+    is a command whose every file argument is missing: there is nothing for the program to read, so
+    the only observation available is a refusal.
+
+    A COMMAND NAMING NO FILES IS FINE. `{PROGRAM} --version` and `{PROGRAM} --help` take nothing from
+    the tree and are perfectly reproducible; this returns True for them and leaves the judgement of
+    whether they do real work to `did_work` at freeze time.
+    """
+    candidates = []
+    for token in argv[1:]:
+        text = str(token)
+        # A path-like token: has a separator or a suffix, and is not an option. `--config=x.toml`
+        # carries its path after the `=`, so that form is unwrapped rather than skipped.
+        if text.startswith("-"):
+            if "=" not in text:
+                continue
+            text = text.split("=", 1)[1]
+            if not text:
+                continue
+        if os.sep not in text and "." not in os.path.basename(text):
+            continue
+        # Absolute paths and escapes point outside the checkout, where nothing can be packed from.
+        if os.path.isabs(text) or text.startswith(".."):
+            return False
+        candidates.append(text)
+    if not candidates:
+        return True
+    return any(os.path.isfile(os.path.join(root, path)) for path in candidates)
 
 
 def _fenced(lines: list) -> list:
@@ -253,10 +307,34 @@ def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int =
     return found
 
 
-def harvest_corpus(root: str, *, directories: tuple[str, ...] = ("testdata", "fixtures", "corpus", "regression"),
+def harvest_corpus(root: str, *,
+                   directories: tuple[str, ...] = ("testdata", "fixtures", "fixture", "__fixtures__",
+                                                   "corpus", "regression", "examples", "example",
+                                                   "samples", "cases", "spec", "data"),
                    max_files: int = 40, max_bytes: int = 262144,
                    stats: HarvestStats | None = None) -> list[str]:
-    """Find repository-owned input files suitable for fixture scenarios."""
+    """Find repository-owned input files suitable for fixture scenarios.
+
+    THE DIRECTORY NAMES ARE A GO CONVENTION, and this list used to hold only four of them:
+    `testdata`, `fixtures`, `corpus`, `regression`. `testdata` is what the Go toolchain reserves, so
+    Go repositories have one and most others do not -- which is one reason the only repo-scale task
+    whose graded corpus does real work is a Go program reading its own `testdata/`.
+
+    MEASURED BEFORE WIDENING, because the last attempt to tune this stage by intuition made it worse
+    (a "README mentions the command" filter scored 43% false accepts and 30% recall, and was
+    reverted). Over 144 repository checkouts that harvest NOTHING under the four names, adding the
+    names below finds inputs in: python 11, rust 10, javascript 3, typescript 3.
+
+    WHY SOURCE-CODE SUFFIXES ARE NOT A MISTAKE HERE, and it looks like one: 108 of the newly-found
+    files are `.py` and 73 are `.rs`. For the programs this scale sources -- parsers, formatters,
+    linters, transpilers -- a source file IS the input. A Rust formatter formats `.rs`; feeding it one
+    is exercising it, not feeding it its own README.
+
+    WHAT KEEPS A BAD WIDENING HONEST is downstream rather than here: the freeze refuses a corpus in
+    which the reference never did any work, so an `examples/` directory of things the program does not
+    accept produces a refusal instead of a task. That gate has to exist for this to be safe, and it
+    now does.
+    """
     found = []
     wanted = set(directories)
     for directory, dirs, files in os.walk(root):

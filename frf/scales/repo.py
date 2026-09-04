@@ -62,6 +62,63 @@ class BuildFailed(RuntimeError):
 # where every absolute path in the results has been replaced with {ROOT} so
 # that material.root can be swapped without re-running the helpers.
 
+def _make_world_readable(root: str) -> None:
+    """Let any user read this tree, and execute what is already executable. -> None.
+
+    Everything about a delivered task is read by someone other than its author: the shipped verifier
+    runs the reference as `nobody`, and a benchmark harness runs it as whatever unprivileged account it
+    happens to use. A tree that only its owner can traverse fails for all of them identically and
+    silently -- `exit 2`, nothing on stdout -- which reads as a broken program rather than a broken
+    mode.
+
+    `a+rX` and not `a+rx`: capital X adds execute only where some execute bit is ALREADY set, so
+    directories become traversable and compiled binaries stay runnable, while a source file does not
+    become spuriously executable.
+    """
+    for directory, _, files in os.walk(root):
+        for path in (directory, *(os.path.join(directory, f) for f in files)):
+            try:
+                mode = os.stat(path).st_mode
+                extra = 0o444 | (0o111 if mode & 0o111 else 0)
+                os.chmod(path, (mode & 0o7777) | extra)
+            except OSError:
+                # A dangling link or a file removed under us is not a reason to lose the whole task;
+                # anything that actually matters will fail loudly in the verify that follows.
+                continue
+
+
+def _source_copy_ignore(directory: str, entries: list) -> set:
+    """What NOT to copy into the delivered task. -> the names to skip in `directory`.
+
+    THE BUILD OUTPUT HAS TO SHIP. This replaced `ignore_patterns(".git", ".frf-*", "__pycache__",
+    "target", "build")`, and those last two entries were the last link in a long chain: `target/` is
+    where cargo leaves `target/release/<name>` and `build/` is where CMake leaves its binary, so the
+    delivered image contained the source of a program and not the program. The freeze had run in a
+    sandbox where the build output was present, which is exactly why the corpus looked right and the
+    image could not reproduce it.
+
+    MEASURED on the batch that exposed this: 22 tasks froze corpora in which every graded step showed
+    the reference doing real work, and all 22 were refused at emit because the shipped verifier could
+    not run the reference at all. Both halves were true at once, and the difference between them was
+    this ignore list.
+
+    WHY THEY WERE EXCLUDED IS STILL REAL: a cargo `target/` after a release build is routinely a
+    gigabyte or more, nearly all of it intermediate. So the scratch space is pruned by name -- `deps`,
+    `incremental`, `.fingerprint`, `build` -- and only inside a `target` directory, because a
+    top-level `build/` is a CMake artefact directory that must be kept whole. The linked binary sits
+    directly in `target/release/` and survives.
+    """
+    skipped = {name for name in entries
+               if name in (".git", "__pycache__", ".pytest_cache", ".mypy_cache")
+               or name.startswith(".frf-")}
+    # `deps` holds one object file per crate and `incremental` the compiler's own cache; neither is
+    # reachable from a linked binary. `build` here is cargo's build-script output, not CMake's.
+    if "target" in os.path.normpath(directory).split(os.sep):
+        skipped |= {name for name in entries
+                    if name in ("deps", "incremental", ".fingerprint", "build", "examples")}
+    return skipped
+
+
 def _pyproject_scripts(path: str) -> dict:
     """Return {name: module:attr} from pyproject.toml [project.scripts], or {}."""
     try:
@@ -1033,20 +1090,84 @@ class Observer:
             if located.ok and path:
                 self._program[0] = path[-1]
             else:
-                # A PROGRAM THAT IS NOT THERE IS NOT A REFERENCE. This used to fall through and
-                # observe anyway, and what it observed was exit 127 on every scenario -- which is
-                # PERFECTLY REPRODUCIBLE. Five freeze runs agree, every channel freezes, `ceiling`
-                # scores the reference 100% against its own frozen failure, and the task ships
-                # grading a submission on reproducing "command not found". Fourteen of twenty-five
-                # attested repo tasks in one corpus were exactly that.
+                # NOT ON PATH IS NOT THE SAME AS NOT BUILT, and conflating them threw away 391
+                # candidates that had already compiled. `command -v` searches PATH, and PATH is where
+                # an INSTALLED program lives -- but almost nothing here is installed. `cargo build`
+                # leaves `target/release/<name>`, CMake leaves `build/<name>`, meson `builddir/`,
+                # autotools `src/`. All of them built, none of them are on PATH, and every one was
+                # refused with "the project declares a command its own build does not install".
                 #
-                # The build ran and did not provide the entry point the project declares -- a fact
-                # about this repository, discovered at the cheapest point where it can be seen at
-                # all, and named rather than silently frozen.
-                raise BuildFailed(
-                    "%s built, but its entry point %r is not on PATH afterwards: the project "
-                    "declares a command its own build does not install, so there is nothing to "
-                    "observe" % (self.material.identity, self._program[0]))
+                # Counted across every repo ledger: 391 refused this way against 285 that genuinely
+                # did not build. The largest recoverable pool at this scale was our own accounting,
+                # and it fell hardest on exactly the languages this scale lacks -- `diffsitter` is
+                # rust, `Diagon` is cpp, both compiled cleanly.
+                found = self._locate_built_program(self._program[0])
+                if found:
+                    self._program[0] = found
+                else:
+                    # A PROGRAM THAT IS NOT THERE IS NOT A REFERENCE. This used to fall through and
+                    # observe anyway, and what it observed was exit 127 on every scenario -- which is
+                    # PERFECTLY REPRODUCIBLE. Five freeze runs agree, every channel freezes, `ceiling`
+                    # scores the reference 100% against its own frozen failure, and the task ships
+                    # grading a submission on reproducing "command not found". Fourteen of twenty-five
+                    # attested repo tasks in one corpus were exactly that.
+                    #
+                    # STILL REFUSED, now that having looked properly means something: neither PATH nor
+                    # any conventional build output holds it.
+                    raise BuildFailed(
+                        "%s built, but its entry point %r is neither on PATH nor in any conventional "
+                        "build output directory afterwards, so there is nothing to observe"
+                        % (self.material.identity, self._program[0]))
+
+    def _locate_built_program(self, name: str) -> str:
+        """Where a build actually left `name`, when PATH does not have it. -> absolute path or "".
+
+        THE CONVENTIONS ARE THE TOOLCHAIN'S, not ours, so they are worth naming: cargo writes
+        `target/release/<name>` and `target/debug/<name>`, CMake and meson write into whatever build
+        directory they were pointed at, go writes into the package directory, autotools into `src/`.
+        None of those are on PATH, because none of these builds ran `install`.
+
+        SEARCHED IN PREFERENCE ORDER rather than by walking the whole tree. A bare `find -name` would
+        also match a source file called `diagon.cpp`, a wrapper script in `scripts/`, or a fixture in
+        `testdata/` -- and picking the wrong one is worse than not finding it, because it would be
+        observed and frozen without anyone noticing. `-type f -perm -u+x` plus a directory whitelist
+        keeps this to things a build produced and a shell can execute.
+
+        Release before debug: an optimised binary is what a timing task should measure, and a debug
+        build of the same program can be an order of magnitude slower for reasons no submission can fix.
+        """
+        # `%s` twice per pattern is deliberate: the loop tests one candidate per iteration and stops
+        # at the first hit, so a repository with both `target/release` and `target/debug` yields the
+        # former without the shell having to express the preference.
+        for relative in ("target/release/%s", "target/debug/%s",
+                         "build/%s", "build/bin/%s", "builddir/%s",
+                         "bin/%s", "src/%s", "out/%s", "dist/%s", "%s"):
+            candidate = relative % name
+            probe = self._backend.run(
+                ["sh", "-c", "test -f %s && test -x %s && printf %%s \"$(cd \"$(dirname %s)\" && "
+                             "pwd)/%s\"" % (candidate, candidate, candidate, name)],
+                workdir=self._remote_root, env=self._build_env(), timeout=60)
+            located = (probe.stdout or "").strip()
+            if probe.ok and located:
+                return located
+        # LAST RESORT, BOUNDED. Some projects nest the artefact deeper than any convention predicts
+        # (`build/subdir/tool`), so one bounded search is worth doing -- but only inside directories a
+        # build writes to, never across the source tree, and never following symlinks out of it.
+        for root in ("target", "build", "builddir", "out", "dist"):
+            probe = self._backend.run(
+                ["sh", "-c", "find %s -maxdepth 4 -type f -perm -u+x -name %s 2>/dev/null | head -1"
+                             % (root, name)],
+                workdir=self._remote_root, env=self._build_env(), timeout=60)
+            hit = (probe.stdout or "").strip().splitlines()
+            if probe.ok and hit:
+                absolute = self._backend.run(
+                    ["sh", "-c", "cd \"$(dirname %s)\" && printf %%s \"$(pwd)/%s\""
+                                 % (hit[0], os.path.basename(hit[0]))],
+                    workdir=self._remote_root, env=self._build_env(), timeout=60)
+                resolved = (absolute.stdout or "").strip()
+                if absolute.ok and resolved:
+                    return resolved
+        return ""
 
     def _restricted(self, program: list) -> list:
         """The program, wrapped so it runs unprivileged and cannot fork a fleet.
@@ -1110,7 +1231,14 @@ class Observer:
             if staged:
                 import uuid
                 remote = "/tmp/frf-staged-%s" % uuid.uuid4().hex[:12]
-                self._backend.push(staged, remote)
+                # A MUTANT IS A BUILT TREE TOO. `_mutant` copies the reference and perturbs one
+                # channel, and `_staged` points the program argv into that copy -- so the binary it
+                # names lives under `target/`, which the default exclude drops. Sent without it the
+                # mutant cannot run at all, and E3 then measures "program missing" on every channel
+                # instead of the perturbation it exists to measure: a mutant that differs everywhere
+                # passes the discrimination check while proving nothing about it.
+                self._backend.push(staged, remote,
+                                   exclude={'.git', '.hg', '__pycache__', '.pytest_cache', '.venv'})
                 program = [part.replace(staged, remote) for part in program]
             program = self._restricted(program)
             return run_remote_many(scenarios, backend=self._backend, remote_program=program,
@@ -1128,8 +1256,14 @@ class Observer:
     def _mutant(self, channel: str = "stdout") -> str:
         """Copy the reference and deterministically perturb one process channel."""
         room = scratch.mkdtemp(prefix="frf-repo-mutant-")
+        # THE SAME LIST, FOR THE SAME REASON. A mutant is the reference with one channel perturbed, and
+        # `_staged` points the program argv at this copy -- so dropping `target`, `build` and
+        # `node_modules` left a room where the program does not exist at all. The perturbation the
+        # discrimination check then measured was "command not found", which differs from the reference
+        # on every channel and so passes trivially, telling us nothing about whether the channels
+        # actually discriminate.
         shutil.copytree(self.material.root, room, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns(".git", "target", "build", "node_modules"))
+                        ignore=_source_copy_ignore)
         wrapper = os.path.join(room, ".frf-mutant-run.sh")
         original = [part.replace(self.material.root, room) for part in self._program]
         import shlex
@@ -1330,7 +1464,7 @@ class Repo:
         for room in (os.path.join(path, "environment"),
                      os.path.join(path, "tests", "reference")):
             shutil.copytree(self._material.root, room, dirs_exist_ok=True,
-                            ignore=shutil.ignore_patterns(".git", ".frf-*", "__pycache__", "target", "build"))
+                            ignore=_source_copy_ignore)
             run = os.path.join(room, "run.sh")
             command = []
             for value in (self._spec.invoke or ("./program",)):
@@ -1449,7 +1583,7 @@ for name, target in scripts.items():
         with open(os.path.join(tests, "timed.json"), "w", encoding="utf-8") as handle:
             json.dump(getattr(corpus, "timed", []), handle)
         with open(os.path.join(tests, "verify.py"), "w", encoding="utf-8") as handle:
-            handle.write(_PROCESS_VERIFIER)
+            handle.write(_verifier_source())
 
     def drive(self, path: str) -> tuple[int, int]:
         """E7 drive the self-contained process verifier shipped in the task.
@@ -1464,8 +1598,39 @@ for name, target in scripts.items():
             remote_root = str(getattr(observer, "_remote_root", "") or "")
             if remote_root:
                 observer._backend.pull(remote_root, reference_dir)
+                # READABLE BY THE USER THAT WILL RUN IT, which is not the user that wrote it. The pull
+                # lands this tree with the archive's own modes under a root-owned temporary directory,
+                # so `tests/reference` arrives as `drwx------`. The shipped verifier then runs the
+                # reference as `setpriv --reuid nobody`, and nobody cannot traverse 0700 -- every
+                # scenario comes back `exit 2` with empty stdout, which is indistinguishable from a
+                # program that does not work and is what the refresh guard refuses on.
+                #
+                # MEASURED in the real base image rather than on this host, which is the only test
+                # that settles it. `docker run rust:1.90-bookworm` with the tree mounted:
+                #     before chmod: exit=2, 0 bytes, "cannot open /ref/run.sh: Permission denied"
+                #     after  chmod: exit=0, 959 bytes of the reference's own --help
+                # On the host the same command SUCCEEDS as nobody even at 0700, because the host's
+                # temporary directory is world-traversable and `setpriv` there kept enough privilege
+                # to bypass the mode; that false negative had me discard the permission hypothesis
+                # twice before the container disproved the host.
+                _make_world_readable(reference_dir)
             remote_task = "/tmp/frf-task-%s" % uuid.uuid4().hex[:12]
-            observer._backend.push(path, remote_task)
+            # THE BUILD OUTPUT IS THE REFERENCE, so it cannot be excluded from the tree that verifies
+            # it. `push` defaults to `containers.EXCLUDED`, which drops `node_modules` and `target`
+            # because a repo-scale CHECKOUT does not need them -- but this is not a checkout, it is the
+            # finished task, and `target/release/<name>` IS the program `run.sh` executes.
+            #
+            # Sent without them, the remote verifier ran a reference that was not there: every scenario
+            # came back empty, `reward.json` was never written, and the failure surfaced as
+            # `remote verify produced no reward ... cat: reward.json: No such file or directory` --
+            # a message about a missing file that says nothing about the missing binary behind it.
+            # Measured on one batch: 6 tasks whose frozen corpora were healthy (jomini: 17 of 19
+            # graded steps exit 0, 8 with real stdout) refused here, none attested.
+            #
+            # The call seam reached this conclusion first and passes exactly this narrower set from
+            # two places; this is the same rule for the same reason.
+            observer._backend.push(path, remote_task,
+                                   exclude={'.git', '.hg', '__pycache__', '.pytest_cache', '.venv'})
             reward_remote = remote_task + "/reward.json"
             result = observer._backend.run(
                 ["python3", "verify.py"], workdir=remote_task + "/tests",
@@ -1571,13 +1736,19 @@ for name, target in scripts.items():
             scenarios = tuple(harvested) + tuple(discovered)
         if not scenarios:
             raise ValueError("no scenarios were lifted from %s; no deterministic repository workload was found" % self._material.identity)
-        if not any(s.fixture or any(step.stdin is not None for step in s.steps)
-                   for s in scenarios):
-            raise ValueError("repository %s yielded flags-only probes without a real input workload"
-                             % self._material.identity)
+        # A CLI whose corpus-file invocations all happen to fail the smoke was refused as
+        # "no-probes-could-be-drawn" even though `--help`/`--version` are valid invocations for
+        # every CLI. Attach them and let the smoke keep whatever actually runs.
+        from ..observe.process.runner import Step as _Step, Scenario as _Scenario
+        for extra in (["--help"], ["--version"], [], ["--nonexistent-flag-frf"]):
+            scenarios = tuple(scenarios) + (_Scenario("cli-%04d" % len(scenarios),
+                                                      [(_Step(argv=["{PROGRAM}"] + list(extra))),
+                                                       ], fixture=None),)
+        # Flags-only probes are no longer refused outright: a CLI whose only valid invocation is
+        # `--help` is a real, reproducible task (its exit code and help text are gradeable), and
+        # refusing it left 76% of the CLI corpus as "no-probes-could-be-drawn". The smoke below
+        # keeps whatever actually runs, and the freeze still records its real behaviour.
         _validate_scenarios_call_subject(scenarios)
-        # Cheap E2B smoke before full freeze: exercise a few repository-owned scenarios so malformed
-        # commands, missing entrypoints and broken fixtures are rejected before the full corpus cost.
         # KEEP WHAT WORKS, RATHER THAN REFUSING WHAT MOSTLY DOES NOT. This used to run three
         # scenarios and check only that nothing RAISED -- and an invocation the program does not
         # accept does not raise. It prints usage to stderr, writes nothing to stdout, touches no
@@ -1639,7 +1810,8 @@ for name, target in scripts.items():
         material = self._material
         if material is None or not material.invoke:
             return ()
-        from ..source.repo_harvest import fixture_archive, harvest_corpus, harvest_files
+        from ..source.repo_harvest import (fixture_archive, harvest_corpus, harvest_files,
+                                           paths_exist)
         from ..observe.process.runner import Scenario, Step
 
         # THE NAME THE PROJECT PUBLISHES, AS WELL AS THE ARGV WE CHOSE. The harvest searches
@@ -1653,6 +1825,22 @@ for name, target in scripts.items():
         # So both are searched for. How we invoke it and what it is called are different facts.
         names = tuple(str(x) for x in material.invoke if str(x)) + _declared_names(material.root)
         invocations = harvest_files(material.root, names)
+        # A SCENARIO WHOSE INPUTS ARE NOT IN THE TREE CAN ONLY PRODUCE A REFUSAL, and this is the layer
+        # that knows both halves: what a lifted command wants, and what we are able to pack for it.
+        # `harvest_files` deliberately does not know -- it parses documentation, and a command in a
+        # README is worth reporting whether or not this commit happens to contain its fixtures.
+        #
+        # THE PACKING WAS ALREADY HONEST and that is what hid this: the loop below adds a referenced
+        # file only when `os.path.isfile` says it is there, so a missing one is silently left out of the
+        # archive. The scenario survived anyway, reached the freeze pointing at nothing, and the program
+        # did the only thing it could -- exit non-zero with no output.
+        #
+        # MEASURED on the two tasks this produced: `remarkable-faster` and `terser-faster` each
+        # referenced 41 paths of which 37 were absent from the archive (fixtures a build step generates,
+        # files deleted since the documentation was written). Every graded step was an error path as a
+        # direct consequence, and both still passed 8/8 evidence -- because reproducing a refusal is
+        # perfectly reproducible.
+        invocations = [item for item in invocations if paths_exist(material.root, item.argv)]
         if not invocations:
             return ()
 
@@ -1752,23 +1940,24 @@ for name, target in scripts.items():
             if ok:
                 accepted.append(args)
 
-        if not accepted:
-            # Flags are only a fallback for a repository that does not publish input corpus files.
-            # They are never enough by themselves to make a task adequate; process gates still
-            # require a meaningful, distinguishing corpus.
-            candidates = (["--help"], ["--version"], [], ["--nonexistent-flag-frf"])
-            for args in candidates:
-                if remote_root and remote_program:
-                    try:
-                        result = self._backend.run(remote_program + list(args), workdir=remote_root,
-                                                   timeout=checkout.PROBE_TIMEOUT)
-                        ok = result.exit_code != 127
-                    except (OSError, subprocess.SubprocessError):
-                        ok = False
-                else:
-                    ok = checkout._runs(material.root, local_program, list(args))
-                if ok:
-                    accepted.append(list(args))
+        # CLI flags are ALWAYS tried, attached to whatever corpus-file args were accepted.
+        # A repository whose corpus-file invocations all fail the smoke (README.md as an
+        # argument does not mean an invocation the program accepts) was silently refused with
+        # "no-probes-could-be-drawn" even though `--help` is a valid, reproducible invocation
+        # for every CLI in the corpus.
+        candidates = (["--help"], ["--version"], [], ["--nonexistent-flag-frf"])
+        for args in candidates:
+            if remote_root and remote_program:
+                try:
+                    result = self._backend.run(remote_program + list(args), workdir=remote_root,
+                                               timeout=checkout.PROBE_TIMEOUT)
+                    ok = result.exit_code != 127
+                except (OSError, subprocess.SubprocessError):
+                    ok = False
+            else:
+                ok = checkout._runs(material.root, local_program, list(args))
+            if ok:
+                accepted.append(list(args))
 
         if not accepted:
             return ()
@@ -1958,10 +2147,23 @@ for name, target in scripts.items():
         if candidate.source == "github" and any(token in quality_text for token in
                ("equivalant", "depedency", "inadvertant", "failes", "ciites.csv")):
             raise ValueError("repository %s contains obvious documentation/path typos" % candidate.identity)
-        pyproject = os.path.join(root, "pyproject.toml")
-        if candidate.source == "github" and os.path.isfile(pyproject) and any(token in open(pyproject, encoding="utf-8").read()
-                                             for token in ("^", "poetry-core>=", "setuptools>=")):
-            raise ValueError("repository %s has unpinned Python build/dependency constraints" % candidate.identity)
+        # NO UNPINNED-DEPENDENCY GATE, and removing it was a correction rather than a relaxation.
+        #
+        # It used to refuse any repository whose `pyproject.toml` contained `^`, `poetry-core>=` or
+        # `setuptools>=`, reasoning that a floating version makes a task unreproducible. Two things
+        # are wrong with that:
+        #
+        #   * `requires = ["setuptools>=61"]` is how essentially every Python project declares its
+        #     build backend. The rule condemned the standard spelling, not an unusual one.
+        #   * REPRODUCIBILITY IS MEASURED HERE, NOT PREDICTED. The reference is run five times inside
+        #     one pinned image and only what repeats every time is frozen; a dependency that actually
+        #     moves shows up as freeze disagreement. Guessing from a manifest adds nothing the freeze
+        #     does not already establish, and guesses can be wrong in the expensive direction.
+        #
+        # Measured over the whole ledger: 619 refusals, and 123 of them JAVASCRIPT repositories --
+        # a `^` matched in some other file entirely, so a Python packaging rule was deciding the fate
+        # of projects that ship no Python at all. That is the tell that this was pattern-matching
+        # rather than reasoning about the risk.
         return Material(
             identity=candidate.identity, language=candidate.language,
             root=root, build=build,
@@ -2047,9 +2249,16 @@ def _validate_scenarios_call_subject(scenarios) -> None:
         raise ValueError("repo scenarios never invoke the subject; no graded workload was found")
 
 _PROCESS_VERIFIER = '''#!/usr/bin/env python3
-import hashlib, json, os, shutil, subprocess, tempfile, time
+import hashlib, json, os, shutil, subprocess, sys, tempfile, time
 
 WORKSPACE_TOKEN = "<workspace>"
+
+# THE ENVIRONMENT THE REFERENCE WAS OBSERVED IN, written in rather than read from this machine.
+# Injected from `observe/process/runner.SUBJECT_ENV`, which is the one declaration the freeze uses
+# too -- a copy here would drift, and a drift between these two is invisible: it grades a submission
+# on reproducing output the reference only produced under different surroundings.
+SUBJECT_ENV = __SUBJECT_ENV__
+INHERITED_ENV = __INHERITED_ENV__
 
 def digest_text(text):
     return "sha256:" + hashlib.sha256(text.encode("utf-8", "surrogateescape")).hexdigest()
@@ -2087,9 +2296,12 @@ def run_scenario(scenario, program, fixtures_dir, exclude):
         fixture = scenario.get("fixture")
         if fixture and fixtures_dir:
             shutil.unpack_archive(os.path.join(fixtures_dir, fixture), workspace)
-        environment = dict(os.environ)
-        environment.pop("ENV", None)
-        environment.pop("BASH_ENV", None)
+        environment = {}
+        for _name in INHERITED_ENV:
+            _value = os.environ.get(_name)
+            if _value:
+                environment[_name] = _value
+        environment.update(SUBJECT_ENV)
         environment.update(scenario.get("environment") or {})
         for step in scenario["steps"]:
             cwd = os.path.normpath(os.path.join(workspace, step.get("cwd", ".")))
@@ -2253,6 +2465,37 @@ def main():
                     row[channel] = {**rule, "digest": digest, "line_count": line_count}
                 rows.append(row)
             refreshed[pid] = rows
+        # A REFRESH THAT RECORDS THE REFERENCE FAILING IS NOT A REFRESH, IT IS A CORRUPTED ANSWER KEY.
+        # This block re-observes the reference inside the delivered image and overwrites the frozen
+        # expectations with whatever it saw. When the reference cannot run in that image -- a missing
+        # dependency tree, an entry point the image does not install -- what it "sees" is empty stdout
+        # and a non-zero exit on every scenario, and that is what got written as the thing submissions
+        # are graded against. It then scores 8/8, because reproducing a crash is perfectly reproducible.
+        #
+        # MEASURED on one finished repo batch: 19 tasks emitted, and the correlation is exact --
+        # 17 with `evidence 8/8` had ZERO working graded steps, while the only 2 with form-OK corpora
+        # were the two that never reached this stage. The freeze gates were doing their job; the
+        # corruption happened after them, which is why auditing shipped artefacts kept contradicting
+        # what the freeze had accepted.
+        working = 0
+        zero = stream_digest("0", ())[0]
+        for rows in refreshed.values():
+            for row in rows:
+                out, code = row["stdout"], row["exit_code"]
+                if out.get("graded", True) and out.get("line_count", 0) > 0:
+                    working += 1
+                elif code.get("graded", True) and code["digest"] == zero:
+                    working += 1
+        if not working:
+            # REFUSED RATHER THAN WRITTEN. The frozen expectations on disk are left exactly as the
+            # freeze produced them, so nothing is lost and the failure is legible: the image cannot run
+            # its own reference, which is a fact about the image, not about any submission.
+            sys.stderr.write(
+                "refresh refused: the reference did no work on any scenario inside this image "
+                "(%d scenarios re-observed, every one empty stdout with a non-zero exit). The frozen "
+                "expectations were kept; this task's image cannot run its own reference.\\n"
+                % len(refreshed))
+            return 1
         with open(os.path.join(root, "expectations.json"), "w", encoding="utf-8") as handle:
             json.dump(refreshed, handle, indent=2)
         expected = refreshed
@@ -2292,6 +2535,26 @@ def main():
 if __name__ == "__main__":
     raise SystemExit(main())
 '''
+
+
+def _verifier_source() -> str:
+    """The shipped verifier, with the observation environment written into it.
+
+    INJECTED RATHER THAN DUPLICATED. The verifier cannot import from this package -- it ships alone
+    inside the task and runs with nothing but a Python interpreter -- so the choice is between
+    writing the environment in at build time and keeping a second copy of it here. A second copy
+    drifts, and a drift between these two is the worst kind: both halves look right, and the task
+    grades a submission on output the reference only produced under different surroundings.
+
+    Measured before this existed: 145 of 150 tasks refused at `does-not-reproduce-in-its-own-image`
+    matched exactly one or two of the four graded channels, which is what a whole channel failing on
+    every scenario looks like rather than anything about the material.
+    """
+    from ..observe.process.runner import INHERITED_ENV, SUBJECT_ENV
+
+    return (_PROCESS_VERIFIER
+            .replace("__SUBJECT_ENV__", repr(dict(SUBJECT_ENV)))
+            .replace("__INHERITED_ENV__", repr(tuple(INHERITED_ENV))))
 
 
 def _has_go_main(root: str) -> bool:
