@@ -350,6 +350,14 @@ Description: {description}
 {framing}
 {build_info}{entry_info}
 
+IMPORTANT CONTEXT ABOUT VERIFICATION:
+- The harness grades the submission automatically by running the frozen test suite — the agent \
+does NOT need to run the verifier manually.
+- In the ## Build & Test section, provide: (1) the build command to compile/prepare the project, \
+and (2) how the agent can do a quick self-check using the project's own test suite or a sample run \
+— this is for the agent's own confidence, not the official grading.
+- Do NOT say "run the verifier" or reference test.sh — the harness does that automatically.
+
 Write a markdown task instruction with EXACTLY these sections, in this order:
 
 # {name}
@@ -358,22 +366,27 @@ Write a markdown task instruction with EXACTLY these sections, in this order:
 
 ## Workspace
 
-(Bullet list of key files and directories in /app the solver will find. Be specific to this task.)
+(Bullet list of key files and directories in /app the solver will find. Be specific — name actual \
+source directories, entry points, and config files relevant to this task. Do not list generic \
+directories like "tests/" since those are off-limits.)
 
 ## Build & Test
 
-(Exact shell commands to build the project and run the verifier. Use fenced code blocks for \
-commands.)
+(Two fenced code blocks: first the build command, then a quick self-check command the agent can \
+use to verify their change works — e.g. a unit test run, a sample invocation, or a benchmark. \
+Add one sentence before each block explaining what it does.)
 
 ## Constraints
 
 **What you CAN do**
 
-(Bullet list, specific to this task and its language/form.)
+(Bullet list, specific to this task's language and form. Include useful techniques specific to \
+this language/domain.)
 
 **What you CANNOT do**
 
-(Bullet list, specific to this task and its language/form.)
+(Bullet list, specific to this task. Start with the most important constraint for this particular \
+task, then general rules.)
 
 Do NOT include ## Submission Contract, ## Time Budget, or ## Behavioral Rules sections — \
 those will be appended automatically.
@@ -482,15 +495,20 @@ Project description: {description}
 Rules:
 1. Format: <project>-<specific-aspect>-opt  OR  <project>-<component>-to-<lang>
 2. All lowercase kebab-case, no underscores, no uppercase.
-3. 3–6 words total (counting each hyphen-separated segment as one word).
+3. 3–5 hyphen-separated segments total (e.g. "gofeed-feed-parsing-opt" = 4 segments).
 4. The specific aspect must come from the description — it names WHAT is being optimised or \
 rewritten, not just the project. Do not use generic words like "performance", "speed", \
-"implementation", or "code" as the aspect.
+"implementation", "code", or "project" as the aspect.
 5. Drop generic repository-namespace prefixes like "algorithm-practice-", "hacker-rank-", \
 "leet-code-", "javascript-algorithms-", "java-algorithms-implementation-", \
 "data-structures-and-algorithms-" from the project stem — they describe the repo collection, \
 not this task.
-6. Output ONLY the task name — no explanation, no punctuation, no quotes, no newline.
+6. AVOID REDUNDANCY: if the project stem already contains a word, do not repeat a synonym or \
+inflection of it in the aspect. For example: "app-info-parser" + aspect "parsing" → redundant; \
+use the thing being parsed instead, e.g. "app-info-parser-apk-ipa-opt". Similarly \
+"dbt-extractor" + "extraction" → redundant; use "dbt-extractor-sql-metadata-opt" instead. \
+"tr-lang" + "language" → redundant; use "tr-lang-interpreter-opt" instead.
+7. Output ONLY the task name — no explanation, no punctuation, no quotes, no newline.
 """.format(
         stem=stem,
         description=description or "(no description)",
