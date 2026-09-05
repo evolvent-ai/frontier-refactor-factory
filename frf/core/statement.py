@@ -29,6 +29,7 @@ so the function never returns an empty string or a structurally invalid document
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -243,6 +244,35 @@ def _fallback_instruction(spec) -> str:
     )) + "\n"
 
 
+def _strip_preamble(raw: str, name: str) -> str:
+    """A model's reply -> the document, without whatever it said before starting to write.
+
+    REASONING MODELS NARRATE, and the system prompt asking for "no preamble" does not stop it. Three
+    of four sampled candidates opened with a line like "I'm locating the parser entry point..." and
+    in two of them the narration ran straight into the heading with no newline between, so the
+    document began `...Go layout in /app.# gofeed-rss-atom-opt`. Nothing downstream caught it:
+    `_validate_and_repair` asks only whether each section is PRESENT, and a leaked sentence sitting
+    above `# name` leaves every section present. The task then ships with the model's inner monologue
+    as its first paragraph, which is exactly the tell that separates generated corpora from
+    hand-written ones.
+
+    The document is defined to start at its `# ` heading, so that is where this cuts. The heading is
+    matched at a line start or fused to the end of prose; the task's own name is preferred when it
+    appears, since a Workspace bullet could otherwise mention a `#` and win. A reply with no heading
+    at all is returned unchanged -- it is malformed in some other way, and `_validate_and_repair`
+    should be the one to say so rather than this function silently emptying it.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return text
+    for pattern in (r"(?m)^#\s+%s\s*$" % re.escape(name), r"#\s*%s\b" % re.escape(name),
+                    r"(?m)^#\s+\S", r"#\s+\S"):
+        found = re.search(pattern, text)
+        if found:
+            return text[found.start():].lstrip()
+    return text
+
+
 def _validate_and_repair(text: str, spec) -> str:
     """Ensure every required section is present. Add any missing ones from static templates.
 
@@ -418,6 +448,11 @@ those will be appended automatically.
         return _fallback_instruction(spec)
 
     if not raw or not raw.strip():
+        return _fallback_instruction(spec)
+
+    # The document starts at its heading, not at the model's account of how it got there.
+    raw = _strip_preamble(raw, spec.name)
+    if not raw.strip():
         return _fallback_instruction(spec)
 
     # Append fixed sections that must not be model-written.
