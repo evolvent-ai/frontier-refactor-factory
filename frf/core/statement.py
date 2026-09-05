@@ -508,6 +508,12 @@ inflection of it in the aspect. For example: "app-info-parser" + aspect "parsing
 use the thing being parsed instead, e.g. "app-info-parser-apk-ipa-opt". Similarly \
 "dbt-extractor" + "extraction" → redundant; use "dbt-extractor-sql-metadata-opt" instead. \
 "tr-lang" + "language" → redundant; use "tr-lang-interpreter-opt" instead.
+6a. This applies to COMPOUND stems too — read the stem as the words it is built from, even when \
+they are not hyphenated. "gofeed" is "go"+"feed", so aspect "feed-parsing" repeats "feed"; write \
+"gofeed-rss-atom-opt" instead. "jsode" is "json"+"decode", so "json-parsing" is redundant; name \
+the payload or stage instead. "pyclustering" already carries "clustering". When the stem contains \
+the domain word, the aspect should name the CONCRETE INPUT, FORMAT, or COMPONENT (e.g. "rss-atom", \
+"apk-ipa", "sql-metadata", "save-file", "bytecode") rather than restating the domain.
 7. Output ONLY the task name — no explanation, no punctuation, no quotes, no newline.
 """.format(
         stem=stem,
