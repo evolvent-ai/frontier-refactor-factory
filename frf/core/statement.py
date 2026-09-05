@@ -300,13 +300,20 @@ def generate_instruction(spec) -> str:
     this module does not create a circular dependency at import time.
     """
     from .scale import TaskForm
-    try:
-        from . import model as _model
-        if not _model.available():
-            return _fallback_instruction(spec)
-        return _generate_via_model(spec)
-    except Exception:                                   # noqa: BLE001 -- model errors are expected
+    from . import model as _model
+    if not _model.available():
         return _fallback_instruction(spec)
+    # Two attempts before the static document, matching generate_task_name: a gateway that timed
+    # out once frequently answers the retry, and a template instruction is a real loss of quality
+    # -- it describes no workspace, no build command and no task-specific constraint.
+    for attempt in (0, 1):
+        try:
+            return _generate_via_model(spec)
+        except Exception:                               # noqa: BLE001 -- model errors are expected
+            if attempt == 0:
+                continue
+            return _fallback_instruction(spec)
+    return _fallback_instruction(spec)
 
 
 def _generate_via_model(spec) -> str:
@@ -522,7 +529,8 @@ the domain word, the aspect should name the CONCRETE INPUT, FORMAT, or COMPONENT
         examples=_NAME_EXAMPLES,
     )
 
-    raw = _model.ask(prompt, system="Output only the task name, nothing else.", temperature=0.1)
+    raw = _model.ask(prompt, system="Output only the task name, nothing else.", temperature=0.1,
+                     timeout=_NAME_TIMEOUT)
     name = raw.strip().lower().strip('"\'`').strip()
     # Basic sanity: must look like kebab-case, no spaces, no capital letters
     if not name or " " in name or name != name.lower() or len(name) < 4 or len(name) > 80:
@@ -530,34 +538,95 @@ the domain word, the aspect should name the CONCRETE INPUT, FORMAT, or COMPONENT
     return name
 
 
-def generate_task_name(identity: str, description: str,
-                        target_language: str = "") -> str:
-    """Generate a high-quality task name using the LLM.
+def _kebab(text: str) -> str:
+    """Lower kebab-case with camel humps split. Same rule the scales' _slug applies."""
+    out = []
+    raw = str(text)
+    for index, char in enumerate(raw):
+        if char in "_. /":
+            out.append("-")
+            continue
+        if char.isupper() and index and (raw[index - 1].islower() or raw[index - 1].isdigit()):
+            out.append("-")
+        out.append(char.lower())
+    joined = "".join(ch for ch in "".join(out) if ch.isalnum() or ch == "-")
+    while "--" in joined:
+        joined = joined.replace("--", "-")
+    return joined.strip("-")
 
-    Tries twice before falling back to a cleaned stem + '-opt'/'-to-<lang>'.
-    The fallback exists only so the pipeline never crashes; quality names come
-    from the two model attempts.
+
+def _apply_suffix(name: str, suffix: str) -> str:
+    """Force `name` to end in exactly one `-<suffix>`, dropping any action word the model added."""
+    name = name.strip("-")
+    for tail in ("-opt", "-optimization", "-optimisation", "-perf", "-faster", "-rewrite"):
+        if name.endswith(tail):
+            name = name[: -len(tail)]
+            break
+    if suffix.startswith("to-"):
+        # A cross-language model answer may already carry '-to-rust'; strip before re-appending.
+        marker = "-" + suffix
+        if name.endswith(marker):
+            name = name[: -len(marker)]
+    return "%s-%s" % (name.strip("-"), suffix)
+
+
+# One name is not worth a nine-minute stall. The default FRF_LLM_TIMEOUT is 900s and naming runs
+# once per CANDIDATE -- including the ones later refused -- so at the default a batch could spend
+# half an hour of wall clock on names for tasks that never ship. Gateway timeouts were already the
+# largest single our-fault refusal reason measured in this pipeline; a short deadline here keeps
+# naming from adding to it, because the deterministic stem name is a perfectly serviceable answer.
+_NAME_TIMEOUT = 120.0
+
+
+def generate_task_name(identity: str, description: str,
+                        target_language: str = "", symbol: str = "") -> str:
+    """A task name: readable, unique, and ending in the action this task asks for.
+
+    Suffix is uniform across all four scales -- `-opt` for an inplace optimisation, `-to-<lang>`
+    for a cross-language rewrite -- so a corpus does not spell the same intent three ways.
+
+    UNIQUENESS IS STRUCTURAL, NOT HOPED FOR. The repository stem always leads the name, because
+    hundreds of repositories contain a `sort` or a `parse` and a model asked for a name for one of
+    them cannot know about the others. Emitting two `checksum-function-opt` directories would make
+    the second overwrite the first, and an audit keyed on (scale, name, language) would count the
+    pair once. When `symbol` is given -- kernel and module, where one repository yields many tasks
+    -- the symbol is part of the anchor too, and no model is consulted at all: the symbol already
+    names what is being optimised, so `g6-measure-text-opt` is both descriptive and derived, and a
+    resumed run reproduces it exactly.
+
+    Only repo and package scale consult the model, and only for the middle of the name. Two
+    attempts, then the deterministic stem name -- which is also what an empty description gets,
+    since a model with nothing to read cannot beat it.
 
     Args:
-        identity: material identity string (e.g. 'github:owner/repo@commit')
-        description: human-readable description of the project/package
+        identity: material identity (e.g. 'github:owner/repo@commit')
+        description: human-readable description of the project
         target_language: non-empty for cross-language rewrite tasks
+        symbol: the function/method under test, for kernel and module scale
     """
     from . import model as _model
 
-    is_cross = bool(target_language) and target_language.lower() != "same"
     stem = _stem_from_identity(identity)
-    fallback = ("%s-to-%s" % (stem, target_language.lower())) if is_cross else ("%s-opt" % stem)
+    is_cross = bool(target_language) and target_language.lower() != "same"
+    suffix = ("to-%s" % _kebab(target_language)) if is_cross else "opt"
 
-    if not _model.available():
-        return fallback
+    if symbol:
+        return "%s-%s-%s" % (stem, _kebab(symbol), suffix)
 
-    for attempt in range(2):
+    anchored = "%s-%s" % (stem, suffix)
+    if not (description or "").strip() or not _model.available():
+        return anchored
+
+    for attempt in (0, 1):
         try:
-            return _try_generate_name(identity, description, target_language, is_cross)
+            name = _try_generate_name(identity, description, target_language, is_cross)
         except Exception:                               # noqa: BLE001
             if attempt == 0:
-                continue        # one retry
-            return fallback     # both attempts failed — use cleaned stem
+                continue
+            return anchored
+        name = _kebab(name)
+        if not (name == stem or name.startswith(stem + "-")):
+            name = "%s-%s" % (stem, name)
+        return _apply_suffix(name, suffix)
 
-    return fallback
+    return anchored

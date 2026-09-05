@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 
 from ..core import integrity
 from ..core.scale import Candidate, Spec, TaskForm
+from ..core.statement import generate_task_name
 from ..observe.call.perturb import MUTATION_ATTEMPTS, mutate
 from ..observe import coverage
 from ..observe.call import shims
@@ -389,10 +390,12 @@ class Module:
         # every task after the first describing material it was not built from.
         self._built = None
         material = self._material
-        return Spec(name=_task_name(material), scale=self.name, language=material.language,
+        target_language = getattr(self, "_target_language", "")
+        return Spec(name=_task_name(material, target_language), scale=self.name,
+                    language=material.language,
                     description=material.description,
                     invoke=["serve", material.symbol], entry=material.symbol,
-                    target_language=getattr(self, "_target_language", ""),
+                    target_language=target_language,
                     task_form=task_form,
                     environment={"subject_path": os.path.join(
                                      self._workspace, shims.load(material.language).subject),
@@ -477,15 +480,20 @@ def _slug(text: str) -> str:
     return joined.strip("-")
 
 
-def _task_name(material: Material) -> str:
-    """Stable and collision-free: repository slug plus symbol.
+def _task_name(material: Material, target_language: str = "") -> str:
+    """Stable and collision-free: repository slug, symbol, and the action asked for.
 
     The symbol alone is not a valid task identity: hundreds of repositories contain `sort` or
     `parse`, and emitting them into one directory would overwrite an earlier task.
+
+    The trailing action word is what repo and package scale also end in -- `-opt` for an inplace
+    optimisation, `-to-<lang>` for a cross-language rewrite -- so one corpus does not spell the
+    same intent two ways depending on which scale produced the task. No model is consulted: the
+    symbol already names what is being optimised, and a derived name is reproduced exactly by a
+    resumed run.
+
+    `target_language` is passed in rather than read off `material`: the target is a property of the
+    RUN, not of the harvested symbol, and it lives on the scale object.
     """
-    identity = material.identity
-    if identity.startswith("github:"):
-        rest = identity[len("github:"):].split("@", 1)[0]
-        repo = rest.rsplit("/", 1)[-1]
-        return "%s-%s" % (_slug(repo), _slug(material.symbol))
-    return _slug(material.symbol)
+    return generate_task_name(material.identity, material.description or "",
+                              target_language, symbol=material.symbol)
