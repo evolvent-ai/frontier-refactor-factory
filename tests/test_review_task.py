@@ -79,3 +79,24 @@ def test_disjoint_frozen_timing_partition_has_no_contradiction(tmp_path):
         'graded': [{'probe_id': 'one'}], 'timed': ['two'],
         'timed_expectations': {'two': 'digest'}}))
     assert contract_findings(tmp_path, {'scale': 'module'}) == []
+
+
+@pytest.mark.parametrize('where,token', [('instruction.md', '{ROOT}'), ('task.toml', '{PROGRAM}')])
+def test_review_rejects_a_harness_token_left_in_a_shipped_file(tmp_path, where, token):
+    """The corpus shipped these and nothing looked, so the check is on the artifact.
+
+    `{PROGRAM}` and `{ROOT}` belong to the runner, which substitutes whichever binary and directory
+    it is driving. A solver reading `Commands exercised: {PROGRAM}.` -- which is what all 25 repo
+    tasks in the last corpus said -- learns nothing about what the task runs.
+
+    Both files are checked because the leak landed in both: the instruction carried `{ROOT}/program`
+    under "Observed invocation", and `task.toml`'s description carried `{PROGRAM}`. A generator
+    fixed for one is not fixed for the other.
+    """
+    _task(tmp_path)
+    path = tmp_path / where
+    path.write_text(path.read_text() + '\n# runs ' + token + ' twice: ' + token + '\n')
+    report = review(str(tmp_path))
+    assert not report['ok'], report
+    assert {'kind': 'unsubstituted-placeholder', 'path': where, 'tokens': [token]} \
+        in report['findings'], report['findings']

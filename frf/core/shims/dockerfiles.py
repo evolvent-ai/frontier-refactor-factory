@@ -103,7 +103,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "rustc --version",
     },
     "c": {
-        "base_image": "debian:bookworm-slim",
+        "base_image": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
         # CMake is the build system the repo scale's discovery now finds in subdirectories; without
         # it, a library with a CLI in examples/ refused as "reference-will-not-build" with
         # `cmake: command not found` -- the discovery worked and the TOOLCHAIN was absent.
@@ -115,7 +115,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "gcc --version",
     },
     "cpp": {
-        "base_image": "debian:bookworm-slim",
+        "base_image": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
         "apt_packages": ["g++", "libc6-dev", "make", "cmake"],
         "install_cmds": [],
         "copy_from_image": None,
@@ -124,14 +124,14 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "g++ --version",
     },
     "java": {
-        "base_image": "eclipse-temurin:21-jdk-jammy",
+        "base_image": "eclipse-temurin:21-jdk-jammy@sha256:ce5767b7222312d42395f5bab033cd91f09e44032a2f21bdfd7b5b912dbe1e77",
         # Temurin ships the JDK but NOT Maven. The repo scale's pom.xml entry point build runs
         # `mvn package`, so a missing mvn was refusing every Maven candidate with
         # `mvn: command not found` -- reported as `reference-will-not-build (material)`, which
         # attributed our missing toolchain to the candidate.
         "apt_packages": ["maven"],
         "install_cmds": [],
-        "copy_from_image": "eclipse-temurin:21-jdk-jammy",
+        "copy_from_image": "eclipse-temurin:21-jdk-jammy@sha256:ce5767b7222312d42395f5bab033cd91f09e44032a2f21bdfd7b5b912dbe1e77",
         "copy_from_paths": [
             ("/opt/java/openjdk", "/opt/java/openjdk"),
         ],
@@ -142,7 +142,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "java --version",
     },
     "javascript": {
-        "base_image": "node:22-bookworm-slim",
+        "base_image": "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5",
         "apt_packages": [],
         # node slim ships npm but NOT the other package managers, and a JS/TS monorepo usually
         # declares one: `pnpm install` failed with `pnpm: not found` on a real repo/ts batch, and
@@ -169,7 +169,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "install_cmds": [
             "npm install -g --force pnpm@9.12.3 yarn@1.22.22 bun@1.1.38",
         ],
-        "copy_from_image": "node:22-bookworm-slim",
+        "copy_from_image": "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5",
         "copy_from_paths": [
             ("/usr/local/bin/node", "/usr/local/bin/node"),
             ("/usr/local/bin/npm", "/usr/local/bin/npm"),
@@ -180,7 +180,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "node --version",
     },
     "typescript": {
-        "base_image": "node:22-bookworm-slim",
+        "base_image": "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5",
         "apt_packages": [],
         # Same as javascript above: a TS monorepo declares a package manager, and node slim carries
         # only npm. `pnpm: not found` and `bun: not found` accounted for most of one repo/ts batch's
@@ -191,7 +191,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "install_cmds": [
             "npm install -g --force typescript@5.6.3 pnpm@9.12.3 yarn@1.22.22 bun@1.1.38",
         ],
-        "copy_from_image": "node:22-bookworm-slim",
+        "copy_from_image": "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5",
         "copy_from_paths": [
             ("/usr/local/bin/node", "/usr/local/bin/node"),
             ("/usr/local/bin/npm", "/usr/local/bin/npm"),
@@ -202,14 +202,14 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "tsc --version",
     },
     "ruby": {
-        "base_image": "ruby:3.3-slim-bookworm",
+        "base_image": "ruby:3.3-slim-bookworm@sha256:df209d82bb55aeb26b9b08922ee22c15f19b3458455690132dc07a5c52dc1c99",
         # ruby slim ships ruby and gem but NOT bundler, so a gemspec entry point's `bundle install`
         # failed with `bundle: not found` on every Ruby candidate -- misreported as
         # `reference-will-not-build (material)`. bundler is a Debian package; apt is the most
         # reliable install here (gem install needs network at image build time).
         "apt_packages": ["ruby-bundler"],
         "install_cmds": [],
-        "copy_from_image": "ruby:3.3-slim-bookworm",
+        "copy_from_image": "ruby:3.3-slim-bookworm@sha256:df209d82bb55aeb26b9b08922ee22c15f19b3458455690132dc07a5c52dc1c99",
         "copy_from_paths": [
             ("/usr/local/bin/ruby", "/usr/local/bin/ruby"),
             ("/usr/local/bin/gem", "/usr/local/bin/gem"),
@@ -219,10 +219,10 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "ruby --version",
     },
     "swift": {
-        "base_image": "swift:5.10",
+        "base_image": "swift:5.10@sha256:ffc42e399ad0cad324f68d58f65e4d5f2c22eb9df73c4dfa249e898d497254b3",
         "apt_packages": [],
         "install_cmds": [],
-        "copy_from_image": "swift:5.10",
+        "copy_from_image": "swift:5.10@sha256:ffc42e399ad0cad324f68d58f65e4d5f2c22eb9df73c4dfa249e898d497254b3",
         "copy_from_paths": [
             ("/usr/bin/swift", "/usr/bin/swift"),
             ("/usr/bin/swiftc", "/usr/bin/swiftc"),
@@ -232,7 +232,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "swift --version",
     },
     "kotlin": {
-        "base_image": "eclipse-temurin:21-jdk-jammy",
+        "base_image": "eclipse-temurin:21-jdk-jammy@sha256:ce5767b7222312d42395f5bab033cd91f09e44032a2f21bdfd7b5b912dbe1e77",
         "apt_packages": ["unzip"],
         "install_cmds": [
             # Download kotlinc zip from the official GitHub releases mirror
@@ -251,7 +251,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
     "scala": {
         # JDK base + Scala3 zip. When scala is a cross-language target, we also need JDK
         # (apt_packages includes default-jdk so it installs on any Debian/Ubuntu base).
-        "base_image": "eclipse-temurin:21-jdk-jammy",
+        "base_image": "eclipse-temurin:21-jdk-jammy@sha256:ce5767b7222312d42395f5bab033cd91f09e44032a2f21bdfd7b5b912dbe1e77",
         "apt_packages": ["unzip", "curl", "default-jdk"],
         "install_cmds": [
             "curl -fsSL https://github.com/scala/scala3/releases/download/3.3.4/scala3-3.3.4.zip"
@@ -267,10 +267,10 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "scala --version",
     },
     "haskell": {
-        "base_image": "haskell:9.8",
+        "base_image": "haskell:9.8@sha256:ed21f5c111bcdaff2350b5d9efe66345868e8e0dfd9bd5e570ba43a2f6b755ff",
         "apt_packages": ["libgmp-dev"],
         "install_cmds": [],
-        "copy_from_image": "haskell:9.8",
+        "copy_from_image": "haskell:9.8@sha256:ed21f5c111bcdaff2350b5d9efe66345868e8e0dfd9bd5e570ba43a2f6b755ff",
         "copy_from_paths": [
             ("/usr/local/bin/ghc", "/usr/local/bin/ghc"),
             ("/usr/local/bin/cabal", "/usr/local/bin/cabal"),
@@ -280,7 +280,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "ghc --version",
     },
     "lua": {
-        "base_image": "debian:bookworm-slim",
+        "base_image": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
         "apt_packages": ["lua5.4"],
         "install_cmds": [],
         "copy_from_image": None,
@@ -289,10 +289,10 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "lua5.4 -v",
     },
     "perl": {
-        "base_image": "perl:5.38-slim",
+        "base_image": "perl:5.38-slim@sha256:f114b242eda1ade24b19e6f6b02f0808175e25cf371e801879088bf1ea5ec41f",
         "apt_packages": [],
         "install_cmds": [],
-        "copy_from_image": "perl:5.38-slim",
+        "copy_from_image": "perl:5.38-slim@sha256:f114b242eda1ade24b19e6f6b02f0808175e25cf371e801879088bf1ea5ec41f",
         "copy_from_paths": [
             ("/usr/local/bin/perl", "/usr/local/bin/perl"),
             ("/usr/local/lib/perl5", "/usr/local/lib/perl5"),
@@ -301,7 +301,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "perl --version",
     },
     "r": {
-        "base_image": "r-base:4.4.1",
+        "base_image": "r-base:4.4.1@sha256:e7032f2f6fd273ee944a717b436bc66d1a89b1b90a9bbcaafcf1318d68a7d8b2",
         "apt_packages": ["r-base"],
         "install_cmds": [],
         "copy_from_image": None,
@@ -310,10 +310,10 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "R --version",
     },
     "julia": {
-        "base_image": "julia:1.10-bookworm",
+        "base_image": "julia:1.10-bookworm@sha256:6b2f2be23331f8977f8845912667bf6cf9c700e7857558188b6eb44f73eef8d0",
         "apt_packages": [],
         "install_cmds": [],
-        "copy_from_image": "julia:1.10-bookworm",
+        "copy_from_image": "julia:1.10-bookworm@sha256:6b2f2be23331f8977f8845912667bf6cf9c700e7857558188b6eb44f73eef8d0",
         "copy_from_paths": [
             ("/usr/local/julia", "/usr/local/julia"),
         ],
@@ -323,7 +323,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "julia --version",
     },
     "zig": {
-        "base_image": "debian:bookworm-slim",
+        "base_image": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
         "apt_packages": ["xz-utils"],
         "install_cmds": [
             "curl -sSfL"
@@ -340,7 +340,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         # nim is not in Debian bookworm apt; choosenim requires GLIBC_2.33+ which is not
         # available on all base images (e.g. haskell:9.8 uses Debian bullseye, glibc 2.31).
         # Use the prebuilt linux_x64 tarball directly from nim-lang.org instead.
-        "base_image": "debian:bookworm-slim",
+        "base_image": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
         "apt_packages": ["xz-utils"],
         "install_cmds": [
             "curl -fsSL https://nim-lang.org/download/nim-2.0.8-linux_x64.tar.xz"
@@ -355,7 +355,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
     },
     "crystal": {
         # crystal 1.x is not in Debian apt; install from official apt repo
-        "base_image": "crystallang/crystal:1.13",
+        "base_image": "crystallang/crystal:1.13@sha256:b53e39eaaecf4f37c869f8ed6e921cef9538af9673814936c4659b6331dbc730",
         "apt_packages": [],
         "install_cmds": [
             "curl -fsSL https://crystal-lang.org/install.sh | bash",
@@ -367,7 +367,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
     },
     "elixir": {
         # COPY --from cannot replicate dynamic linker setup; apt handles all deps correctly
-        "base_image": "elixir:otp-27",
+        "base_image": "elixir:otp-27@sha256:621407dc8c11b1b41085ee2110e6aeac02ad6f095f435f18e9360c921c1762d8",
         "apt_packages": ["elixir", "erlang-dev"],
         "install_cmds": [],
         "copy_from_image": None,
@@ -377,7 +377,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
     },
     "erlang": {
         # COPY --from cannot replicate dynamic linker setup; apt handles all deps correctly
-        "base_image": "erlang:27-slim",
+        "base_image": "erlang:27-slim@sha256:1c44bae8c4828ae9d1e967a3c89cc1fbf99375352d4c495f1bfc3d5b5e5c8b31",
         "apt_packages": ["erlang-nox"],
         "install_cmds": [],
         "copy_from_image": None,
@@ -390,7 +390,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
     "ocaml": {
         # ocaml/opam image runs as opam user; needs_root=True emits USER root before apt-get.
         # ocaml is in Debian apt and works for both inplace and cross-language targets.
-        "base_image": "ocaml/opam:debian-12-ocaml-5.2",
+        "base_image": "ocaml/opam:debian-12-ocaml-5.2@sha256:75f025a97cff126b1f3f0b23a5cbaa584df05e634a7ce5836d520852afdc0ec5",
         "apt_packages": ["ocaml"],
         "install_cmds": [],
         "copy_from_image": None,
@@ -400,10 +400,10 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "ocaml --version",
     },
     "fsharp": {
-        "base_image": "mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim",
+        "base_image": "mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim@sha256:bb32ba3ba3ea36e38572d9d8db76fa15f7cbf722f3f886e06bca6d528bd4fba8",
         "apt_packages": [],
         "install_cmds": [],
-        "copy_from_image": "mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim",
+        "copy_from_image": "mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim@sha256:bb32ba3ba3ea36e38572d9d8db76fa15f7cbf722f3f886e06bca6d528bd4fba8",
         "copy_from_paths": [
             ("/usr/share/dotnet", "/usr/share/dotnet"),
         ],
@@ -414,10 +414,10 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "dotnet fsi --version",
     },
     "csharp": {
-        "base_image": "mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim",
+        "base_image": "mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim@sha256:bb32ba3ba3ea36e38572d9d8db76fa15f7cbf722f3f886e06bca6d528bd4fba8",
         "apt_packages": [],
         "install_cmds": [],
-        "copy_from_image": "mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim",
+        "copy_from_image": "mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim@sha256:bb32ba3ba3ea36e38572d9d8db76fa15f7cbf722f3f886e06bca6d528bd4fba8",
         "copy_from_paths": [
             ("/usr/share/dotnet", "/usr/share/dotnet"),
         ],
@@ -429,7 +429,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
     },
     # Shell variants: used by process-seam tasks whose language is "sh" or "bash".
     "sh": {
-        "base_image": "debian:bookworm-slim",
+        "base_image": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
         "apt_packages": ["bash"],
         "install_cmds": [],
         "copy_from_image": None,
@@ -438,7 +438,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "bash --version",
     },
     "bash": {
-        "base_image": "debian:bookworm-slim",
+        "base_image": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
         "apt_packages": ["bash"],
         "install_cmds": [],
         "copy_from_image": None,
@@ -447,7 +447,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         "verify_cmd": "bash --version",
     },
     "shell": {
-        "base_image": "debian:bookworm-slim",
+        "base_image": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
         "apt_packages": ["bash"],
         "install_cmds": [],
         "copy_from_image": None,

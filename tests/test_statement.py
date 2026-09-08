@@ -192,3 +192,41 @@ def test_a_cross_language_spec_asks_for_a_reimplementation():
         invoke=["serve", "f"], entry="f"))
     assert "Reimplement" not in same, same
     assert "faster" in same, same
+
+
+def test_harness_substitution_tokens_never_reach_the_solver():
+    """`{PROGRAM}` and `{ROOT}` are vocabulary for the runner, not for a reader.
+
+    The runner fills them with whichever binary and directory it is driving -- that neutrality is
+    what lets one scenario corpus time the reference and grade a candidate. A solver has neither:
+    there is no `{ROOT}` in their workspace, so the one sentence naming the command a repo task
+    actually runs told them nothing.
+
+    Measured: all 25 repo tasks in the last shipped corpus carried `Commands exercised: {PROGRAM}.`,
+    and the newest repo run still emitted `Observed invocation: {ROOT}/program` in its instruction
+    and `{PROGRAM}` in `task.toml`'s description. Neither the test suite nor the static review
+    checked for it, which is why it survived a full corpus and a rewrite of the generator.
+
+    The facts block is checked directly here because it is the one section rendered from measured
+    values rather than model prose; `_validate_and_repair` makes the same pass over the whole
+    document, so a token arriving through the prompt or a fallback section is caught as well.
+    """
+    from frf.core.statement import _task_facts, _validate_and_repair
+    from frf.core.scale import Spec
+
+    spec = Spec(name="tool-opt", scale="repo", language="go", description="x",
+                invoke=["{ROOT}/program"],
+                environment={"instruction_context": {
+                    "build_commands": ["go build -o {ROOT}/program ."],
+                    "preparation_commands": ["cp {ROOT}/fixtures/in.txt ."],
+                    "interface": "The evaluator runs {PROGRAM} with the original arguments."}})
+
+    facts = _task_facts(spec)
+    assert "{ROOT}" not in facts and "{PROGRAM}" not in facts, facts
+    # Substituted, not dropped: the fact itself must survive.
+    assert "/app/program" in facts, facts
+    assert "go build -o /app/program ." in facts, facts
+
+    leaked = _validate_and_repair("# t\n\nThe evaluator runs {PROGRAM} inside {ROOT}.\n", spec)
+    assert "{ROOT}" not in leaked and "{PROGRAM}" not in leaked, leaked
+    assert "/app/run.sh" in leaked, leaked

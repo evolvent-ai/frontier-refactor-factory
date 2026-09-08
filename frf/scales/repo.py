@@ -42,6 +42,24 @@ from ..observe.process.runner import Scenario, run_scenario
 # same scenario can drive the reference and a candidate without either being named in the corpus.
 PROGRAM = "{PROGRAM}"
 
+# What the solver's copy of the workspace calls the same two things. `{PROGRAM}` and `{ROOT}` are
+# runner vocabulary: the runner swaps them for whichever binary and directory it is driving, which
+# is the whole point of keeping the corpus neutral between reference and candidate.
+#
+# THEY MUST NOT SURVIVE INTO ANYTHING A SOLVER READS. Measured: all 25 repo tasks in the last corpus
+# shipped an instruction saying `Commands exercised: {PROGRAM}.`, and the newest repo run still put
+# it in `task.toml`'s description. A reader has no way to resolve that -- there is no {PROGRAM} in
+# their workspace -- so the one sentence naming what the task actually runs told them nothing.
+_SOLVER_TOKENS = (("{PROGRAM}", "/app/run.sh"), ("{ROOT}", "/app"))
+
+
+def solver_text(text: str) -> str:
+    """Runner vocabulary rewritten as the paths the solver will actually find."""
+    for token, actual in _SOLVER_TOKENS:
+        text = text.replace(token, actual)
+    return text
+
+
 # How long the project's own build may take. Generous: a real repository with native dependencies
 # takes minutes. Bounded, so a build that will never finish cannot hold a batch.
 BUILD_TIMEOUT = 1800.0
@@ -1758,7 +1776,8 @@ for name, target in scripts.items():
         # back into the statement so a solver can see what is actually exercised instead of only
         # receiving the repository's broad README description.
         fixtures = sorted({str(s.fixture) for s in scenarios if s.fixture})
-        commands = sorted({str(step.argv[0]) for s in scenarios for step in s.steps if step.argv})
+        commands = sorted({solver_text(str(step.argv[0]))
+                           for s in scenarios for step in s.steps if step.argv})
         detail = ("\n\nThe selected workload contains %d scenario(s). Commands exercised: %s. "
                   "Input fixtures: %s. Preserve exit status, standard output/error, and produced "
                   "files for these repository-owned cases." %

@@ -47,6 +47,16 @@ def review(root: str) -> dict:
         findings.append({'kind': 'invalid-task-name'})
     if title.startswith("# ") and title[2:].strip() == task_slug:
         findings.append({"kind": "title-is-slug"})
+    # Harness substitution tokens that escaped into what a solver reads. The runner fills these with
+    # whichever binary and directory it is driving; a reader has neither, so the sentence naming the
+    # command a task runs resolves to nothing. Checked against the SHIPPED files rather than the
+    # generator, because that is where the last corpus went wrong: 25 of 25 repo tasks said
+    # `Commands exercised: {PROGRAM}.` and no gate looked.
+    for where, text in (("instruction.md", instruction), ("task.toml", task)):
+        leaked = sorted(set(re.findall(r"\{(?:PROGRAM|ROOT)\}", text)))
+        if leaked:
+            findings.append({"kind": "unsubstituted-placeholder", "path": where,
+                             "tokens": leaked})
     scale = metadata.get("scale", "")
     if not scale and "/" in task_name:
         scale = task_name.split("/", 1)[0]

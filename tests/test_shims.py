@@ -149,3 +149,64 @@ def test_a_go_subject_may_resolve_its_dependencies():
     assert "GOPROXY=off" not in argv, argv
     assert "GOSUMDB=off" in argv, \
         "the checksum database is a second network dependency; the proxy already pins by hash"
+
+
+def test_every_base_image_is_pinned_by_digest():
+    """A tag is a moving target, and a benchmark that moves is not a measurement.
+
+    `golang:1.26-bookworm` today and `golang:1.26-bookworm` in six months are different images:
+    the tag is republished for security updates, and the frozen expectations were captured against
+    whichever one happened to be current. A third party who reruns this benchmark after a rebuild
+    would be scoring a submission against an answer key produced by a different toolchain, and
+    would have no way to know that is what happened.
+
+    Measured before this was enforced: 0 of 100 shipped tasks carried a digest, across 7 distinct
+    base images. Three of 28 languages had been pinned by hand; the other 25 were tags.
+    """
+    from frf.core.shims.dockerfiles import _LANGUAGE_SETUP
+
+    unpinned = [(language, field, image)
+                for language, setup in sorted(_LANGUAGE_SETUP.items())
+                for field in ("base_image", "copy_from_image")
+                for image in [setup.get(field)]
+                if image and "@sha256:" not in image]
+    assert not unpinned, "unpinned base image(s): %s" % unpinned
+
+
+def test_no_generated_dockerfile_leaves_the_candidate_as_root():
+    """Root in the workspace lets a submission edit the toolchain that measures it.
+
+    The answer key is not in this container -- the build context is `environment/`, so `COPY . /app`
+    cannot reach `tests/` -- which makes this less urgent than it looks, and is not a reason to hand
+    out the privilege. A candidate running as root can rewrite the interpreter, the timing harness,
+    or anything else the image ships.
+
+    Measured before this was enforced: 10 of 100 shipped tasks had no `USER` at all, spread across
+    kernel, module and package. The gap was per-language rather than uniform, which is exactly the
+    shape a single unconditional emission fixes and a per-language one does not.
+
+    Both forms are checked. `inplace` and `cross` take different paths through the emitter -- cross
+    layers a target toolchain over somebody else's base, and that is where an extra `USER root`
+    could be left standing at the end.
+    """
+    from frf.core.harbor import dockerfile_for
+    from frf.core.shims.dockerfiles import _LANGUAGE_SETUP
+
+    languages = sorted(_LANGUAGE_SETUP)
+    targets = [name for name, setup in _LANGUAGE_SETUP.items() if setup.get("copy_from_image")]
+    pairs = [(language, "") for language in languages]
+    pairs += [(source, target) for source in languages for target in sorted(targets)
+              if target != source]
+
+    wrong = []
+    for source, target in pairs:
+        text = dockerfile_for(source, target)
+        users = [line.strip() for line in text.splitlines() if line.startswith("USER ")]
+        if not users or users[-1] != "USER nobody":
+            wrong.append((source, target or "inplace", users[-1:] or ["no USER at all"]))
+        unpinned = [line for line in text.splitlines()
+                    if line.startswith("FROM ") and "@sha256:" not in line]
+        if unpinned:
+            wrong.append((source, target or "inplace", unpinned))
+    assert not wrong, "%d of %d language pairs emit a bad Dockerfile: %s" % (
+        len(wrong), len(pairs), wrong[:5])

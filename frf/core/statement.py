@@ -167,6 +167,26 @@ def _grading_signals(spec) -> str:
             "the frozen reference. Task-specific grading details are available after freezing.")
 
 
+# Substitution tokens a runner uses to stay neutral between the reference and a candidate: it fills
+# them with whichever binary and directory it is driving. They are vocabulary for the harness, not
+# for a reader -- there is no `{ROOT}` in anyone's workspace -- so a statement that repeats one has
+# told the solver nothing about the command it claims to be documenting.
+#
+# Measured: every repo task in the last corpus shipped `Commands exercised: {PROGRAM}.`, and the
+# newest repo run still emitted `Observed invocation: {ROOT}/program`.
+#
+# This substitutes rather than rejects. The facts block is the one place the true invocation is
+# stated, and dropping the line to avoid a placeholder would remove the fact instead of fixing it.
+_SOLVER_PATHS = (("{ROOT}", "/app"), ("{PROGRAM}", "/app/run.sh"))
+
+
+def _solver_paths(text: str) -> str:
+    """Harness substitution tokens rewritten as the paths the solver will actually find."""
+    for token, actual in _SOLVER_PATHS:
+        text = text.replace(token, actual)
+    return text
+
+
 def _task_facts(spec) -> str:
     """The non-negotiable task surface, rendered without asking the model to restate it."""
     from .scale import TaskForm
@@ -185,7 +205,7 @@ def _task_facts(spec) -> str:
         lines.append("* **Entry point:** `%s`" % spec.entry)
     if spec.invoke:
         label = str(spec.environment.get("invocation_label") or "Observed invocation")
-        lines.append("* **%s:** `%s`" % (label, " ".join(map(str, spec.invoke))))
+        lines.append("* **%s:** `%s`" % (label, _solver_paths(" ".join(map(str, spec.invoke)))))
     operations = tuple(spec.environment.get("entry_points", ()) or ())
     if operations:
         lines.append("* **Declared package operations:** %s"
@@ -197,11 +217,14 @@ def _task_facts(spec) -> str:
     if context.get("deliverables"):
         lines.append("* **Deliverables:** %s" % ", ".join("`%s`" % p for p in context["deliverables"]))
     if context.get("build_commands"):
-        lines.append("* **Build commands:** %s" % "; ".join("`%s`" % c for c in context["build_commands"]))
+        lines.append("* **Build commands:** %s"
+                     % "; ".join("`%s`" % _solver_paths(str(c)) for c in context["build_commands"]))
     if context.get("preparation_commands"):
-        lines.append("* **Preparation commands:** %s" % "; ".join("`%s`" % c for c in context["preparation_commands"]))
+        lines.append("* **Preparation commands:** %s"
+                     % "; ".join("`%s`" % _solver_paths(str(c))
+                                 for c in context["preparation_commands"]))
     if context.get("interface"):
-        lines.append("* **Delivered interface:** %s" % str(context["interface"]))
+        lines.append("* **Delivered interface:** %s" % _solver_paths(str(context["interface"])))
     return "## Task Facts\n\n" + "\n".join(lines)
 
 
@@ -396,7 +419,11 @@ def _validate_and_repair(text: str, spec) -> str:
                         + "\n\n## Constraints\n\n%s\n\n**What you CAN do**\n\n* %s\n\n"
                           "**What you CANNOT do**\n\n* %s\n"
                         % (_scope_guidance(spec), can, cannot))
-    return text
+    # LAST, AND OVER THE WHOLE DOCUMENT. The facts block substitutes its own tokens, but the model
+    # writes the prose sections from a prompt that quotes the same commands, and a fallback section
+    # renders `spec.build` verbatim. Any of those can carry a `{ROOT}` this far. One pass here
+    # covers every path into the document rather than each one separately.
+    return _solver_paths(text)
 
 
 def generate_instruction(spec, facts: Facts | None = None) -> str:
