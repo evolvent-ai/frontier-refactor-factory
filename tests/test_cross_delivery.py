@@ -93,3 +93,71 @@ def test_repo_cross_image_does_not_build_or_copy_source_executable(tmp_path):
     assert (task / 'tests/reference/main.go').exists()
     declaration = json.loads((task / 'tests/environment.json').read_text())
     assert declaration['reference_argv'] == ['/app/program']
+
+
+@pytest.mark.parametrize('scale', ['kernel', 'module', 'package'])
+def test_a_freshly_written_cross_task_carries_no_contract_contradiction(tmp_path, scale):
+    """The four cross findings, asserted against a task this code just wrote.
+
+    `module-cross` and `repo-cross` in the last bundle each carried all four --
+    cross-grader-target-mismatch, cross-workspace-target-mismatch, cross-implementation-missing,
+    cross-reference-runtime-missing -- and the diagnosis was that the cross path was structurally
+    broken. It was not broken for every scale: `kernel-cross` and `package-cross` in the same bundle
+    were clean. What the failing artifacts had in common is an `environment/` holding `serve.py` and
+    `subject.py`, i.e. a Python workspace on a `-to-rust` task, because no target scaffold had been
+    written at all.
+
+    All three call-seam scales reach `write_target_workspace` through one function, so this asserts
+    the contract checker on freshly written output rather than inferring from the shared call site.
+    The old artifacts cannot answer the question: they predate the repair, and auditing stale output
+    is what produced the wrong diagnosis in the first place.
+    """
+    from frf.observe.artifact_contract import contract_findings
+
+    source = tmp_path / 'upstream.py'
+    source.write_text('def entry(x):\n    return x + 5\n')
+    material = Material('synthetic://cross', 'python', str(source), 'entry', 'integration fixture',
+                        Schema([Param('int')]))
+    spec = Spec('cross-task', scale, 'python', 'integration fixture', target_language='rust',
+                task_form=TaskForm.CROSS_LANGUAGE)
+    corpus = Corpus(expectations=[Expectation('one', Observation(True, 6).digest(), 5)],
+                    inputs={'one': [1]}, timed=['two'], timed_expectations={'two': 'sha256:beef'})
+    task = tmp_path / 'task'
+    (task / 'environment').mkdir(parents=True)
+    (task / 'environment/Dockerfile').write_text('FROM runtime\n')
+    package.write_tests(str(task), corpus, spec=spec, material=material)
+
+    findings = contract_findings(task, {'scale': scale, 'cross_language': True,
+                                        'target_language': 'rust'})
+    cross_kinds = sorted(f['kind'] for f in findings if f['kind'].startswith('cross-'))
+    assert not cross_kinds, cross_kinds
+
+
+def test_a_freshly_written_repo_cross_task_carries_no_contract_contradiction(tmp_path):
+    """The other half of the same claim, on the seam that actually failed.
+
+    `repo-cross` carried the four cross findings in the last bundle, and repo reaches
+    `write_target_workspace` from its own code rather than through the call seam's writer -- so the
+    call-seam assertion above says nothing about it. Written separately for that reason.
+    """
+    from frf.observe.artifact_contract import contract_findings
+    from frf.observe.process.stages import Corpus as ProcessCorpus
+    from frf.scales.repo import Repo, Material as RepoMaterial
+
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'main.go').write_text('package main\nfunc main() {}\n')
+    repo = Repo()
+    repo._material = RepoMaterial('synthetic://repo', 'go', str(source))
+    repo._spec = Spec('cross-repo', 'repo', 'go', 'fixture', target_language='rust',
+                      build=[['go', 'build', '-o', '{ROOT}/program', '.']],
+                      invoke=['{ROOT}/program'], task_form=TaskForm.CROSS_LANGUAGE)
+    task = tmp_path / 'task'
+    (task / 'environment').mkdir(parents=True)
+    (task / 'environment/Dockerfile').write_text('FROM rust:1.90-bookworm\n')
+    repo.write_tests(str(task), ProcessCorpus())
+
+    findings = contract_findings(task, {'scale': 'repo', 'cross_language': True,
+                                        'target_language': 'rust'})
+    cross_kinds = sorted(f['kind'] for f in findings if f['kind'].startswith('cross-'))
+    assert not cross_kinds, cross_kinds
