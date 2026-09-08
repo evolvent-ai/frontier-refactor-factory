@@ -135,7 +135,7 @@ class Factory:
         # ships and drives the verifier inside it, which needs a docker-capable sandbox. A run
         # without one still emits, and records that the check did not run rather than that it held.
         unknown = set(stages) - {"build", "freeze", "adequacy", "battery", "emit", "replay",
-                                 "replay_in_image"}
+                                 "replay_in_image", "execution_evidence"}
         if unknown:
             raise ValueError("unknown stage(s): %s" % ", ".join(sorted(unknown)))
         self._defaults.update(stages)
@@ -401,4 +401,6 @@ class Factory:
         return pipeline.Hooks(build=resolve("build"), freeze=resolve("freeze"),
                               adequacy=resolve("adequacy"), battery=resolve("battery"),
                               emit=resolve("emit"), replay=resolve("replay"),
-                              replay_in_image=in_image)
+                              replay_in_image=in_image,
+                              execution_evidence=(getattr(scale, 'execution_evidence', None)
+                                                  or self._defaults.get('execution_evidence')))

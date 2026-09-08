@@ -1,5 +1,8 @@
 """Deciding whether two returned values are the same answer.
 
+These are general comparison utilities. Delivered numerical tasks use numeric.py's explicit
+absolute/relative contract; the production path does not estimate a higher-precision reference error.
+
 Three strictnesses, and which one applies is a property of the subject rather than a knob to turn
 when a task will not pass.
 

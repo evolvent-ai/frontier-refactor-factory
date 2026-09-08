@@ -127,7 +127,8 @@ def test_the_entry_script_runs_and_writes_the_flat_reward():
             fh.write('''
 import json, os, sys
 json.dump({"reward": 0.42, "correct": True, "correctness_passed": 7,
-           "correctness_total": 7, "speedup": 1.9, "note": "ok"},
+           "correctness_total": 7, "speedup": 1.9, "note": "ok",
+           "timing": {"samples": [1.0, 2.0]}, "timing_valid": True},
           open(os.environ["REWARD_PATH"], "w"))
 sys.exit(0)
 ''')
@@ -146,8 +147,13 @@ sys.exit(0)
         assert result.returncode == 0, result.stderr
 
         flat = json.load(open(os.path.join(logs, "reward.json")))
-        assert flat["reward"] == 0.42 and flat["correct"] is True
+        assert flat["reward"] == 0.42 and flat["correct"] == 1
         assert flat["correctness_passed"] == 7 and flat["speedup"] == 1.9
+        from harbor.models.verifier.result import VerifierResult
+        assert VerifierResult(rewards=flat).rewards['reward'] == 0.42
+        assert 'note' not in flat and 'timing' not in flat
+        detail = json.load(open(os.path.join(logs, 'reward_detail.json')))
+        assert detail['note'] == 'ok' and detail['timing']['samples'] == [1.0, 2.0]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -166,6 +172,9 @@ def test_a_verifier_that_writes_nothing_scores_zero_and_says_which_zero():
             fh.write("import sys\nsys.exit(1)\n")     # writes no report at all
         logs = os.path.join(tmp, "logs", "verifier")
         os.makedirs(logs, exist_ok=True)
+        for name in ('reward.json', 'reward_detail.json'):
+            with open(os.path.join(logs, name), 'w') as handle:
+                json.dump({'reward': 99, 'correct': True}, handle)
         script = open(os.path.join(tests, "test.sh")).read().replace("/logs/verifier", logs)
         run_me = os.path.join(tests, "run_test.sh")
         with open(run_me, "w") as fh:
@@ -177,7 +186,8 @@ def test_a_verifier_that_writes_nothing_scores_zero_and_says_which_zero():
 
         flat = json.load(open(os.path.join(logs, "reward.json")))
         assert flat["reward"] == 0.0
-        assert "no report" in flat["note"], flat["note"]
+        detail = json.load(open(os.path.join(logs, 'reward_detail.json')))
+        assert "no report" in detail["note"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -293,10 +303,12 @@ def test_a_toolchain_is_not_installed_over_its_own_base_image():
         "and it is still needed where rust is a target on another base"
 
     inplace = dockerfile_for("rust", "")
-    assert "rustup" not in inplace and "sh.rustup.rs" not in inplace, inplace
+    assert "RUN rustup" not in inplace and "sh.rustup.rs" not in inplace, inplace
 
     cross = dockerfile_for("python", "rust")
-    assert "sh.rustup.rs" in cross, "a cross-language target must still be fetched"
+    assert "sh.rustup.rs" not in cross, "the target base already contains Rust"
+    assert 'CARGO_HOME=/usr/local/cargo' in cross
+    assert '/root/.cargo/bin' not in cross
 
 
 def test_go_fetches_the_toolchain_its_go_mod_declares():
@@ -312,6 +324,16 @@ def test_go_fetches_the_toolchain_its_go_mod_declares():
 
     assert LANGUAGES["go"]["env"].get("GOTOOLCHAIN") == "auto"
     assert "GOTOOLCHAIN=auto" in dockerfile_for("go", "")
+
+
+def test_cross_language_images_use_the_target_toolchain_as_the_base():
+    from frf.core.harbor import dockerfile_for
+    for source, target in (("python", "rust"), ("go", "python"), ("javascript", "rust")):
+        text = dockerfile_for(source, target)
+        first = next(line for line in text.splitlines() if line.startswith("FROM "))
+        assert target in first.lower(), (source, target, first)
+    assert "python:3.12" not in dockerfile_for("python", "rust")
+    assert "python3 python3-pip python3-venv" in dockerfile_for("python", "rust")
 
 
 def test_the_image_carries_what_a_native_build_links_against():

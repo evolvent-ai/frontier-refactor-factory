@@ -140,29 +140,7 @@ class Scenario:
                    fixture=data.get("fixture"), environment=dict(data.get("environment") or {}))
 
 
-def _tree_lines(root: str, exclude: tuple = ()) -> list:
-    """The directory, as sorted lines. One line per file: mode, size, path.
-
-    Sorted because the order a filesystem lists entries in is not behaviour, and grading it would
-    fail correct submissions on a different filesystem. Content is not hashed here -- the digest of
-    the whole listing is what gets compared, and including per-file hashes would make a change in
-    one file look like a change in the whole tree.
-    """
-    lines = []
-    for base, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in exclude)
-        for name in sorted(files):
-            path = os.path.join(base, name)
-            relative = os.path.relpath(path, root)
-            if any(part in exclude for part in relative.split(os.sep)):
-                continue
-            try:
-                stat = os.stat(path)
-            except OSError:
-                continue
-            executable = "x" if stat.st_mode & 0o111 else "-"
-            lines.append("%s %d %s" % (executable, stat.st_size, relative))
-    return sorted(lines)
+from .snapshot import tree_lines as _tree_lines
 
 
 def _make_output_dirs(workspace: str, argv: list) -> None:
@@ -291,11 +269,7 @@ def time_scenario(scenario: Scenario, program: list, *, repeats: int = 3, **kwar
 def run_remote_many(scenarios: list[Scenario], *, backend, remote_program: list,
                     remote_fixtures: str | None, exclude: tuple = (),
                     timeout: float = DEFAULT_STEP_TIMEOUT) -> dict:
-    """Run a corpus in one sandbox command and pull all snapshots once.
-
-    This is the process-seam equivalent of the call wire's batch transport. Each scenario remains
-    isolated in its own workspace, but network round trips scale with freeze runs rather than probes.
-    """
+    """Run bounded batches remotely, returning observations instead of entire file trees."""
     if len(scenarios) > 8:
         merged = {}
         for start in range(0, len(scenarios), 8):
@@ -305,147 +279,49 @@ def run_remote_many(scenarios: list[Scenario], *, backend, remote_program: list,
                                           timeout=timeout))
         return merged
 
+    import json
+    from pathlib import Path
+    from ...core.sandbox import SandboxError
+    from .remote_driver import standalone_source
     remote_root = "/tmp/frf-corpus-%s" % uuid.uuid4().hex[:12]
-    local = scratch.mkdtemp(prefix="frf-remote-corpus-")
-    results = remote_root + "/results"
-    try:
-        script = ["set +e", "mkdir -p %s" % _shell_quote(results)]
-        joined = " ".join(_shell_quote(x) for x in remote_program)
-        for number, scenario in enumerate(scenarios):
-            workspace = remote_root + "/workspace-%03d" % number
-            base = results + "/%03d" % number
-            script.append("mkdir -p %s %s" % (_shell_quote(workspace), _shell_quote(base)))
-            if scenario.fixture and remote_fixtures:
-                archive = remote_fixtures.rstrip("/") + "/" + scenario.fixture
-                script.append("tar -xf %s -C %s" % (_shell_quote(archive), _shell_quote(workspace)))
-            for index, step in enumerate(scenario.steps):
-                cwd = os.path.normpath(workspace + "/" + step.cwd)
-                if step.argv and step.argv[0] == PROGRAM_TOKEN:
-                    argv = joined + " " + " ".join(_shell_quote(x) for x in step.argv[1:])
-                else:
-                    argv = " ".join(_shell_quote(str(x).replace(PROGRAM_TOKEN, " ".join(remote_program)))
-                                  for x in step.argv)
-                room = base + "/%03d" % index
-                command = "mkdir -p %s %s; " % (_shell_quote(cwd), _shell_quote(room))
-                command += ("printf %s | %s" % (_shell_quote(step.stdin), argv)
-                            if step.stdin is not None else argv)
-                command += " >%s/out 2>%s/err; printf '%%s' $? >%s/code; " % (
-                    _shell_quote(room), _shell_quote(room), _shell_quote(room))
-                command += "mkdir -p %s/tree; cp -a %s/. %s/tree/" % (
-                    _shell_quote(room), _shell_quote(workspace), _shell_quote(room))
-                script.append(command)
-        # Individual commands record their own exit code; a missing fixture or one bad probe must
-        # not make the shell batch's final status look like a factory transport failure.
-        script.append("true")
-        # NOTHING INHERITED HERE. This runs in the sandbox, which has its own `PATH` and `HOME`, and
-        # the SDK layers these on top of them -- so forwarding the factory host's would REPLACE the
-        # ones that find the program with paths like `/root/.vscode-server/...` that do not exist
-        # there.
-        environment = subject_environment()
-        done = backend.run(["sh", "-c", "\n".join(script)], env=environment,
-                           timeout=timeout * max(1, sum(len(s.steps) for s in scenarios)))
-        if not done.ok:
-            raise RuntimeError("remote corpus failed: %s" % done.tail())
-        backend.pull(results, local)
-        answer = {}
-        for number, scenario in enumerate(scenarios):
-            observations = []
-            for index in range(len(scenario.steps)):
-                room = os.path.join(local, "%03d" % number, "%03d" % index)
-                code = int(open(os.path.join(room, "code"), encoding="utf-8").read() or 127)
-                stdout = open(os.path.join(room, "out"), encoding="utf-8", errors="replace").read()
-                stderr = open(os.path.join(room, "err"), encoding="utf-8", errors="replace").read()
-                observations.append(Observation(code, Stream.of(_scrub(stdout, remote_root)),
-                                                Stream.of(_scrub(stderr, remote_root)),
-                                                Stream(tuple(_tree_lines(os.path.join(room, "tree"), exclude)))))
-            answer[scenario.probe_id] = observations
-        return answer
-    finally:
-        backend.run(["rm", "-rf", remote_root], timeout=60)
-        shutil.rmtree(local, ignore_errors=True)
+    with scratch.temporary_directory() as local:
+        request = {'root': remote_root, 'scenarios': [s.to_json() for s in scenarios],
+                   'program': list(remote_program), 'fixtures': remote_fixtures,
+                   'exclude': list(exclude), 'timeout': timeout, 'environment': subject_environment()}
+        Path(local, 'driver.py').write_text(standalone_source())
+        Path(local, 'request.json').write_text(json.dumps(request))
+        try:
+            backend.push(local, remote_root)
+            budget = 30 + (timeout + 5) * max(1, sum(len(s.steps) for s in scenarios))
+            done = backend.run(['python3', remote_root + '/driver.py', remote_root + '/request.json',
+                                remote_root + '/observations.json'], timeout=budget)
+            if not done.ok:
+                raise SandboxError('remote observation driver failed: %s' % done.tail())
+            report = backend.run(['cat', remote_root + '/observations.json'], timeout=30)
+            if not report.ok:
+                raise SandboxError('remote observations could not be read: %s' % report.tail())
+            try:
+                raw = json.loads(report.stdout)
+                answer = {}
+                for scenario in scenarios:
+                    items = raw[scenario.probe_id]
+                    if len(items) != len(scenario.steps):
+                        raise ValueError('incomplete scenario report')
+                    answer[scenario.probe_id] = [
+                        Observation(item['exit_code'], Stream.of(item['stdout']),
+                                    Stream.of(item['stderr']), Stream(tuple(item['tree'])))
+                        for item in items]
+                return answer
+            except (ValueError, KeyError, TypeError) as error:
+                raise SandboxError('invalid remote observation report: %s' % error) from error
+        finally:
+            backend.run(['rm', '-rf', remote_root], timeout=60)
 
 
 def _run_remote_scenario(scenario: Scenario, program: list, *, backend,
                          remote_program: list, remote_fixtures: str | None,
                          exclude: tuple, timeout: float) -> list:
-    """Process one scenario inside the selected sandbox backend.
-
-    The backend has no portable interactive-pipe API, so each step is one remote command. The
-    workspace remains remote between steps, while its snapshot is pulled after each step. This
-    preserves scenario state and keeps all subject execution off the factory host.
-    """
-    remote_root = "/tmp/frf-scenario-%s" % uuid.uuid4().hex[:12]
-    workspace = remote_root + "/workspace"
-    local_snapshot = scratch.mkdtemp(prefix="frf-remote-snapshot-")
-    try:
-        made = backend.run(["mkdir", "-p", workspace], timeout=60)
-        if not made.ok:
-            raise RuntimeError("remote scenario workspace failed: %s" % made.tail())
-        if scenario.fixture and remote_fixtures:
-            archive = remote_fixtures.rstrip("/") + "/" + scenario.fixture
-            unpack = backend.run(["sh", "-c", "tar -xf %s -C %s" %
-                                  (_shell_quote(archive), _shell_quote(workspace))], timeout=120)
-            if not unpack.ok:
-                raise RuntimeError("remote fixture unpack failed: %s" % unpack.tail())
-        # NOTHING INHERITED -- the sandbox supplies `PATH` and `HOME`. This is the path EVERY
-        # sandboxed freeze takes, so it is the one that decided what got frozen: it was pushing 54
-        # host variables, `TERM=xterm-256color` among them, into the environment the reference was
-        # observed in, while the shipped verifier read the delivered image's own.
-        environment = subject_environment(scenario.environment)
-        results = remote_root + "/results"
-        script = ["set +e", "mkdir -p %s" % _shell_quote(results)]
-        joined = " ".join(_shell_quote(x) for x in remote_program)
-        for index, step in enumerate(scenario.steps):
-            cwd = os.path.normpath(workspace + "/" + step.cwd)
-            if step.argv and step.argv[0] == PROGRAM_TOKEN:
-                argv = joined + " " + " ".join(_shell_quote(x) for x in step.argv[1:])
-            else:
-                argv = " ".join(_shell_quote(str(x).replace(PROGRAM_TOKEN, " ".join(remote_program)))
-                                  for x in step.argv)
-            # THE SAME DIRECTORIES THE LOCAL RUNNER AND THE SHIPPED VERIFIER CREATE. A harvested
-            # invocation carries the repository's layout with it -- `-o ./src/parser.js` is written
-            # by somebody whose `src/` exists -- and three places have to agree about this or the
-            # freeze and the delivered task observe different things.
-            wanted = [os.path.dirname(os.path.normpath(workspace + "/" + str(t).lstrip("./")))
-                      for t in step.argv
-                      if str(t) and not str(t).startswith("-") and "/" in str(t)]
-            command = "mkdir -p %s; " % _shell_quote(cwd)
-            for parent in wanted:
-                if parent.startswith(workspace):
-                    command += "mkdir -p %s; " % _shell_quote(parent)
-            if step.stdin is not None:
-                command += "printf %s | %s" % (_shell_quote(step.stdin), argv)
-            else:
-                command += argv
-            command += " >%s/out 2>%s/err; printf '%%s' $? >%s/code; " % (
-                _shell_quote(results + "/%03d" % index),
-                _shell_quote(results + "/%03d" % index),
-                _shell_quote(results + "/%03d" % index))
-            command += "mkdir -p %s; cp -a %s/. %s/" % (
-                _shell_quote(results + "/%03d/tree" % index),
-                _shell_quote(workspace), _shell_quote(results + "/%03d/tree" % index))
-            script.append("mkdir -p %s; %s" % (_shell_quote(results + "/%03d" % index), command))
-        done = backend.run(["sh", "-c", "\n".join(script)], workdir=workspace,
-                           env=environment, timeout=timeout * max(1, len(scenario.steps)))
-        if not done.ok:
-            raise RuntimeError("remote scenario failed: %s" % done.tail())
-        pulled = scratch.mkdtemp(prefix="frf-remote-results-")
-        backend.pull(results, pulled)
-        observations = []
-        for index in range(len(scenario.steps)):
-            room = os.path.join(pulled, "%03d" % index)
-            code = int(open(os.path.join(room, "code"), encoding="utf-8").read() or 127)
-            stdout = _scrub(open(os.path.join(room, "out"), encoding="utf-8", errors="replace").read(), workspace)
-            stderr = _scrub(open(os.path.join(room, "err"), encoding="utf-8", errors="replace").read(), workspace)
-            observations.append(Observation(code, Stream.of(stdout), Stream.of(stderr),
-                                             Stream(tuple(_tree_lines(os.path.join(room, "tree"), exclude)))))
-        shutil.rmtree(pulled, ignore_errors=True)
-        return observations
-    finally:
-        backend.run(["rm", "-rf", remote_root], timeout=60)
-        shutil.rmtree(local_snapshot, ignore_errors=True)
-
-
-def _shell_quote(value: str) -> str:
-    import shlex
-    return shlex.quote(str(value))
+    """Use the same execution and serialization as the batched remote path."""
+    return run_remote_many([scenario], backend=backend, remote_program=remote_program,
+                           remote_fixtures=remote_fixtures, exclude=exclude,
+                           timeout=timeout)[scenario.probe_id]

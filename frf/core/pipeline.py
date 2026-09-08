@@ -157,6 +157,7 @@ class Hooks:
     # sandbox -- a development run without one still emits, and says the check was not run rather
     # than pretending it held.
     replay_in_image: Callable | None = None
+    execution_evidence: Callable | None = None
 
 
 def build_one(scale: Scale, candidate: Candidate, hooks: Hooks, *,
@@ -234,8 +235,12 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     # toolchain the image does not carry, a generated file the release forgot. Uncaught, every one
     # of those was counted as our bug and dragged `trustworthy` down with it.
     log("stage probes: start")
+    from .sandbox import SandboxError
+    from .resources import ResourcePressure
     try:
         hooks.build(spec)
+    except (SandboxError, ResourcePressure, TimeoutError) as why:
+        raise Stage('build', 'build-execution-unavailable', Fault.FACTORY, str(why)[:2000])
     except (RuntimeError, OSError) as why:
         raise Stage("build", "reference-will-not-build", Fault.MATERIAL, str(why)[:2000])
     log("built")
@@ -249,6 +254,8 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     # exists to tell apart.
     try:
         source = scale.probes(spec)
+    except (SandboxError, ResourcePressure, OSError) as why:
+        raise Stage('probes', 'probe-execution-unavailable', Fault.FACTORY, str(why)[:2000])
     except ValueError as why:
         # ...BUT A GENERATOR WE WROTE, CRASHING ON ITS OWN BUG, IS NOT THE MATERIAL DESCRIBING
         # ITSELF. The package scale asks the model for a probe generator; when that generator dies
@@ -270,6 +277,8 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     log("stage freeze: start runs=%d probes=%d" % (freeze_runs, getattr(source, "count", 0)))
     try:
         report = hooks.freeze(spec, observer, source, runs=freeze_runs)
+    except (SandboxError, ResourcePressure, OSError) as why:
+        raise Stage('freeze', 'observation-execution-unavailable', Fault.FACTORY, str(why)[:2000])
     except RuntimeError as why:
         # A repository-owned corpus can contain malformed commands or fixtures. Those are
         # material failures; letting them escape as unclassified makes one bad repo poison the
@@ -320,7 +329,12 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
 
     log("stage evidence: start")
     battery = hooks.battery(spec, observer, report)
-    if not battery.ok:
+    deferred_execution = [v for v in battery.verdicts
+                          if hooks.execution_evidence is not None
+                          and v.check == 'cannot-delegate-to-the-reference'
+                          and v.outcome is evidence.Outcome.INCONCLUSIVE]
+    failures = [v for v in battery.failures() if v not in deferred_execution]
+    if failures:
         # WHOSE FAULT DEPENDS ON WHICH WAY THE CHECK FAILED, and collapsing the two would make the
         # yield figure meaningless. A check that FAILS has established something about this
         # candidate: its reference cannot reproduce its own expectations, a trivial submission
@@ -338,13 +352,13 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
         # wrong with the mutation -- the material simply cannot be made to differ this way, which
         # is a fact about the material. On a real batch of twenty this was two of the twenty, and
         # charging it to us put the run on the edge of reporting itself untrustworthy.
-        failures = battery.failures()
         undecided = [v for v in failures if v.outcome is evidence.Outcome.INCONCLUSIVE]
         ours = [v for v in undecided if v.check not in INCONCLUSIVE_IS_MATERIAL]
         raise Stage("evidence", failures[0].check,
                     Fault.FACTORY if len(ours) == len(failures) else Fault.MATERIAL,
                     "; ".join(v.detail for v in failures))
-    log("evidence: %d check(s) held" % len(battery.verdicts))
+    log("evidence: %d check(s) held; %d deferred to emitted evaluator replay" %
+        (sum(v.ok for v in battery.verdicts), len(deferred_execution)))
 
     emitted_before = len(battery.verdicts)
     path = hooks.emit(spec, report, battery)
@@ -371,7 +385,8 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
     # frozen against a path that is not in the package. Measured on an earlier factory, 14 of 78
     # packages failed exactly this after passing everything else.
     try:
-        verdict = evidence.package_reproduces_itself(lambda: hooks.replay(path))
+        replay_result = hooks.replay(path)
+        verdict = evidence.package_reproduces_itself(lambda: replay_result)
     except OSError as why:
         # THE WIRE IS NOT THE MATERIAL. An E2B transport timeout arrives as TimeoutError, which is an
         # OSError and NOT a RuntimeError -- so the clause below never saw it and it escaped instead,
@@ -380,12 +395,22 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
         # counting it as material would quietly deflate the yield of whatever language was running.
         raise Stage("emit", "replay-transport-failed", Fault.FACTORY, str(why)[:2000])
     except RuntimeError as why:
-        # A shipped reference that disagrees with its frozen corpus is a material nondeterminism
-        # or dependency problem. Keep factory trust intact and let sourcing move on.
-        raise Stage("emit", "package-reference-replay-failed", Fault.MATERIAL, str(why)[:2000])
+        # A reference already frozen by this factory failing in the emitted environment is a
+        # delivery/evaluator problem until diagnosed; do not count it against source suitability.
+        raise Stage("emit", "package-reference-replay-failed", Fault.FACTORY, str(why)[:2000])
     battery.record(verdict)
     if not verdict.ok:
         raise Stage("emit", "package-does-not-reproduce-itself", Fault.FACTORY, verdict.detail)
+    if hooks.execution_evidence is not None:
+        execution = hooks.execution_evidence(path, replay_result)
+        if (execution.check != 'cannot-delegate-to-the-reference'
+                or execution.outcome is not evidence.Outcome.HOLDS):
+            raise Stage('emit', 'execution-isolation-unverified', Fault.FACTORY, execution.detail)
+        # Replace only the explicitly deferred verdict after a successful current-artifact replay.
+        battery.verdicts = [v for v in battery.verdicts if v not in deferred_execution]
+        battery.record(execution)
+    if not battery.ok:
+        raise Stage('emit', 'unresolved-evidence', Fault.FACTORY, 'not every required check was established')
 
     # E9 -- THE SAME QUESTION, ASKED OF THE IMAGE THE TASK SHIPS. Everything above, E7 included, ran
     # in the container that produced this task. The Dockerfile beside it describes a different
@@ -404,7 +429,7 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
         except OSError as why:
             raise Stage("emit", "in-image-transport-failed", Fault.FACTORY, str(why)[:2000])
         battery.record(in_image)
-        if in_image.outcome is evidence.Outcome.FAILS:
+        if in_image.outcome is not evidence.Outcome.HOLDS:
             raise Stage("emit", "does-not-reproduce-in-its-own-image", Fault.FACTORY,
                         in_image.detail)
         log("in-image: %s" % in_image.detail)
@@ -436,7 +461,8 @@ def _run(scale: Scale, candidate: Candidate, hooks: Hooks, log: Callable[[str], 
         freeze_runs=getattr(report, "runs", None),
         discard_rate=report.discard_rate, adequacy=getattr(report, "adequacy", None) or None,
         capability=capability(spec.language, scale=spec.scale).__dict__,
-        origin=str(spec.environment.get("origin") or ""))
+        origin=str(spec.environment.get("origin") or ""),
+        extra={"replay": getattr(replay_result, "report", {})})
     try:
         attestation.write(os.path.dirname(os.path.abspath(path)), record)
         harbor.stamp_attestation(path, attestation.summary(record))
@@ -522,6 +548,14 @@ def _specify(scale: Scale, candidate: Candidate) -> Spec:
     if not isinstance(spec, Spec):
         raise Stage("specify", "not-a-spec", Fault.FACTORY,
                     "%s.specify returned %s" % (type(scale).__name__, type(spec).__name__))
+    from .scale import TaskForm
+    source, target = spec.language.strip().lower(), spec.target_language.strip().lower()
+    if spec.task_form is TaskForm.CROSS_LANGUAGE and (not target or target == source):
+        raise Stage("specify", "invalid-language-pair", Fault.MATERIAL,
+                    "cross-language task requires a distinct target language")
+    if spec.task_form is TaskForm.INPLACE and target and target != source:
+        raise Stage("specify", "conflicting-task-form", Fault.FACTORY,
+                    "inplace task cannot change its language")
     if not spec.invoke:
         raise Stage("specify", "nothing-to-invoke", Fault.MATERIAL,
                     "the specification names no way to start the subject")

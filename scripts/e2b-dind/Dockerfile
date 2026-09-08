@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-       docker-ce docker-ce-cli containerd.io docker-buildx-plugin \
+       docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
+    && docker compose version \
     && rm -rf /var/lib/apt/lists/*
 
 # Python for the validation script

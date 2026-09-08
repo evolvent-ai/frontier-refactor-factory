@@ -70,6 +70,12 @@ def test_checkout_workload_compares_hidden_reference_and_enforces_speed(tmp_path
     report = json.loads(reward.read_text())
     assert report["correct"] is True
     assert report["speedup"] < 1.2
+    assert report['timing_valid'] is True
+    assert report['timing']['protocol'] == 'paired-worst-v1'
+    samples = report['timing']['evidence']['0']
+    assert samples['warmup_pairs'] >= 1
+    assert len(samples['self_samples']) >= 12
+    assert [item['reference_first'] for item in samples['samples']] == [True, False] * 6
 
     # A changed candidate output is rejected independently of timing.
     (destination / "environment" / "value.txt").write_text("8\n")

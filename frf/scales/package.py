@@ -85,7 +85,8 @@ class Observer:
         self.workspace = workspace
         self.material = material
         # Which sandbox the subject runs in, so isolation is reported from what is in force.
-        self._backend = backend
+        from ..observe.reference_backend import source_runtime
+        self._backend = source_runtime(backend, material.language)
         self._argv: list = []
         self._isolated = False
         # The surface the dispatcher fans out to, kept because a mutant is
@@ -94,11 +95,12 @@ class Observer:
 
     def build(self, spec: Spec) -> None:
         """Copy the pinned package, create a dispatch adapter, and serve it over JSON."""
+        from ..core.source_tree import copy_tree
         if not self.material.package_root or not self.material.package_name:
             raise RuntimeError("package material has no package root/name")
         os.makedirs(self.workspace, exist_ok=True)
         destination = os.path.join(self.workspace, self.material.package_name)
-        shutil.copytree(self.material.package_root, destination, dirs_exist_ok=True,
+        copy_tree(self.material.package_root, destination, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("__pycache__", ".git"))
         # THE DISPATCHER AND THE MANIFEST MUST BE IN THE SAME DIRECTORY, and this once was not: the
         # repo went to `workspace/<package_name>/` (where go.mod lives), while the dispatcher and
@@ -197,9 +199,10 @@ class Observer:
                 attempt: int = 0):
         argv, room = self._argv, self._room()
         if mutated:
+            from ..core.source_tree import copy_tree
             room = os.path.join(self.workspace, ".mutant-%d" % attempt)
             shutil.rmtree(room, ignore_errors=True)
-            shutil.copytree(self._room(), room, dirs_exist_ok=True,
+            copy_tree(self._room(), room, dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns(".mutant-*", "__pycache__"))
             adapter = os.path.join(room, _subject_name(spec.language))
             wrong = _dispatcher_source(spec.language, self._dispatch,
@@ -311,15 +314,20 @@ class Package:
         # every task after the first describing material it was not built from.
         self._built = None
         material = self._material
-        return Spec(name=_task_name(material), scale=self.name, language=material.language,
+        target = getattr(self, "_target_language", "") or material.target_language
+        return Spec(name=_task_name(material, target), scale=self.name, language=material.language,
                     description=material.description, build=list(material.install),
                     invoke=["serve"], entry="entry",
-                    target_language=(getattr(self, "_target_language", "")
-                                     or material.target_language),
+                    target_language=target,
                     task_form=task_form,
                     environment={"comparison": "structural",
                                  "entry_points": list(material.entry_points),
-                                 "forbidden": list(material.forbidden)})
+                                 "forbidden": list(material.forbidden),
+                                 "scope_guidance": ("Treat the package as one contract surface and "
+                                                     "preserve every exposed operation, including "
+                                                     "dispatch, serialization, errors, and operation-"
+                                                     "specific behavior."),
+                                 "invocation_label": "Factory dispatch marker"})
 
     def observe(self):
         if self._observer is not None:
@@ -532,7 +540,7 @@ class Package:
                 "Include valid, invalid and boundary cases for every operation. "
                 "Return only code.\n" + surface,
                 system="Define only a top-level probes(n) generator. Do not execute the package.",
-                timeout=min(60, model.TIMEOUT))
+                         timeout=min(300, model.TIMEOUT))
             try:
                 generator = validated_generator(answer)
                 print("[package] received probe generator for %s" % candidate.identity, flush=True)
@@ -542,7 +550,7 @@ class Package:
                 raise
             except (ValueError, SyntaxError):
                 answer = model.ask("Return ONLY valid Python defining probes(n).\n" + surface,
-                                   system="Define exactly probes(n).", timeout=min(60, model.TIMEOUT))
+                                   system="Define exactly probes(n).", timeout=min(300, model.TIMEOUT))
                 generator = validated_generator(answer)
         operations = tuple(PackageOperation(str(entry.get("name") or ""),
                                              str(entry.get("module") or ""),
@@ -585,6 +593,8 @@ def _as_argument_lists(drawn) -> list:
         if not isinstance(item, list):
             raise ValueError("probe %d is %s; every probe must be a list of arguments"
                              % (index, type(item).__name__))
+        # A path-shaped string is valid API data. Filesystem dependency portability is checked
+        # by replaying the delivered workspace, not by rejecting an argument's spelling.
     return drawn
 
 def _probe_key(args) -> str:
@@ -719,7 +729,7 @@ def _slug(text: str) -> str:
     return joined.strip("-")
 
 
-def _task_name(material: Material) -> str:
+def _task_name(material: Material, target_language: str | None = None) -> str:
     """The package, and what is being asked of it. Not the revision.
 
     Uses the LLM to produce a self-describing kebab-case name of the form
@@ -731,8 +741,9 @@ def _task_name(material: Material) -> str:
     not in a string humans have to read and compare.
     """
     from frf.core.statement import generate_task_name
+    target = material.target_language if target_language is None else target_language
     return generate_task_name(material.identity, material.description or "",
-                               material.target_language or "")
+                              target if target.lower() != material.language.lower() else "")
 
 def _install_commands(language: str) -> tuple:
     """How a package of `language` obtains its own dependencies. -> argv lists, run in the module.

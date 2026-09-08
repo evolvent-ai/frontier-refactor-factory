@@ -148,7 +148,9 @@ def dockerfile_for(source_language: str, target_language: str,
 
     # --- Python: always available; add if not already the base image ---
     python_langs = {"python"}
-    need_python = src not in python_langs and tgt not in python_langs
+    # Cross-language images intentionally exclude the source toolchain. Python is still required
+    # for Harbor's standalone verifier, so source=python,target=rust must install python explicitly.
+    need_python = tgt not in python_langs
     if need_python:
         lines.append("# Python is required for verify.py")
         lines.append("RUN apt-get update && apt-get install -y --no-install-recommends \\")
@@ -191,7 +193,8 @@ def dockerfile_for(source_language: str, target_language: str,
         # in the in-place case still has to be fetched when it is a cross-language target on
         # somebody else's base -- and the command that fetches it is exactly the one that fails
         # against its own base image.
-        for cmd in (tgt_cfg.get("cross_install_cmds") or tgt_cfg["install_cmds"]):
+        # The target's official image is already the base; do not reinstall its toolchain.
+        for cmd in tgt_cfg["install_cmds"]:
             lines.append("# Install %s toolchain" % tgt)
             lines.append("RUN %s" % cmd)
             lines.append("")
@@ -357,6 +360,7 @@ def task_toml(package: Package) -> str:
     )
 
     verifier_config = VerifierConfig(
+        user="root",
         timeout_sec=package.verifier_timeout_s,
         env=package.verifier_env,
         environment_mode=VerifierEnvironmentMode.SEPARATE,
@@ -599,6 +603,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export REWARD_PATH=/logs/verifier/reward_detail.json
 mkdir -p /logs/verifier
+rm -f /logs/verifier/reward.json "$REWARD_PATH"
 
 python3 "$HERE/verify.py" --task-root "$HERE" --workspace /app
 rc=$?
@@ -612,23 +617,27 @@ except Exception:
     # No report at all is a zero, and an HONEST zero: the verifier failed to answer, which is not
     # the same as the submission being wrong, so the note says which happened.
     detail = {"reward": 0.0, "note": "the verifier produced no report"}
+    json.dump(detail, open(source, "w"), indent=2)
 flat = {
     "reward": float(detail.get("reward", 0.0) or 0.0),
-    "correct": bool(detail.get("correct", False)),
+    "correct": int(bool(detail.get("correct", False))),
     "correctness_passed": int(detail.get("correctness_passed", 0) or 0),
     "correctness_total": int(detail.get("correctness_total", 0) or 0),
     "speedup": float(detail.get("speedup", 0.0) or 0.0),
-    "note": str(detail.get("note", "")),
 }
+if "timing_valid" in detail:
+    flat["timing_valid"] = int(bool(detail["timing_valid"]))
 json.dump(flat, open("/logs/verifier/reward.json", "w"), indent=2)
 # Harbor's check wrapper collects this exact artifact from the task workspace.
 try:
     os.makedirs("/app", exist_ok=True)
-    json.dump(flat, open("/app/check-result.json", "w"), indent=2)
+    json.dump(detail, open("/app/check-result.json", "w"), indent=2)
 except OSError as exc:
     pass
 print("[test.sh] reward.json:", flat)
 PY
+flatten_rc=$?
+if [ "$flatten_rc" -ne 0 ]; then exit "$flatten_rc"; fi
 exit $rc
 '''
 

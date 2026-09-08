@@ -27,7 +27,7 @@ from __future__ import annotations
 
 _LANGUAGE_SETUP: dict[str, dict] = {
     "python": {
-        "base_image": "python:3.12.8-slim-bookworm",
+        "base_image": "python:3.12.8-slim-bookworm@sha256:2199a62885a12290dc9c5be3ca0681d367576ab7bf037da120e564723292a2f0",
         "apt_packages": [],
         "install_cmds": [],
         "copy_from_image": None,
@@ -45,12 +45,12 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         # Pinning is deliberate: the multi-stage copy below exists so that `docker build` needs no
         # outbound HTTP, which some sandboxes block. So the answer is a newer floor rather than
         # letting the build fetch, and a repository that outruns even this fails honestly.
-        "base_image": "golang:1.26-bookworm",
+        "base_image": "golang:1.26-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81",
         "apt_packages": [],
         "install_cmds": [],
         # Multi-stage copy from the official Go image — avoids outbound HTTP during docker build
         # which is blocked in some sandbox environments (e.g. e2b DinD). Registry pulls always work.
-        "copy_from_image": "golang:1.26-bookworm",
+        "copy_from_image": "golang:1.26-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81",
         "copy_from_paths": [
             ("/usr/local/go", "/usr/local/go"),
         ],
@@ -80,7 +80,7 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         #
         # BOTH PLACES, or the floor only moves for half the tasks: `base_image` is where rust is the
         # SOURCE, and `install_cmds` is where it is a cross-language TARGET on somebody else's base.
-        "base_image": "rust:1.90-bookworm",
+        "base_image": "rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f",
         "apt_packages": [],
         # EMPTY, BECAUSE THE BASE ALREADY IS THE TOOLCHAIN. `rust:1.90-bookworm` ships cargo and
         # rustc; running rustup-init on top of it fails outright with
@@ -98,7 +98,8 @@ _LANGUAGE_SETUP: dict[str, dict] = {
         ],
         "copy_from_image": None,
         "copy_from_paths": [],
-        "env": {"PATH": "/root/.cargo/bin:${PATH}"},
+        "env": {"PATH": "/usr/local/cargo/bin:${PATH}",
+                "CARGO_HOME": "/usr/local/cargo", "RUSTUP_HOME": "/usr/local/rustup"},
         "verify_cmd": "rustc --version",
     },
     "c": {

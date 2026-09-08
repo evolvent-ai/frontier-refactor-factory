@@ -28,6 +28,8 @@ import shutil
 import sys
 
 from ..call import shims
+from ...core import timing
+from ..replay import ReplayResult
 
 # What the verifier is called inside the task, and where its inputs live. Named here rather than
 # spelled in three files, because a rename that misses one produces a task that fails at grading
@@ -35,6 +37,22 @@ from ..call import shims
 VERIFIER = "verify.py"
 EXPECTATIONS = "expectations.json"
 REFERENCE_DIR = "reference"
+
+
+def coverage_manifest(corpus, material) -> dict:
+    """Count exposed operations, never stringify a numeric input as an operation name."""
+    is_package = hasattr(material, "entry_points")
+    operations = set(getattr(material, "entry_points", ()))
+    counts = {}
+    if is_package:
+        for probe in corpus.inputs.values():
+            if probe and isinstance(probe[0], str) and probe[0] in operations:
+                name = probe[0]
+                counts[name] = counts.get(name, 0) + 1
+    else:
+        counts[getattr(material, "symbol", "entry")] = len(corpus.inputs)
+    return {"operations": counts, "probe_count": len(corpus.inputs),
+            "timed_count": len(corpus.timed)}
 
 
 def write_tests(path: str, corpus, *, spec, material) -> None:
@@ -61,18 +79,30 @@ def write_tests(path: str, corpus, *, spec, material) -> None:
         "graded": [e.to_json() for e in corpus.expectations],
         "probes": {probe_id: args for probe_id, args in corpus.inputs.items()},
         "timed": list(corpus.timed),
+        "timed_expectations": dict(getattr(corpus, 'timed_expectations', {})),
     }
+    target = getattr(spec, 'target_language', '') or spec.language
+    cross = target.lower() != spec.language.lower()
+    if cross:
+        from ..target_build import target_plan
+        target_plan(target)
+        frozen['target_language'] = target.lower()
+        frozen['target_helpers'] = list(getattr(spec, 'environment', {}).get('target_helpers') or [])
+    policy = getattr(spec, 'environment', {}).get('numeric_policy')
+    if policy:
+        from ..compare.numeric import validate_numeric_policy
+        if policy != getattr(corpus, 'numeric_policy', None):
+            raise ValueError('numerical policy changed after freeze')
+        if any(pid not in frozen['timed_expectations'] for pid in corpus.timed):
+            raise ValueError('numerical timing workloads lack frozen expectations')
+        frozen['comparison'] = 'envelope'
+        frozen['numeric_policy'] = dict(validate_numeric_policy(policy))
     with open(os.path.join(tests, EXPECTATIONS), "w", encoding="utf-8") as handle:
         json.dump(frozen, handle, indent=1, sort_keys=True)
     # Machine-readable API coverage is part of the task artifact, so audits can distinguish a
     # broad package task from one that merely repeats a single operation.
-    operation_counts: dict[str, int] = {}
-    for probe in corpus.inputs.values():
-        if probe:
-            operation_counts[str(probe[0])] = operation_counts.get(str(probe[0]), 0) + 1
     with open(os.path.join(tests, "coverage_manifest.json"), "w", encoding="utf-8") as handle:
-        json.dump({"operations": operation_counts, "probe_count": len(corpus.inputs),
-                   "timed_count": len(corpus.timed)}, handle, indent=2, sort_keys=True)
+        json.dump(coverage_manifest(corpus, material), handle, indent=2, sort_keys=True)
 
     # Package material is a checkout with a dispatch adapter, not one source file. It gets its own
     # layout while the verifier and digest format remain shared with module/kernel.
@@ -84,20 +114,75 @@ def write_tests(path: str, corpus, *, spec, material) -> None:
         _serve_here(reference, shim, material, language=spec.language)
 
     with open(os.path.join(tests, VERIFIER), "w", encoding="utf-8") as handle:
-        handle.write(VERIFIER_SOURCE)
+        handle.write(verifier_source())
 
-    if hasattr(material, "entry_points"):
+    if cross:
+        from ..target_workspace import write_target_workspace
+        from ...core.source_tree import copy_tree
+        environment = os.path.join(path, 'environment')
+        original = os.path.join(environment, 'original')
+        if hasattr(material, 'entry_points'):
+            copy_tree(material.root, original, ignore=shutil.ignore_patterns('.git', '.hg', '__pycache__'))
+            if material.package_root and material.package_name:
+                package_destination = os.path.join(original, material.package_name)
+                copy_tree(material.package_root, package_destination, dirs_exist_ok=True,
+                          ignore=shutil.ignore_patterns('.git', '.hg', '__pycache__'))
+        else:
+            os.makedirs(original, exist_ok=True)
+            shutil.copy2(material.source_path, os.path.join(original, os.path.basename(material.source_path)))
+        write_target_workspace(environment, target.lower())
+    elif hasattr(material, "entry_points"):
         _serve_package_here(os.path.join(path, "environment"), shim, material, language=spec.language)
     else:
         _serve_here(os.path.join(path, "environment"), shim, material, language=spec.language)
+
+    context_path = os.path.join(path, "environment", "task-interface.json")
+    with open(context_path, encoding="utf-8") as handle:
+        context = json.load(handle)
+    context["interface"] = (
+        'Run /app/run.sh as a JSON-lines service. Requests contain id, op="run", '
+        'call="entry", and args (an array of positional arguments). Return one JSON object '
+        'per request, preserving id: {"id": id, "ok": true, "value": result} or '
+        '{"id": id, "ok": false, "error": message}. Do not write diagnostics to the response stream.')
+    context["symbol"] = getattr(material, "symbol", "entry")
+    if cross:
+        context['interface'] += ' ' + context['build_contract']
+    if policy:
+        from ..compare.numeric import numeric_policy_text
+        context['numeric_policy'] = policy
+        context['interface'] += ' ' + numeric_policy_text(policy)
+    if hasattr(material, "entry_points"):
+        context["operations"] = list(material.entry_points)
+        context["dispatch"] = list(material.dispatch)
+        context["interface"] += (
+            ' The first element of args selects the package operation; remaining elements '
+            'are its positional arguments. Preserve all declared operations.')
+    elif hasattr(material, "schema"):
+        context["parameters"] = material.schema.to_json()
+    with open(context_path, "w", encoding="utf-8") as handle:
+        json.dump(context, handle, indent=2)
+
+    # The image, not a replay-only bind mount, must contain the solver's starting source.
+    dockerfile = os.path.join(path, "environment", "Dockerfile")
+    if os.path.isfile(dockerfile):
+        with open(dockerfile, "a", encoding="utf-8") as handle:
+            handle.write("\nUSER root\nCOPY . /app\n"
+                         "RUN chown -R nobody:nogroup /app\nUSER nobody\n")
+    if cross:
+        from ..reference_image import write_reference_image
+        write_reference_image(path, spec, install=getattr(material, 'install', ()))
 
 
 def _serve_package_here(room: str, shim, material, *, language: str = "python") -> None:
     """Copy package sources and a generated dispatch adapter into a call-seam workspace."""
     os.makedirs(room, exist_ok=True)
-    shutil.copytree(material.root, room, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns(".git", "__pycache__", "tests", "test",
-                                                   "fixtures", "docs"))
+    from ...core.source_tree import copy_tree, validate_links
+    if os.path.abspath(material.root) == os.path.abspath(room):
+        validate_links(room)
+    else:
+        copy_tree(material.root, room, dirs_exist_ok=True,
+                  ignore=shutil.ignore_patterns(".git", "__pycache__", "tests", "test",
+                                               "fixtures", "docs"))
     package_root = material.package_root or material.root
     package_name = material.package_name
     # The package root is already copied by the first copytree when it lives inside material.root.
@@ -106,7 +191,7 @@ def _serve_package_here(room: str, shim, material, *, language: str = "python") 
     if package_name and os.path.isdir(package_root):
         destination = os.path.join(room, package_name)
         if os.path.abspath(package_root) != os.path.abspath(destination):
-            shutil.copytree(package_root, destination, dirs_exist_ok=True)
+            copy_tree(package_root, destination, dirs_exist_ok=True)
     # THE DISPATCHER IS GENERATED IN ONE PLACE, and this was the second copy of it. What stood here
     # was `if language in ("javascript", "typescript")` writing JS inline, and everything else falling
     # through to a PYTHON dispatcher written to subject.py -- which is precisely the fault
@@ -180,6 +265,13 @@ def _serve_here(room: str, shim, material, *, language: str) -> None:
     with open(run, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
     os.chmod(run, 0o755)
+    with open(os.path.join(room, "task-interface.json"), "w", encoding="utf-8") as handle:
+        json.dump({"build_commands": [shlex.join(cmd) for cmd in build],
+                   "run_command": "/app/run.sh",
+                   "build_directory": "/app",
+                   "entry_source": "/app/" + shim.subject,
+                   "runtime_argv": argv,
+                   "launcher_builds": True}, handle, indent=2)
 
 
 def drive(path: str, *, backend=None) -> tuple:
@@ -195,60 +287,8 @@ def drive(path: str, *, backend=None) -> tuple:
     from ...core import scratch
 
     if backend is not None and getattr(backend, "name", "") == "remote":
-        import uuid
-        remote_root = "/tmp/frf-package-replay-%s" % uuid.uuid4().hex[:12]
-        # THE SAME TREE THE FREEZE SAW, and this push did not send it. `backend.push` defaults to
-        # `containers.EXCLUDED`, which drops `node_modules` and `target` because a repo-scale checkout
-        # does not need them -- while `RemoteSubject.__enter__` passes a NARROWER set for exactly the
-        # opposite reason: on this seam the dependency tree is part of the contract, since the package
-        # imports it at runtime.
-        #
-        # So the freeze served a subject with its dependencies and the replay served one without,
-        # which is a task refused for not reproducing itself when the difference was ours. It was
-        # invisible while nothing installed dependencies (there was no `node_modules` to drop, and 53
-        # candidates were refused at `package-reference-replay-failed` for other reasons); it becomes
-        # load-bearing now that `_install_commands` creates one.
-        backend.push(path, remote_root,
-                     exclude={'.git', '.hg', '__pycache__', '.pytest_cache', '.venv'})
-        result = backend.run(
-            ["python3", "%s/tests/verify.py" % remote_root,
-             "--task-root", "%s/tests" % remote_root,
-             "--workspace", "%s/tests/reference" % remote_root],
-            workdir=remote_root,
-            env={"REWARD_PATH": "%s/reward.json" % remote_root,
-                 "SUBMISSION_ROOT": "%s/tests/reference" % remote_root},
-            timeout=1800)
-        reports = []
-        for line in (result.stdout or "").splitlines():
-            try:
-                value = json.loads(line)
-                if isinstance(value, dict) and "correctness_total" in value:
-                    reports.append(value)
-            except (TypeError, ValueError):
-                continue
-        report = reports[-1] if reports else {}
-        if not report:
-            # The verifier writes the machine-readable result to REWARD_PATH before printing it.
-            # Some remote SDK versions have returned an incomplete stdout field while the command
-            # tail still contained the printed JSON. Read the authoritative file from the same
-            # sandbox before classifying a correct reference replay as a material failure.
-            reward = backend.run(["cat", "%s/reward.json" % remote_root],
-                                 workdir=remote_root, timeout=30)
-            if reward.ok:
-                try:
-                    value = json.loads(reward.stdout)
-                    if isinstance(value, dict):
-                        report = value
-                except (TypeError, ValueError):
-                    pass
-        if not report:
-            raise RuntimeError("remote package replay produced no report: %s" % result.tail(500))
-        passed = int(report.get("correctness_passed", 0))
-        total = int(report.get("correctness_total", 0))
-        if passed != total:
-            raise RuntimeError(report.get("note") or
-                               "package reference replay mismatch (%d/%d)" % (passed, total))
-        return passed, total
+        from ..replay import ImageReplay
+        return ImageReplay(backend).replay(path)
 
     tests = os.path.join(path, "tests")
     with scratch.temporary_directory() as logs:
@@ -265,14 +305,29 @@ def drive(path: str, *, backend=None) -> tuple:
             report = json.load(handle)
     passed = int(report.get("correctness_passed", 0))
     total = int(report.get("correctness_total", 0))
-    if passed != total:
+    if (done.returncode != 0 or total <= 0 or report.get("timing_valid") is not True
+            or passed != total):
         raise RuntimeError(report.get("note") or
                            "package reference replay mismatch (%d/%d)" % (passed, total))
-    return passed, total
+    return ReplayResult(passed, total, report)
 
 
 # The verifier, shipped whole. Written as a string rather than kept as a module and copied, because
 # what a task contains should be readable in the file that decides what a task contains.
+def verifier_source(*, isolated=True):
+    from .. import isolated as confinement, transport
+    from .. import target_build
+    from .. import reference_image
+    from ..compare import numeric
+    return (VERIFIER_SOURCE.replace('__TIMING_PROTOCOL__', timing.standalone_source())
+            .replace('__TRANSPORT_PROTOCOL__', transport.standalone_source())
+            .replace('__ISOLATION_PROTOCOL__', confinement.standalone_source())
+            .replace('__NUMERICAL_PROTOCOL__', numeric.source())
+            .replace('__TARGET_BUILD__', target_build.standalone_source())
+            .replace('__REFERENCE_CONTEXT__', reference_image.standalone_source())
+            .replace('__USE_CONFINEMENT__', repr(isolated)))
+
+
 VERIFIER_SOURCE = '''#!/usr/bin/env python3
 """Grade a submission against expectations frozen from the reference.
 
@@ -292,6 +347,21 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
+
+__TIMING_PROTOCOL__
+__TRANSPORT_PROTOCOL__
+__ISOLATION_PROTOCOL__
+__NUMERICAL_PROTOCOL__
+__TARGET_BUILD__
+__REFERENCE_CONTEXT__
+USE_CONFINEMENT = __USE_CONFINEMENT__
+ROOTS = {}
+ACTIVE_ROOT = None
+PENDING_REPORT = None
+ISOLATION_REPORT = None
+VERIFIER_SHA256 = hashlib.sha256(open(__file__, 'rb').read()).hexdigest()
+TIMING_REPORT = {}
 
 CALL_TIMEOUT = 30.0
 TIMED_REPEATS = 200
@@ -327,11 +397,27 @@ def digest(ok, value, error):
 class Subject:
     """A subject held open across the corpus, spoken to in JSON lines."""
 
-    def __init__(self, argv, cwd):
-        self.proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     text=True, bufsize=1)
+    def __init__(self, argv, cwd, role='candidate'):
+        self.root = ROOTS.get(role)
+        if self.root is not None:
+            self.activate()
+            command = [str(value).replace(os.path.abspath(cwd), '/app') for value in argv]
+            self.proc = self.root.spawn(command, cwd='/app', environment={'PATH': os.environ.get('PATH', '')})
+        else:
+            self.proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         start_new_session=True)
+        self.transport = PipeTransport(self.proc)
         self.next_id = 0
+
+    def activate(self):
+        global ACTIVE_ROOT
+        if self.root is not None and ACTIVE_ROOT is not self.root:
+            for other in ROOTS.values():
+                if other is not self.root:
+                    other.pause()
+            self.root.resume()
+            ACTIVE_ROOT = self.root
 
     def __enter__(self):
         return self
@@ -340,6 +426,9 @@ class Subject:
         self.close()
 
     def close(self):
+        if self.root is not None:
+            self.root.stop()
+            return
         try:
             if self.proc.stdin:
                 self.proc.stdin.close()
@@ -348,17 +437,8 @@ class Subject:
             self.proc.kill()
 
     def _exchange(self, payload):
-        import select
-
-        self.proc.stdin.write(json.dumps(payload) + "\\n")
-        self.proc.stdin.flush()
-        ready, _, _ = select.select([self.proc.stdout], [], [], CALL_TIMEOUT)
-        if not ready:
-            self.proc.kill()
-            raise RuntimeError("the submission did not answer within %.0fs" % CALL_TIMEOUT)
-        line = self.proc.stdout.readline()
-        if not line:
-            raise RuntimeError("the submission exited without answering")
+        self.activate()
+        line = self.transport.exchange(json.dumps(payload) + "\\n", timeout=CALL_TIMEOUT, line=True)
         reply = json.loads(line)
         if not isinstance(reply, dict):
             raise RuntimeError("the subject returned a non-object JSON reply (%s)" %
@@ -399,6 +479,12 @@ def observed_digest(reply):
     return digest(False, None, reply.get("error", ""))
 
 
+def matching_reply(reference, actual, policy):
+    if policy and reference.get('ok') and actual.get('ok'):
+        return compare_numeric(reference.get('value'), actual.get('value'), policy)[0]
+    return observed_digest(reference) == observed_digest(actual)
+
+
 def score(passed, total, speedup, compliant=True):
     """The published formula. Correctness unlocks speed; nothing is capped."""
     if not compliant:
@@ -412,19 +498,61 @@ def score(passed, total, speedup, compliant=True):
 
 
 def main():
+    global PENDING_REPORT, ACTIVE_ROOT
+    with ExitStack() as contexts:
+        try:
+            status = evaluate(contexts)
+        finally:
+            ROOTS.clear()
+            ACTIVE_ROOT = None
+    if PENDING_REPORT is not None:
+        path, fields = PENDING_REPORT
+        with open(path, 'w') as handle:
+            json.dump(fields, handle, indent=2)
+        print(json.dumps(fields, indent=2))
+    return status
+
+def evaluate(contexts):
+    global ISOLATION_REPORT
     parser = argparse.ArgumentParser()
     parser.add_argument("--task-root", required=True)
     parser.add_argument("--workspace", default="/app")
     args = parser.parse_args()
 
     here = args.task_root
-    frozen = json.load(open(os.path.join(here, "expectations.json")))
     reward_path = os.environ.get("REWARD_PATH", "/logs/verifier/reward_detail.json")
     os.makedirs(os.path.dirname(reward_path), exist_ok=True)
+    if os.path.lexists(reward_path):
+        os.unlink(reward_path)
+    frozen = json.load(open(os.path.join(here, "expectations.json")))
+    policy = frozen.get('numeric_policy')
+    if policy or frozen.get('comparison') == 'envelope':
+        validate_numeric_policy(policy)
+    target = frozen.get('target_language')
+    target_evidence = None
+    target_replay = False
 
     def report(**fields):
-        json.dump(fields, open(reward_path, "w"), indent=2)
-        print(json.dumps(fields, indent=2))
+        global PENDING_REPORT
+        fields['isolation'] = ISOLATION_REPORT
+        fields['verifier_sha256'] = VERIFIER_SHA256
+        if target:
+            fields['verification_scope'] = 'reference-self-replay' if target_replay else 'target-submission'
+            fields['target_build'] = target_evidence
+            if target_evidence is not None:
+                execution = ROOTS['candidate'].execution_report()
+                fields['target_execution'] = execution
+                if execution['denied'] or not execution['complete']:
+                    fields.update(reward=0.0, correct=False, timing_valid=False, speedup=0.0,
+                                  note='target execution policy was violated or its evidence is incomplete')
+                target_evidence['runtime_enforced'] = execution['enforced'] and execution['complete'] and not execution['denied']
+                if fields.get('timing_valid'):
+                    reference_execution = ROOTS['reference'].execution_report()
+                    fields['reference_execution'] = reference_execution
+                    if not reference_execution['complete']:
+                        fields.update(reward=0.0, timing_valid=False, speedup=0.0,
+                                      note='reference execution audit did not complete')
+        PENDING_REPORT = (reward_path, fields)
         return 0 if fields.get("reward", 0) > 0 else 1
 
     # ABSOLUTE. `Popen` resolves argv[0] against the process's cwd, not against the `cwd` it is
@@ -432,27 +560,74 @@ def main():
     # "no such file" for a file that is plainly there.
     workspace = os.path.abspath(args.workspace)
     submission = [os.path.join(workspace, "run.sh")]
-    if not os.path.exists(submission[0]):
+    reference = [os.path.join(os.path.abspath(here), "reference", "run.sh")]
+    target_replay = target and workspace == os.path.dirname(reference[0])
+    reference_workspace, reference_base, reference_environment = reference_context(here)
+    if reference_base != '/':
+        reference = [os.path.join(reference_workspace, 'run.sh')]
+        if target_replay:
+            workspace = reference_workspace
+            submission = list(reference)
+            args.workspace = workspace
+    if not target and not os.path.exists(submission[0]):
         return report(reward=0.0, correct=False, correctness_passed=0,
-                      correctness_total=len(frozen["graded"]), speedup=0.0,
+                      correctness_total=sum(not item.get('dropped') for item in frozen['graded']), speedup=0.0,
                       note="no run.sh in the workspace, so there is nothing to grade")
 
-    reference = [os.path.join(os.path.abspath(here), "reference", "run.sh")]
+    if target and not USE_CONFINEMENT:
+        return report(reward=0.0, correct=False, correctness_passed=0,
+                      correctness_total=sum(not item.get('dropped') for item in frozen['graded']),
+                      speedup=0.0, note='target-language evaluation requires confinement')
+    if USE_CONFINEMENT:
+        ROOTS['candidate'] = contexts.enter_context(Root(workspace, uid=50001,
+            runtime_base=reference_base if target_replay else '/',
+            runtime_environment=reference_environment if target_replay else None))
+        reference_dir = os.path.dirname(reference[0])
+        ROOTS['reference'] = contexts.enter_context(Root(reference_dir, uid=50002,
+            runtime_base=reference_base, runtime_environment=reference_environment))
+        ISOLATION_REPORT = verify_pair(ROOTS['reference'], ROOTS['candidate'])
+        if target and not target_replay:
+            try:
+                known = [Path(reference_dir) / name for name in ('program', 'serve.bin')]
+                target_evidence = build_target(ROOTS['candidate'], target, reference_binaries=known)
+                ROOTS['candidate'].audit_execution(target_evidence['entry_argv'] + frozen.get('target_helpers', []))
+                ROOTS['reference'].audit_execution()
+                submission = target_evidence['entry_argv']
+            except Exception as error:
+                return report(reward=0.0, correct=False, correctness_passed=0,
+                              correctness_total=sum(not item.get('dropped') for item in frozen['graded']),
+                              speedup=0.0, note='target-language build refused: ' + str(error)[:1500])
     # The task writer may have left a package reference tree in tests/reference. E7 must drive
     # exactly the emitted reference and report its real stderr; it must never silently substitute
     # the factory workspace.
-    passed = total = 0
+    passed = 0
+    total = sum(not item.get('dropped') for item in frozen['graded'])
     mismatches = []
     note = ""
     try:
+        reference_values = {}
+        if policy:
+            with Subject(reference, cwd=os.path.dirname(reference[0]), role='reference') as baseline:
+                for expectation in frozen['graded']:
+                    if expectation.get('dropped'):
+                        continue
+                    pid = expectation['probe_id']
+                    reply = baseline.call(frozen['probes'][pid])
+                    if observed_digest(reply) != expectation['digest']:
+                        return report(reward=0.0, correct=False, correctness_passed=0,
+                                      correctness_total=total, speedup=0.0,
+                                      note='reference no longer matches the frozen numerical baseline')
+                    reference_values[pid] = reply
         with Subject(submission, cwd=workspace) as subject:
             for expectation in frozen["graded"]:
                 if expectation.get("dropped"):
                     continue
-                total += 1
                 probe = frozen["probes"][expectation["probe_id"]]
                 try:
-                    if observed_digest(subject.call(probe)) == expectation["digest"]:
+                    reply = subject.call(probe)
+                    same = (matching_reply(reference_values[expectation['probe_id']], reply, policy)
+                            if policy else observed_digest(reply) == expectation['digest'])
+                    if same:
                         passed += 1
                     else:
                         mismatches.append(expectation["probe_id"])
@@ -472,7 +647,8 @@ def main():
     # TIMED ONLY ONCE CORRECT, and on inputs held out of grading, so that a submission cannot
     # answer them during the correctness pass and replay a cache when the clock starts.
     speedup, note = measure_speed(frozen, submission, reference, args, here)
-    return report(reward=score(passed, total, speedup), correct=True,
+    return report(reward=score(passed, total, speedup) if TIMING_REPORT.get("usable") else 0.0,
+                  timing=TIMING_REPORT, timing_valid=bool(TIMING_REPORT.get("usable")), correct=True,
                   correctness_passed=passed, correctness_total=total,
                   speedup=round(speedup, 4), note=note)
 
@@ -484,43 +660,48 @@ def measure_speed(frozen, submission, reference, args, here):
     input, so that a machine that slows down half way through slows both. A difference smaller than
     the reference's own run-to-run spread is reported as no change rather than as a small win.
     """
+    global TIMING_REPORT
+    TIMING_REPORT = {"usable": False, "protocol": PROTOCOL_VERSION}
     timed = frozen.get("timed") or []
     if not timed:
-        return 1.0, "no workload was held out for timing, so speed was not measured"
+        return 0.0, "no workload was held out for timing, so speed was not measured"
 
-    reference_dir = os.path.join(os.path.abspath(here), "reference")
+    reference_dir = os.path.dirname(reference[0])
     if not os.path.exists(reference[0]):
-        return 1.0, "the package ships no reference to time against"
+        return 0.0, "the package ships no reference to time against"
 
-    ours, theirs = [], []
     try:
         with Subject(submission, cwd=args.workspace) as mine, \\
-             Subject(reference, cwd=reference_dir) as ref:
+             Subject(reference, cwd=reference_dir, role='reference') as ref:
+            expected = {}
+            policy = frozen.get('numeric_policy')
             for probe_id in timed:
                 probe = frozen["probes"][probe_id]
-                for _ in range(3):
-                    their_seconds, their_ok = ref.time(probe, TIMED_REPEATS)
-                    our_seconds, our_ok = mine.time(probe, TIMED_REPEATS)
-                    if their_ok != our_ok:
-                        # The two took different paths, so the numbers are not comparable: one was
-                        # timed doing the work and the other timed rejecting the input.
-                        return 1.0, ("the submission and the reference disagree about whether a "
-                                     "timed input is valid, so the comparison would be meaningless")
-                    theirs.append(their_seconds)
-                    ours.append(our_seconds)
+                expected[probe_id] = ref.call(probe)
+                frozen_digest = frozen.get('timed_expectations', {}).get(probe_id)
+                if frozen_digest and observed_digest(expected[probe_id]) != frozen_digest:
+                    return 0.0, 'timed reference no longer matches its frozen baseline'
+                if not matching_reply(expected[probe_id], mine.call(probe), policy):
+                    return 0.0, "held-out workload behavior differs from the reference"
+            def cost(subject, probe_id):
+                seconds = 0.0
+                for _ in range(TIMED_REPEATS):
+                    subject.activate()
+                    started = time.perf_counter()
+                    reply = subject.call(frozen["probes"][probe_id])
+                    seconds += time.perf_counter() - started
+                    if not matching_reply(expected[probe_id], reply, policy):
+                        raise ValueError("timed response differs from reference")
+                return seconds
+            result = measure(lambda pid: cost(ref, pid), lambda pid: cost(mine, pid),
+                             lambda shape, i: shape, timed)
+            TIMING_REPORT = result.to_json()
+            TIMING_REPORT["input_policy"] = "fixed held-out inputs; repeated calls in persistent process"
+            TIMING_REPORT["cost_boundary"] = "evaluator wall clock; JSON transport included; comparison checks excluded"
+            TIMING_REPORT["repeats"] = TIMED_REPEATS
+            return result.speedup, result.note
     except Exception as exc:
-        return 1.0, "timing could not be completed: %s" % exc
-
-    if not ours or not theirs or min(ours) <= 0:
-        return 1.0, "the clock could not read this workload"
-
-    best_ours, best_theirs = min(ours), min(theirs)
-    spread = (max(theirs) - min(theirs)) / max(best_theirs, 1e-9)
-    ratio = best_theirs / best_ours
-    if abs(ratio - 1.0) <= spread:
-        return 1.0, ("the difference (%.2fx) is within the reference's own spread (%.0f%%), so it "
-                     "counts as no change" % (ratio, 100 * spread))
-    return ratio, "%.2fx faster than the reference on the held-out workload" % ratio
+        return 0.0, "timing could not be completed: %s" % exc
 
 
 if __name__ == "__main__":

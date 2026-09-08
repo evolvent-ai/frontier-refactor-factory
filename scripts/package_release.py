@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -85,6 +86,44 @@ def _metadata(task_dir: str) -> dict:
     return found
 
 
+def _copy_image_bundle(source: str, release: str) -> list[str]:
+    """Copy a verified image bundle into ``release/images``.
+
+    Image archives are part of the public runtime contract.  Keeping them beside the task
+    directories makes the release self-contained, while requiring the caller to name the bundle
+    avoids accidentally shipping an unrelated local Docker cache.  Files are copied through a
+    temporary directory and then atomically renamed; symlinks are refused because a release must
+    remain portable after it is archived.
+    """
+    source_path = Path(source).resolve()
+    if not source_path.is_dir():
+        raise ValueError("image bundle is not a directory: %s" % source)
+    destination = Path(release) / "images"
+    if destination.exists():
+        raise FileExistsError("release image directory already exists: %s" % destination)
+    staging = Path(release) / ".images.staging"
+    if staging.exists():
+        raise FileExistsError("stale image staging directory: %s" % staging)
+    staging.mkdir(parents=True)
+    try:
+        for item in source_path.rglob("*"):
+            relative = item.relative_to(source_path)
+            target = staging / relative
+            if item.is_symlink():
+                raise ValueError("image bundle contains symbolic link: %s" % relative)
+            if item.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif item.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(item, target)
+        os.replace(staging, destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return sorted(p.relative_to(Path(release)).as_posix()
+                  for p in destination.rglob("*") if p.is_file())
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("results", help="the directory a run wrote into")
@@ -93,6 +132,10 @@ def main() -> int:
     parser.add_argument("--tar", action="store_true", help="also write <into>.tar.gz")
     parser.add_argument("--allow-unreplayed", action="store_true",
                         help="include tasks with no in-image replay result (records them as such)")
+    parser.add_argument("--image-bundle", metavar="DIR",
+                        help="copy the verified solver/verifier archives and receipts into release/images")
+    parser.add_argument("--public-preflight", action="store_true",
+                        help="run anonymous public-delivery preflight on the assembled release")
     args = parser.parse_args()
 
     subjects = audit.walk(args.results)
@@ -137,6 +180,10 @@ def main() -> int:
                         "in_image_replay": (replay or {}).get("detail", "not run"),
                         **_metadata(destination)})
 
+    image_files = []
+    if args.image_bundle:
+        image_files = _copy_image_bundle(args.image_bundle, args.into)
+
     entries.sort(key=lambda e: (e.get("scale", ""), e["name"]))
     scales: dict = {}
     languages: dict = {}
@@ -146,7 +193,7 @@ def main() -> int:
             languages.get(entry.get("source_language", "?"), 0) + 1
 
     manifest = {"tasks": len(entries), "by_scale": scales, "by_source_language": languages,
-                "entries": entries}
+                "entries": entries, "image_files": image_files}
     with open(os.path.join(args.into, "manifest.json"), "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=1, sort_keys=True)
 
@@ -177,6 +224,16 @@ def main() -> int:
         with tarfile.open(archive, "w:gz") as tar:
             tar.add(args.into, arcname=os.path.basename(args.into.rstrip("/")))
         print("  archive     : %s (%.1f MB)" % (archive, os.path.getsize(archive) / 1e6))
+
+    if args.public_preflight:
+        from scripts.audit_public_delivery import audit
+        preflight = audit(args.into)
+        with open(os.path.join(args.into, "public-preflight.json"), "w", encoding="utf-8") as handle:
+            json.dump(preflight, handle, indent=2, sort_keys=True)
+        print("  public preflight: %s (%d finding(s))"
+              % ("passed" if preflight["ok"] else "failed", len(preflight["findings"])))
+        if not preflight["ok"]:
+            return 1
 
     # Verified here rather than trusted: a checksum list that does not check is worse than none,
     # because it reads as evidence.

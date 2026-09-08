@@ -8,6 +8,100 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from frf.core.statement import Facts, render                           # noqa: E402
+import pytest
+
+
+@pytest.mark.parametrize("scale", ["kernel", "module", "package", "repo"])
+@pytest.mark.parametrize("live_prose", [False, True])
+def test_generated_instruction_uses_frozen_facts(monkeypatch, scale, live_prose):
+    from frf.core import model, statement
+    from frf.core.scale import Spec
+    monkeypatch.setattr(model, "available", lambda: live_prose)
+    monkeypatch.setattr(model, "ask", lambda *a, **kw: "# example-opt\n\nImprove the implementation.")
+    channels = (("exit code", "stdout", "stderr", "the resulting directory")
+                if scale == "repo" else ("the value the call returned",))
+    facts = _facts(scale=scale, channels=channels, probes=17, graded_points=51, timed_workloads=2)
+    spec = Spec(name="example-opt", scale=scale, language="python", description="Example")
+    text = statement.generate_instruction(spec, facts)
+    assert "**17 probe(s)**" in text
+    assert "**51 graded observation(s)**" in text
+    assert "2 workload(s)" in text
+    assert all(channel in text for channel in channels)
+    assert "test.sh" not in text
+    assert "0 probe(s)" not in text
+    assert text.startswith("# Example Optimization\n")
+    assert "## Task Facts" in text
+    assert "**Scale:** `%s`" % scale in text
+    assert "**Source language:** `python`" in text
+    if scale != "repo":
+        assert "JSON-lines service" in text
+        assert "the resulting directory" not in text
+
+
+def test_fallback_uses_a_readable_title_and_never_labels_preparation_as_solver_build():
+    from frf.core.statement import _fallback_instruction
+    from frf.core.scale import Spec
+    text = _fallback_instruction(Spec(name="wasm-json-parser-opt", scale="repo",
+                                       language="rust", description="x",
+                                       build=[["cargo", "fetch"]]))
+    assert text.startswith("# WebAssembly JSON Parser Optimization\n")
+    assert "Reference preparation commands" in text
+    assert "Build commands (run in order" not in text
+
+
+@pytest.mark.parametrize("identity, expected", [
+    ("github:microembedding@abc123", "microembedding-cosine-similarity-opt"),
+    ("pypi:microembedding@abc123", "microembedding-cosine-similarity-opt"),
+])
+def test_deterministic_names_strip_source_namespace(identity, expected):
+    from frf.core.statement import generate_task_name
+    assert generate_task_name(identity, "Cosine similarity", symbol="cosine_similarity") == expected
+
+
+def test_model_output_that_mentions_the_official_verifier_is_rejected(monkeypatch):
+    from frf.core import model, statement
+    from frf.core.scale import Spec
+    monkeypatch.setattr(model, "available", lambda: True)
+    monkeypatch.setattr(model, "ask", lambda *a, **kw:
+                        "# bad-opt\n\n## Workspace\n/app\n## Build & Test\nrun test.sh")
+    text = statement.generate_instruction(Spec(name="bad-opt", scale="repo", language="go", description="x"))
+    assert "test.sh" not in text.lower()
+    assert "No project-native self-check command was supplied" in text
+
+
+def test_task_facts_report_each_scale_surface_without_model_prose():
+    from frf.core.statement import _task_facts
+    from frf.core.scale import Spec
+    package = Spec(name="pkg-opt", scale="package", language="go", description="x",
+                   invoke=["serve"], entry="entry",
+                   environment={"entry_points": ["Parse", "Format"],
+                                "invocation_label": "Factory dispatch marker"})
+    text = _task_facts(package)
+    for expected in ("**Scale:** `package`", "**Factory dispatch marker:** `serve`",
+                     "`Parse`", "`Format`"):
+        assert expected in text
+
+
+def test_delivered_context_is_rendered_as_authoritative_facts():
+    from frf.core.statement import _task_facts
+    from frf.core.scale import Spec
+    text = _task_facts(Spec(name="x-opt", scale="repo", language="go", description="x",
+                            environment={"instruction_context": {
+                                "workspace_paths": ["/app/cmd/tool/main.go"],
+                                "deliverables": ["/app/run.sh"]}}))
+    assert "/app/cmd/tool/main.go" in text
+    assert "/app/run.sh" in text
+
+
+def test_delivered_context_includes_build_and_interface_facts():
+    from frf.core.statement import _task_facts
+    from frf.core.scale import Spec
+    text = _task_facts(Spec(name="x-opt", scale="repo", language="go", description="x",
+                            environment={"instruction_context": {
+                                "build_commands": ["go build ./..."],
+                                "interface": "run.sh preserves CLI behavior"}}))
+    assert "go build ./..." in text
+    assert "run.sh preserves CLI behavior" in text
 
 
 def _facts(**overrides) -> Facts:

@@ -92,3 +92,72 @@ def test_task_copy_is_after_dockerfile_from_instruction():
     assert 'semaphore = asyncio.Semaphore(limit)' in text
     assert 'time.time_ns()' in text
     assert 'except Exception as exc:' in text
+
+
+def test_review_entrypoint_preserves_sibling_results_after_setup_failure(monkeypatch, tmp_path, capsys):
+    import json
+    import sys
+    from types import SimpleNamespace
+
+    namespace = _repair_task().__globals__
+    monkeypatch.setattr(namespace['credentials'], 'get', lambda _key: '')
+    seen = []
+
+    async def check(task_dir, **_kwargs):
+        seen.append(task_dir.name)
+        if task_dir.name == 'broken':
+            raise RuntimeError('sandbox setup failed')
+        result = SimpleNamespace(error=None, model_dump=lambda: {
+            'task_name': task_dir.name, 'error': None})
+        return SimpleNamespace(results=[result]), tmp_path / 'job'
+
+    monkeypatch.setattr(namespace['checker'], 'run_checks', check)
+    for name in ('broken', 'healthy'):
+        task = tmp_path / name
+        task.mkdir()
+        (task / 'task.toml').write_text('')
+    monkeypatch.setattr(sys, 'argv', ['harbor_check_e2b.py', str(tmp_path),
+                                     '--model', 'test', '--concurrent', '2'])
+    assert namespace['main']() == 1
+    report = json.loads(capsys.readouterr().out)
+    assert sorted(seen) == ['broken', 'healthy']
+    assert report['results'] == [
+        {'task_name': 'broken', 'error': 'sandbox setup failed'},
+        {'task_name': 'healthy', 'error': None},
+    ]
+
+
+def test_review_entrypoint_reports_empty_input(monkeypatch, tmp_path, capsys):
+    import json
+    import sys
+
+    namespace = _repair_task().__globals__
+    monkeypatch.setattr(namespace['credentials'], 'get', lambda _key: '')
+    monkeypatch.setattr(sys, 'argv', ['harbor_check_e2b.py', str(tmp_path), '--model', 'test'])
+    assert namespace['main']() == 1
+    assert json.loads(capsys.readouterr().out) == {
+        'results': [], 'error': 'no task.toml files found'}
+
+
+def test_completed_quality_failure_returns_failure_to_production(monkeypatch, tmp_path, capsys):
+    import sys
+    from types import SimpleNamespace
+    namespace = _repair_task().__globals__
+    monkeypatch.setattr(namespace['credentials'], 'get', lambda _key: '')
+    monkeypatch.setitem(namespace, '_cap_e2b_timeout', lambda: None)
+    (tmp_path / 'task.toml').write_text('')
+    checks = {c.name: {'outcome': 'pass', 'explanation': 'reviewed'}
+              for c in namespace['checker'].load_rubric().criteria}
+    checks['pinned_dependencies']['outcome'] = 'fail'
+    async def check(*args, **kwargs):
+        item = SimpleNamespace(model_dump=lambda: {'error': None, 'checks': checks})
+        return SimpleNamespace(results=[item]), tmp_path
+    monkeypatch.setattr(namespace['checker'], 'run_checks', check)
+    monkeypatch.setattr(sys, 'argv', ['harbor_check_e2b.py', str(tmp_path), '--model', 'test'])
+    assert namespace['main']() == 1
+    capsys.readouterr()
+    checks['pinned_dependencies']['outcome'] = 'pass'
+    assert namespace['main']() == 0
+    capsys.readouterr()
+    checks.pop('pinned_dependencies')
+    assert namespace['main']() == 1

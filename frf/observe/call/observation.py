@@ -159,10 +159,18 @@ def freeze_corpus(runs_by_probe: dict) -> FreezeReport:
     return FreezeReport(kept, lost)
 
 
-def grade(expectation: Expectation, actual: Observation) -> tuple[int, int, str]:
+def grade(expectation: Expectation, actual: Observation, *, reference=None, policy=None) -> tuple[int, int, str]:
     """-> (passed, total, reason). An ungraded expectation contributes nothing to either count."""
     if not expectation.graded():
         return 0, 0, ""
+    if policy:
+        from ..compare.numeric import compare_numeric, validate_numeric_policy
+        validate_numeric_policy(policy)
+        if reference is None or reference.digest() != expectation.digest:
+            return 0, 1, 'numerical baseline is unavailable or changed'
+        if reference.ok and actual.ok:
+            same, reason = compare_numeric(reference.value, actual.value, policy)
+            return int(same), 1, reason
     if actual.digest() == expectation.digest:
         return 1, 1, ""
     # WHAT differed, in the terms the two outcomes are in. "expected a value, got a refusal" is a

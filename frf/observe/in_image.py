@@ -22,17 +22,17 @@ COST, measured: a median of 52 seconds per task, against 5.3 minutes to produce 
 """
 from __future__ import annotations
 
-import io
 import json
 import os
 import re
-import tarfile
+import shlex
 import time
+import uuid
 from typing import Callable
 
 # Directories never worth shipping into the sandbox. `.git` in particular can be larger than
 # everything else in the task combined.
-SKIP_DIRS = frozenset((".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"))
+SKIP_DIRS = frozenset((".git", ".hg", "__pycache__", ".pytest_cache", ".venv"))
 
 OPEN_TIMEOUT = 180.0
 TRANSFER_TIMEOUT = 900.0
@@ -62,18 +62,8 @@ def tar_bytes(root: str) -> bytes:
     A tar rather than file-by-file writes, because tar carries the mode bits: `tests/reference/run.sh`
     is executable and a submission whose entry point is not executable does not start.
     """
-    buffer = io.BytesIO()
-    # GZIPPED, BECAUSE A REPO TASK CARRIES A WHOLE CHECKOUT. Uncompressed, the upload of a real one
-    # timed out against the sandbox filesystem endpoint and the gate came back INCONCLUSIVE -- so
-    # the task shipped without the one check that opens the image it delivers. Repository trees are
-    # mostly text and compress three to five times.
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        for directory, dirs, files in os.walk(root):
-            dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
-            for name in sorted(files):
-                full = os.path.join(directory, name)
-                archive.add(full, arcname=os.path.relpath(full, root))
-    return buffer.getvalue()
+    from ..core.containers import _tar_bytes
+    return _tar_bytes(root, exclude=set(SKIP_DIRS), compress=True)
 
 
 # Lines a build writes when it is explaining itself. A docker build ends with a frame quoting the
@@ -185,16 +175,17 @@ def _report_in(blob: str) -> dict | None:
             found = value
 
 
-def drive(task_dir: str, *, api_key: str, template: str,
-          log: Callable[[str], None] = lambda _m: None) -> dict:
+def drive(task_dir: str, *, api_key: str = "", template: str = "", backend=None,
+          log: Callable[[str], None] = lambda _m: None, offline: bool = False,
+          image_export: Callable | None = None) -> dict:
     """Build this task's image, run its verifier in it. -> {ok, passed, total, stage, detail, note}.
 
     A sandbox that could not be opened comes back as `stage="unavailable"`, not as an exception:
     "we could not ask" is not a verdict about the task, and the caller reads it as inconclusive.
     """
-    from e2b import Sandbox
-
     name = os.path.basename(task_dir.rstrip("/"))
+    if image_export is not None and getattr(backend, 'name', '') != 'remote':
+        raise ValueError('image export requires the caller-owned remote backend')
     started = time.monotonic()
     record = {"task": name, "path": task_dir, "ok": False, "stage": "", "detail": "",
               "note": "", "passed": 0, "total": 0, "seconds": 0.0,
@@ -204,14 +195,47 @@ def drive(task_dir: str, *, api_key: str, template: str,
         record.update(stage="dockerfile", detail="no environment/Dockerfile to build")
         return record
 
+    # Reference replay can succeed with a mislabeled cross task or overlapping timing inputs.
+    # Reject those contradictions before spending a sandbox on a build or exporting an image.
+    from pathlib import Path
+    import tomllib
+    from .artifact_contract import contract_findings
+    config_path = Path(task_dir) / 'task.toml'
+    try:
+        config = tomllib.loads(config_path.read_text()) if config_path.is_file() else {}
+        metadata = dict(config.get('metadata', {}), scale=record['scale'])
+        contradictions = contract_findings(Path(task_dir), metadata)
+    except (OSError, ValueError, TypeError) as error:
+        record.update(stage='artifact-contract', detail='invalid task contract: ' + type(error).__name__)
+        return record
+    if contradictions:
+        record.update(stage='artifact-contract', detail=json.dumps(contradictions, sort_keys=True))
+        return record
+
+    from ..core import resources
+    resources.require_headroom(task_dir)
     sandbox = None
+    remote = "/tmp/frf-in-image-" + uuid.uuid4().hex
+    tag = _tag_for(name) + "-" + uuid.uuid4().hex[:12]
+    container_name = "frf-replay-" + uuid.uuid4().hex
+
+    def run(command, *, timeout):
+        if backend is not None:
+            done = backend.run(["sh", "-c", command], timeout=timeout)
+            return _Outcome(done.exit_code, done.stdout, done.stderr)
+        return _run(sandbox, command, timeout=timeout)
+
     try:
         try:
             # `int`, because the sandbox lifetime crosses the wire as an int32 and a float is
             # rejected outright: `cannot unmarshal number 3000.0 into ... timeout of type int32`.
-            sandbox = Sandbox.create(template=template,
-                                     timeout=int(BUILD_TIMEOUT + REPLAY_TIMEOUT),
-                                     api_key=api_key, request_timeout=OPEN_TIMEOUT)
+            if backend is None:
+                from e2b import Sandbox
+                sandbox = Sandbox.create(template=template,
+                                         timeout=int(BUILD_TIMEOUT + REPLAY_TIMEOUT),
+                                         api_key=api_key, request_timeout=OPEN_TIMEOUT)
+            elif getattr(backend, "name", "") != "remote":
+                raise ValueError("delivered-image replay requires a remote backend")
         except Exception as why:                           # noqa: BLE001 -- ours, not the task's
             # HANDLED HERE, NOT RAISED UPWARDS. "We could not open a sandbox" is not a verdict about
             # the task, and the pipeline must not have to import this module to learn the difference
@@ -221,23 +245,29 @@ def drive(task_dir: str, *, api_key: str, template: str,
                           detail="could not open a build sandbox: %s" % str(why)[:300])
             return record
 
-        remote = "/tmp/frf-in-image-%d" % (abs(hash(task_dir)) % 10 ** 10)
-        sandbox.commands.run("mkdir -p %s" % remote, timeout=30, request_timeout=60)
         # THE WIRE IS NOT THE MATERIAL, ON THE WAY IN TOO. A timeout uploading the tarball is not a
         # statement about the task, and swallowing it as INCONCLUSIVE means the task ships with the
         # gate unrun -- which is the same as not having a gate, only quieter.
-        payload = tar_bytes(task_dir)
-        for attempt in range(TRANSFER_ATTEMPTS):
-            try:
-                sandbox.files.write("%s/task.tar" % remote, payload,
-                                    request_timeout=TRANSFER_TIMEOUT)
-                break
-            except Exception:                              # noqa: BLE001 -- retried, then reported
-                if attempt == TRANSFER_ATTEMPTS - 1:
-                    raise
-                time.sleep(5.0 * (attempt + 1))
-        sandbox.commands.run("tar -xzf %s/task.tar -C %s" % (remote, remote),
-                             timeout=300, request_timeout=360)
+        if backend is not None:
+            backend.push(task_dir, remote, exclude=set(SKIP_DIRS))
+        else:
+            prepared = run("mkdir -p %s" % remote, timeout=30)
+            if prepared.exit_code != 0:
+                raise RuntimeError(prepared.output[-700:])
+            payload = tar_bytes(task_dir)
+            for attempt in range(TRANSFER_ATTEMPTS):
+                try:
+                    sandbox.files.write("%s/task.tar" % remote, payload,
+                                        request_timeout=TRANSFER_TIMEOUT)
+                    break
+                except Exception:                          # noqa: BLE001 -- bounded retry
+                    if attempt == TRANSFER_ATTEMPTS - 1:
+                        raise
+                    time.sleep(5.0 * (attempt + 1))
+            del payload
+            unpacked = run("tar -xzf %s/task.tar -C %s" % (remote, remote), timeout=300)
+            if unpacked.exit_code != 0:
+                raise RuntimeError(unpacked.output[-700:])
         # THE MOUNT HAS TO BE USABLE BY THE USER THE IMAGE DECLARES. Task images run as `nobody`;
         # this directory is extracted as root, and a submission that cannot write beside its own
         # sources dies at startup. The verifier says so honestly -- "the submission stopped
@@ -246,17 +276,19 @@ def drive(task_dir: str, *, api_key: str, template: str,
         #
         # `a+rwX` rather than a chown: which uid the image runs as is the image's business, and this
         # must not need to know it in order to hand over a workspace.
-        sandbox.commands.run("chmod -R a+rwX %s" % remote, timeout=120, request_timeout=180)
+        prepared = run("chmod -R a+rwX %s" % remote, timeout=120)
+        if prepared.exit_code != 0:
+            raise RuntimeError(prepared.output[-700:])
 
-        tag = _tag_for(name)
         # THE WIRE IS NOT THE MATERIAL, HERE TOO. A build inside DinD reaches the network for a base
         # image, for apt and for npm, and those fail transiently. Counted as failures they say a
         # task is unbuildable when the task is fine.
         record["stage"] = "build"
         built = None
         for attempt in range(BUILD_ATTEMPTS):
-            built = _run(sandbox, "docker build --pull -t %s %s/environment" % (tag, remote),
-                         timeout=BUILD_TIMEOUT)
+            build_options = '--pull=false --network=none' if offline else '--pull'
+            built = run("docker build %s -t %s %s/environment" % (build_options, tag, remote),
+                        timeout=BUILD_TIMEOUT)
             if built.exit_code == 0:
                 break
             output = built.output
@@ -270,30 +302,66 @@ def drive(task_dir: str, *, api_key: str, template: str,
                                 else "the build produced no output")
             return record
 
-        # THE TWO SEAMS ARE DRIVEN DIFFERENTLY, and assuming otherwise fails a task that is fine:
-        # the repo scale takes `--self-replay` and writes REWARD_PATH, while the call seam takes a
-        # workspace pointing at the shipped reference and reports on stdout. Read
-        # `observe/call/package.drive` and `observe/checkout_task.drive` together before changing
-        # either of these.
+        inspected = run("docker image inspect --format '{{.Id}}' %s" % tag, timeout=30)
+        image_id = inspected.stdout.strip()
+        if inspected.exit_code != 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+            record.update(stage="image-identity", detail="could not resolve the built image ID")
+            return record
+        record["image_id"] = image_id
+
+        from ..core.task_context import workspace_paths
+        inventory = workspace_paths(os.path.join(task_dir, 'environment'))
+        record['stage'] = 'workspace-inventory'
+        check_source = ('import json,os,sys; paths=json.loads(sys.argv[1]); '
+                        'missing=[p for p in paths if not os.path.isfile(p) or not os.access(p,os.R_OK)]; '
+                        'print(json.dumps({"missing":missing,"uid":os.geteuid()})); '
+                        'sys.exit(bool(missing) or os.geteuid()==0)')
+        inspected = run('docker run --rm --network=none --entrypoint python3 %s -I -c %s %s' %
+                        (image_id, shlex.quote(check_source), shlex.quote(json.dumps(inventory))), timeout=60)
+        if inspected.exit_code != 0:
+            record['detail'] = 'instruction workspace paths are not available in the image: ' + inspected.output[-1500:]
+            return record
+        record['workspace_inventory'] = {'checked': len(inventory), 'ok': True}
+
+        verifier_image = image_id
+        verifier_tag = tag + '-verifier'
+        if os.path.isfile(os.path.join(task_dir, 'tests', 'Dockerfile')):
+            record['stage'] = 'verifier-build'
+            options = '--pull=false --network=none' if offline else '--pull=false'
+            built_verifier = run('docker build %s --build-arg SOLVER_IMAGE=%s -t %s %s/tests' %
+                                 (options, tag, verifier_tag, remote), timeout=BUILD_TIMEOUT)
+            if built_verifier.exit_code != 0:
+                record['detail'] = _why_it_failed(built_verifier.output)
+                return record
+            inspected_verifier = run("docker image inspect --format '{{.Id}}' %s" % verifier_tag, timeout=30)
+            verifier_image = inspected_verifier.stdout.strip()
+            if inspected_verifier.exit_code != 0 or not re.fullmatch(r'sha256:[0-9a-f]{64}', verifier_image):
+                record['detail'] = 'could not resolve the verifier image ID'
+                return record
+            record['verifier_image_id'] = verifier_image
+
+        # Process verifiers select the submission through the environment; call verifiers also
+        # consume CLI arguments. Preserve the verifier status across reward-file printing.
         record["stage"] = "replay"
         if record["scale"] == "repo":
-            command = ("REWARD_PATH=/tmp/reward.json python3 tests/verify.py "
-                       "--task-root tests --workspace environment --self-replay; "
-                       "cat /tmp/reward.json 2>/dev/null")
+            command = ("REWARD_PATH=/tmp/reward.json SUBMISSION_ROOT=/task/tests/reference "
+                       "python3 tests/verify.py; "
+                       "status=$?; cat /tmp/reward.json 2>/dev/null; exit $status")
         else:
             command = ("REWARD_PATH=/tmp/reward.json SUBMISSION_ROOT=tests/reference "
                        "python3 tests/verify.py --task-root tests --workspace tests/reference; "
-                       "cat /tmp/reward.json 2>/dev/null")
-        replay = _run(sandbox,
-                      "docker run --rm -v %s:/task -w /task %s sh -c %s"
-                      % (remote, tag, json.dumps(command)),
-                      timeout=REPLAY_TIMEOUT)
+                       "status=$?; cat /tmp/reward.json 2>/dev/null; exit $status")
+        replay = run("docker run --rm --name %s --user 0 --network=none "
+                     "-v %s:/task -w /task %s sh -c %s"
+                     % (container_name, remote, verifier_image, shlex.quote(command)),
+                     timeout=REPLAY_TIMEOUT)
 
         blob = replay.output
         report = _report_in(blob)
         if report is None:
             record["detail"] = "verifier produced no graded report: " + blob.strip()[-700:]
             return record
+        record["report"] = report
 
         passed = int(report.get("correctness_passed", 0))
         total = int(report.get("correctness_total", 0))
@@ -301,29 +369,64 @@ def drive(task_dir: str, *, api_key: str, template: str,
         # tasks whose causes were not the same thing at all, and the thing that exists to find
         # defects cannot say which defect it found.
         record.update(passed=passed, total=total, note=str(report.get("note", ""))[:400])
-        if total <= 0:
+        if replay.exit_code != 0:
+            record["detail"] = "the verifier exited nonzero: " + record["note"]
+        elif total <= 0:
             record["detail"] = "the shipped verifier graded nothing inside the delivered image"
+        elif report.get("timing_valid") is not True:
+            record["detail"] = "the delivered verifier could not validate timing: " + record["note"]
         elif passed == total:
             record.update(ok=True, stage="",
                           detail="%d/%d inside the delivered image" % (passed, total))
         else:
             record["detail"] = "%d/%d inside the delivered image%s" % (
                 passed, total, (" -- %s" % record["note"]) if record["note"] else "")
+        if record['ok'] and image_export is not None:
+            record['stage'] = 'image-export'
+            exported_report = dict(report, verifier_image_id=record['verifier_image_id']) if record.get('verifier_image_id') else report
+            record['image_export'] = image_export(image_id, exported_report)
+            record['stage'] = ''
         return record
     except Exception as why:                               # noqa: BLE001 -- reported, not raised
         # ONE TASK MUST NOT END THE RUN, and losing this is how a refactor turned a working audit
         # into a crash. The SDK raises `CommandExitException` when a command exits non-zero, so a
         # single task whose `docker build` failed took the whole pool with it and 129 tasks produced
         # no report at all. The same rule the pipeline applies to candidates applies to this.
+        record["ok"] = False
         record["detail"] = "%s: %s" % (type(why).__name__, " ".join(str(why).split())[-700:])
         return record
     finally:
+        if backend is not None and getattr(backend, "name", "") == "remote":
+            failures = []
+            commands = ["docker rm -f %s" % container_name]
+            if record.get('verifier_image_id'):
+                commands.append('docker image rm -f %s-verifier' % tag)
+            commands += ["docker image rm -f %s" % tag, "rm -rf %s" % remote]
+            for command in commands:
+                try:
+                    cleaned = run(command, timeout=60)
+                    # --rm normally removes the container before this final cleanup.
+                    absent = ((command.startswith("docker rm ") and "No such container" in cleaned.output)
+                              or (command.startswith("docker image rm ") and "No such image" in cleaned.output))
+                    if cleaned.exit_code and not absent:
+                        failures.append(cleaned.output[-300:])
+                except Exception as why:
+                    failures.append(type(why).__name__)
+            record["cleanup_ok"] = not failures
+            if failures:
+                record['cleanup_errors'] = failures
+                if record['ok']:
+                    record.update(ok=False, stage="cleanup", detail="; ".join(failures))
         record["seconds"] = round(time.monotonic() - started, 1)
         if sandbox is not None:
             try:
                 sandbox.kill(request_timeout=30)
-            except Exception:                              # noqa: BLE001 -- teardown
-                pass
+                record['cleanup_ok'] = True
+            except Exception as why:
+                record['cleanup_ok'] = False
+                record['cleanup_errors'] = [type(why).__name__]
+                if record['ok']:
+                    record.update(ok=False, stage='cleanup', detail='could not close replay sandbox')
 
 
 __all__ = ["drive", "tar_bytes", "SKIP_DIRS", "BUILD_ATTEMPTS", "TRANSPORT_MARKS"]

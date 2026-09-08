@@ -75,6 +75,9 @@ class Corpus:
     adequacy_note: str = ""
     adequacy: dict = field(default_factory=dict)
     timed: list = field(default_factory=list)
+    timed_expectations: dict = field(default_factory=dict)
+    numeric_policy: dict = field(default_factory=dict)
+    reference_values: dict = field(default_factory=dict, repr=False)
 
     @property
     def probes(self) -> int:
@@ -217,7 +220,11 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
                                       % len(graded))
 
     return Corpus(expectations=graded, inputs=inputs, discard_rate=report.discard_rate,
-                  usable=report.usable, timed=timed)
+                  usable=report.usable, timed=timed,
+                  timed_expectations={e.probe_id: e.digest for e in report.expectations if e.probe_id in timed},
+                  numeric_policy=dict(spec.environment.get('numeric_policy') or {}),
+                  reference_values={pid: answers[0] for pid, answers in observed.items() if answers}
+                  if spec.environment.get('numeric_policy') else {})
 
 
 def _pick_timed(expectations: list, count: int = 3, *, answered: set | None = None) -> list:
@@ -268,7 +275,7 @@ def _score_trivial(observer, spec: Spec, corpus: Corpus, kind: str) -> tuple[int
     for expectation in corpus.expectations:
         args = corpus.inputs[expectation.probe_id]
         answer = obs.Observation(True, args[0] if constant == "echo" and args else constant)
-        got, want, _ = obs.grade(expectation, answer)
+        got, want, _ = _grade(corpus, expectation, answer)
         passed += got
         total += want
     return passed, total
@@ -300,10 +307,30 @@ def _score_reference(observer, spec: Spec, corpus: Corpus) -> tuple[int, int]:
         # call grouping and can make a reproducible reference miss its own expectations.
         actual = [subject.call("run", corpus.inputs[pid]) for pid in ids]
         for expectation, answer in zip(corpus.expectations, actual):
-            got, want, _ = obs.grade(expectation, answer)
+            if getattr(corpus, 'numeric_policy', {}) and answer.digest() != expectation.digest:
+                got, want = 0, int(expectation.graded())
+            else:
+                got, want, _ = _grade(corpus, expectation, answer)
             passed += got
             total += want
     return passed, total
+
+
+def _grade(corpus, expectation, answer):
+    return obs.grade(expectation, answer,
+                     reference=getattr(corpus, 'reference_values', {}).get(expectation.probe_id),
+                     policy=getattr(corpus, 'numeric_policy', {}))
+
+
+def _changed(corpus, expectation, answer):
+    if answer.digest() == expectation.digest:
+        return False
+    policy = getattr(corpus, 'numeric_policy', {})
+    reference = getattr(corpus, 'reference_values', {}).get(expectation.probe_id)
+    if policy and reference is not None and reference.ok and answer.ok:
+        from ..compare.numeric import compare_numeric
+        return not compare_numeric(reference.value, answer.value, policy)[0]
+    return True
 
 
 def _perturb(observer, spec: Spec, corpus: Corpus) -> tuple[bool, bool]:
@@ -325,9 +352,9 @@ def _perturb(observer, spec: Spec, corpus: Corpus) -> tuple[bool, bool]:
                 else:
                     actual = [subject.call("run", args) for args in inputs]
                 for expectation, answer in zip(corpus.expectations, actual):
-                    if answer.digest() != expectation.digest:
+                    if _changed(corpus, expectation, answer):
                         diverged = True
-                    got, want, _ = obs.grade(expectation, answer)
+                    got, want, _ = _grade(corpus, expectation, answer)
                     if got != want:
                         caught = True
         except TypeError:
@@ -336,9 +363,9 @@ def _perturb(observer, spec: Spec, corpus: Corpus) -> tuple[bool, bool]:
             with observer.subject(spec, mutated=True) as subject:
                 for expectation in corpus.expectations:
                     answer = subject.call("run", corpus.inputs[expectation.probe_id])
-                    if answer.digest() != expectation.digest:
+                    if _changed(corpus, expectation, answer):
                         diverged = True
-                    got, want, _ = obs.grade(expectation, answer)
+                    got, want, _ = _grade(corpus, expectation, answer)
                     if got != want:
                         caught = True
             return diverged, caught
@@ -365,7 +392,7 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
 
     package = harbor.Package(
         name=spec.name, scale=spec.scale, description=spec.description,
-        instruction=statement.generate_instruction(spec), source_language=spec.language,
+        instruction=statement.render(facts), source_language=spec.language,
         target_language=spec.target_language,
         provenance={"origin": spec.environment.get("origin") or spec.name,
                     # The same three numbers the statement quotes. Passed explicitly because the
@@ -380,6 +407,8 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
     path = os.path.join(destination, spec.name)
     harbor.write(path, package)
     write_tests(path, corpus)
+    from ...core import task_context
+    task_context.finish(path, spec, facts)
     # E9 READS WHAT WAS WRITTEN, so it cannot run with the rest of the battery: the file does not
     # exist until this function has. It lives here rather than in the pipeline because WHICH file
     # carries the schema is a fact about this layout, and a scale is free to emit another one.
@@ -439,6 +468,7 @@ class Seam:
         self._drive = drive
 
     def stages(self) -> dict:
+        from ..replay import execution_evidence
         return {
             "build": lambda spec: self._scale.observe().build(spec),
             "freeze": lambda spec, observer, source, runs: freeze(spec, observer, source, runs=runs),
@@ -447,4 +477,5 @@ class Seam:
             "emit": lambda spec, corpus, checks: emit(
                 self._destination, spec, corpus, checks, write_tests=self._write_tests),
             "replay": lambda path: replay(path, drive=self._drive),
+            "execution_evidence": execution_evidence,
         }

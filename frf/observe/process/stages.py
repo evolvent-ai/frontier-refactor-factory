@@ -21,7 +21,7 @@ from __future__ import annotations
 import collections
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 from ...core import adequacy, evidence, harbor, statement
@@ -59,6 +59,7 @@ class Corpus:
     adequacy_note: str = ""
     adequacy: dict = field(default_factory=dict)
     timed: list = field(default_factory=list)
+    timed_expectations: dict = field(default_factory=dict)
     # HOW MANY RUNS THIS WAS ACTUALLY DISTILLED FROM, not how many were requested. The two differ
     # whenever a run is cut short, and a statement quoting the configured number would be claiming
     # evidence nobody collected.
@@ -198,7 +199,30 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
 
     attempted = len(scenarios)
     rate = (dropped / attempted) if attempted else 0.0
-    timed = _pick_timed(list(frozen), worked=worked)
+    from .workload import control_output_signatures, eligible_timing_steps
+    all_rules = {pid: [step.to_json() for step in steps] for pid, steps in frozen.items()}
+    controls = control_output_signatures([scenario.to_json() for scenario in scenarios], all_rules)
+    eligible = set()
+    for scenario in scenarios:
+        if scenario.probe_id not in frozen:
+            continue
+        declared = {"fixture": getattr(scenario, "fixture", None), "steps": [
+            {"argv": getattr(step, "argv", []), "stdin": getattr(step, "stdin", None)}
+            for step in scenario.steps]}
+        rules = all_rules[scenario.probe_id]
+        if eligible_timing_steps(declared, rules, controls):
+            eligible.add(scenario.probe_id)
+    from .workload import command_family
+    features = dict(getattr(source, 'workload_features', {}) or {})
+    for scenario in scenarios:
+        features.setdefault(scenario.probe_id, {'family': command_family(scenario.to_json()),
+                                               'input_key': scenario.probe_id, 'input_bytes': 0})
+    timed = _pick_timed(list(frozen), worked=eligible, features=features)
+    if not timed:
+        return Corpus(scenarios=scenarios, expectations=frozen, usable=False, runs=runs,
+                      adequacy_note="no successful input-bearing workload can be held out while "
+                                    "retaining one for grading; help/version/error-only timing is invalid",
+                      unusable_reason="no substantive timing workload")
     graded = {pid: steps for pid, steps in frozen.items() if pid not in set(timed)}
 
     # AND THE HOLDOUT MUST NOT HAVE TAKEN THE ONLY WORKING SCENARIO. `_pick_timed` keeps one back,
@@ -217,11 +241,13 @@ def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
                   % (100 * rate, ", ".join("%s (x%d)" % (text, count)
                                            for text, count in why.most_common(3))))
     return Corpus(scenarios=[s for s in scenarios if s.probe_id in frozen],
+                  timed_expectations={pid: frozen[pid] for pid in timed},
                   expectations=graded, discard_rate=rate, unusable_reason=reason,
                   usable=usable, timed=timed, runs=runs)
 
 
-def _pick_timed(probe_ids: list, count: int = 3, *, worked: set | None = None) -> list:
+def _pick_timed(probe_ids: list, count: int = 3, *, worked: set | None = None,
+                features: dict | None = None) -> list:
     """Which scenarios become the timing workload, held out of grading.
 
     Held out because correctness runs first: a scenario that is both graded and timed can be
@@ -237,14 +263,36 @@ def _pick_timed(probe_ids: list, count: int = 3, *, worked: set | None = None) -
     So the holdout is drawn from working scenarios, and at least one is always left behind to be
     graded: a corpus needs both halves to show the program working.
     """
-    if not worked:
-        return probe_ids[-count:] if len(probe_ids) > count else []
+    if not worked or count <= 0:
+        return []
     working = [pid for pid in probe_ids if pid in worked]
     # One stays behind, whatever else happens -- see the second gate in `freeze`.
     available = max(0, len(working) - 1)
     if available <= 0:
         return []
-    return working[-min(count, available):]
+    features = features or {}
+    def feature(pid):
+        return features.get(pid, {'family': 'unknown', 'input_key': pid, 'input_bytes': 0})
+    remaining = collections.Counter(feature(pid)['family'] for pid in working)
+    selected, families, inputs = [], set(), set()
+    while len(selected) < min(count, available):
+        candidates = [pid for pid in working if pid not in selected
+                      and remaining[feature(pid)['family']] > 1]
+        if not candidates:
+            break
+        def priority(pid):
+            item = feature(pid)
+            fresh_input = item['input_key'] not in inputs
+            fresh_family = item['family'] not in families
+            return (fresh_input + fresh_family, fresh_input, fresh_family,
+                    item.get('input_bytes', 0), pid)
+        picked = max(candidates, key=priority)
+        item = feature(picked)
+        selected.append(picked)
+        families.add(item['family'])
+        inputs.add(item['input_key'])
+        remaining[item['family']] -= 1
+    return selected
 
 
 def audit(spec: Spec, observer, corpus: Corpus) -> Corpus:
@@ -268,11 +316,16 @@ def audit(spec: Spec, observer, corpus: Corpus) -> Corpus:
         }
         from .runner import Scenario
         scenario = Scenario.from_json(scenario_data)
-        observations = observer.run(spec, scenario)
+        if not scenario.steps[0].argv or scenario.steps[0].argv[0] != '{PROGRAM}':
+            raise ValueError('repair must directly invoke the subject')
+        if corpus.runs < 2:
+            raise ValueError('repair requires the original repeated-freeze protocol')
+        repeated = [observer.run(spec, scenario) for _ in range(corpus.runs)]
+        if any(len(observed) != len(scenario.steps) for observed in repeated):
+            raise ValueError('repair did not observe every step on every run')
         steps = [
-            obs.freeze(step_idx, [observations[step_idx]])
+            obs.freeze(step_idx, [observed[step_idx] for observed in repeated])
             for step_idx in range(len(scenario.steps))
-            if step_idx < len(observations)
         ]
         if any(step.graded_points() for step in steps):
             corpus.scenarios.append(scenario)
@@ -339,7 +392,7 @@ def _steps_touching_subject(corpus: Corpus) -> tuple[int, int]:
                 continue
             total += 1
             step = scenario.steps[index] if scenario and index < len(scenario.steps) else None
-            if step and any("{PROGRAM}" in str(part) for part in step.argv):
+            if step and step.argv and step.argv[0] == '{PROGRAM}':
                 touching += 1
     return touching, total
 
@@ -366,8 +419,11 @@ def _perturb(observer, spec: Spec, corpus: Corpus, channel: str) -> tuple[bool, 
                 moved = (len(stream.lines) != expected.line_count
                          or stream.digest(expected.masked) != expected.digest)
             diverged = diverged or moved
-            got, want, _ = obs.grade(expectation, actual)
-            caught = caught or got != want
+            targeted = replace(expectation, **{
+                name: replace(expectation.channel(name), graded=False)
+                for name in obs.CHANNELS if name != channel})
+            got, want, _ = obs.grade(targeted, actual)
+            caught = caught or bool(moved and want > 0 and got < want)
     return diverged, caught
 
 
@@ -384,7 +440,7 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
 
     package = harbor.Package(
         name=spec.name, scale=spec.scale, description=spec.description,
-        instruction=statement.generate_instruction(spec), source_language=spec.language,
+        instruction=statement.render(facts), source_language=spec.language,
         target_language=spec.target_language,
         provenance={"origin": spec.environment.get("origin") or spec.name,
                     # The same three numbers the statement quotes. Passed explicitly because the
@@ -399,6 +455,8 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
     path = os.path.join(destination, spec.name)
     harbor.write(path, package)
     write_tests(path, corpus)
+    from ...core import task_context
+    task_context.finish(path, spec, facts)
     # E9 READS WHAT WAS WRITTEN, so it cannot run with the rest of the battery: the file does not
     # exist until this function has. It lives here rather than in the pipeline because WHICH file
     # carries the schema is a fact about this layout, and a scale is free to emit another one.
@@ -438,6 +496,7 @@ class Seam:
         self._drive = drive
 
     def stages(self) -> dict:
+        from ..replay import execution_evidence
         return {
             "build": lambda spec: self._scale.observe().build(spec),
             "freeze": lambda spec, observer, source, runs: freeze(spec, observer, source, runs=runs),
@@ -446,4 +505,5 @@ class Seam:
             "emit": lambda spec, corpus, checks: emit(
                 self._destination, spec, corpus, checks, write_tests=self._write_tests),
             "replay": lambda path: self._drive(path),
+            "execution_evidence": execution_evidence,
         }

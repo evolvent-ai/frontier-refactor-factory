@@ -132,6 +132,20 @@ class ProbeSource:
             elif param.kind in ("int_array", "float_array") and index < 4:
                 size = int(shape.get(param.size, 0)) if isinstance(param.size, str) else int(param.size or 0)
                 args[n] = [0] * min(size, (0, 1, 4, 16)[index])
+        # Array kernels need explicit structural cases; independently sampling equal-length arrays
+        # misses reordered and mismatched-shape behavior and lets an implementation hard-code one
+        # happy path. Keep these probes deterministic and JSON-safe.
+        arrays = [n for n, param in enumerate(self.schema.params)
+                  if param.kind in ("int_array", "float_array")]
+        if len(arrays) >= 2:
+            left, right = arrays[:2]
+            if index == 4:
+                args[right] = list(reversed(args[left]))
+            elif index == 5:
+                args[right] = list(args[left])[:-1]
+            elif index == 6 and args[left]:
+                args[left][0] = args[left][0] + 1
+                args[right] = list(args[left])
         return args
 
 
@@ -147,7 +161,8 @@ class Observer:
         self.material = material
         # Which sandbox the subject runs in, so that `isolation()` can answer from what is actually
         # in force rather than from a hope. None means this process, which isolates nothing.
-        self._backend = backend
+        from ..observe.reference_backend import source_runtime
+        self._backend = source_runtime(backend, material.language)
         # Set by `_restricted` when the wrapper is genuinely applied, and read by `isolation`. A
         # flag rather than an inference from the backend's name: naming a container says the
         # defence is POSSIBLE, and only applying it makes the defence real.
@@ -367,8 +382,12 @@ class Module:
         # Widening indexes (GitHub -> functions) do real checkout and AST work per row. Keep the
         # source page close to the requested batch size so budget=1 does not expand fifty repos.
         page_size = 4 if getattr(self._index, "name", "") == "github-functions" else 50
+        try:
+            source_deadline = float(os.environ.get("FRF_SOURCING_MAX_SECONDS", "0")) or None
+        except ValueError:
+            source_deadline = None
         return sourcing.walk(self._index, budget, page_size=page_size,
-                             memory=sourcing.batch_memory(self))
+                             memory=sourcing.batch_memory(self), max_seconds=source_deadline)
 
     def specify(self, candidate: Candidate, *,
                 task_form: TaskForm = TaskForm.INPLACE) -> Spec:
@@ -391,7 +410,8 @@ class Module:
         self._built = None
         material = self._material
         target_language = getattr(self, "_target_language", "")
-        return Spec(name=_task_name(material, target_language), scale=self.name,
+        name_target = target_language if target_language.lower() != material.language.lower() else ""
+        return Spec(name=_task_name(material, name_target), scale=self.name,
                     language=material.language,
                     description=material.description,
                     invoke=["serve", material.symbol], entry=material.symbol,
@@ -399,7 +419,11 @@ class Module:
                     task_form=task_form,
                     environment={"subject_path": os.path.join(
                                      self._workspace, shims.load(material.language).subject),
-                                 "forbidden": list(material.forbidden)})
+                                 "forbidden": list(material.forbidden),
+                                 "scope_guidance": ("Focus on the selected function or method and "
+                                                     "preserve its calling convention, return values, "
+                                                     "exceptions, mutation, ordering, and side effects."),
+                                 "invocation_label": "Factory dispatch marker"})
 
     def observe(self):
         if self._observer is not None:

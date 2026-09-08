@@ -10,7 +10,7 @@ so the run is reproducible from what is written into provenance.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -44,6 +44,12 @@ class JobConfig:
             raise ValueError("unknown scale %r" % self.scale)
         if self.form not in ("inplace", "cross"):
             raise ValueError("form must be 'inplace' or 'cross', got %r" % self.form)
+        source, target = self.source_language.strip().lower(), self.target_language.strip().lower()
+        self.source_language, self.target_language = source, target
+        if self.form == "cross" and (not target or target == source):
+            raise ValueError("cross requires a target_language different from source_language")
+        if self.form == "inplace" and target and (not source or target != source):
+            raise ValueError("inplace target_language must be empty or equal the explicit source_language")
         if self.budget < 1:
             raise ValueError("budget must be at least 1, got %d" % self.budget)
         if self.max_attempts < 0:
@@ -102,9 +108,11 @@ class RunConfig:
         jobs = []
         for j in raw_jobs:
             j = dict(j)
+            if "form" not in j:
+                raise ValueError("each job must explicitly specify form: inplace or cross")
             jobs.append(JobConfig(
                 scale=j["scale"],
-                form=j.get("form", "inplace"),
+                form=j["form"],
                 source_language=j.get("source_language", ""),
                 target_language=j.get("target_language", ""),
                 budget=int(j.get("budget", 10)),

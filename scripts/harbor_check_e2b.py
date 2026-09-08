@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import time
@@ -20,6 +21,26 @@ from pathlib import Path
 from harbor.analyze import checker
 
 from frf.core import credentials
+
+
+def _cap_e2b_timeout() -> None:
+    """Keep Harbor 0.22's provider within the deployed E2B account's one-hour limit."""
+    from harbor.environments import e2b as harbor_e2b
+
+    sandbox_type = harbor_e2b.AsyncSandbox
+    original = getattr(sandbox_type, "_frf_timeout_capped_create", None)
+    if original is not None:
+        return
+    create = sandbox_type.create
+
+    async def capped_create(*args, **kwargs):
+        timeout = kwargs.get("timeout")
+        if timeout is None or timeout > 3600:
+            kwargs["timeout"] = 3600
+        return await create(*args, **kwargs)
+
+    sandbox_type.create = capped_create
+    sandbox_type._frf_timeout_capped_create = create
 
 
 _assemble = checker.assemble_check_task
@@ -140,6 +161,7 @@ def main() -> int:
     parser.add_argument("--repair", action="store_true")
     parser.add_argument("--repair-only", action="store_true")
     args = parser.parse_args()
+    _cap_e2b_timeout()
     if args.repair:
         changed = repair_task(args.task)
         if args.repair_only:
@@ -194,7 +216,7 @@ def main() -> int:
         except Exception as exc:
             # A single task's Harbor setup failure must remain auditable without cancelling the
             # other bounded reviews in the batch.
-            return SimpleReport(task_dir.name, str(exc))
+            return SimpleReport(task_dir.name, str(exc)), None
 
     reports = asyncio.run(run_all(task_dirs, run_one, max(1, args.concurrent)))
     results = []
@@ -202,7 +224,21 @@ def main() -> int:
         results.extend(report.results)
     payload = {"results": [item.model_dump() for item in results]}
     print(json.dumps(payload, indent=2, default=str))
-    return 0 if all(item.error is None for item in results) else 1
+    required = {criterion.name for criterion in checker.load_rubric().criteria}
+    return 0 if review_results_pass(payload['results'], required) else 1
+
+
+def review_results_pass(results, required):
+    """The production caller uses our exit code: completed reviews can still fail quality."""
+    if not results:
+        return False
+    for result in results:
+        checks = result.get('checks') or {}
+        if result.get('error') is not None or not required.issubset(checks):
+            return False
+        if any(check.get('outcome') not in ('pass', 'not_applicable') for check in checks.values()):
+            return False
+    return True
 
 
 async def run_all(task_dirs, runner, limit: int):

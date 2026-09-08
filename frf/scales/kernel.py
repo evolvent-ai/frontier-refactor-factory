@@ -10,9 +10,9 @@ restating a scale.
     dtype and a shape. A numeric routine cannot be expressed without them, and nothing else in the
     factory needs them -- which is the evidence that the call seam was always wide enough for this.
 
-    FLOAT ENVELOPE. A numeric kernel that reorders a reduction produces a bitwise-different and
-    entirely correct answer. Exact comparison would fail every correct rewrite. The reference's own
-    error is the ruler, and a candidate is correct while it is no worse.
+    FLOAT ENVELOPE. Floating results follow an explicit absolute/relative tolerance against the
+    frozen original behavior. Upstream assertions take priority over declared-precision defaults.
+    This does not claim an independently measured high-precision error bound for the reference.
 
     PLUGGABLE COST. Wall-clock is the default and the noisiest option. A routine in a closed
     simulator reports cycles, which are exact; a CPU kernel can report instructions retired. The
@@ -32,13 +32,28 @@ from .module import Module
 
 # Shapes a numeric routine is drawn at. Larger than the module scale's, because a kernel's cost is
 # supposed to be in the arithmetic: at sixteen elements the measurement is dominated by the call.
-SHAPES = ({"n": 256}, {"n": 4096}, {"n": 65536})
+# Keep the largest frozen JSON/result artifact bounded. Larger numerical workloads belong in the
+# held-out timing pass, not in every expectation payload; 65k-element vectors made one task's
+# expectations tens of megabytes and amplified E2B transfer/memory cost across a batch.
+SHAPES = ({"n": 256}, {"n": 4096}, {"n": 16384})
 
 
 class Kernel(Module):
     """A computational routine. A module with a numeric profile."""
 
     name = "kernel"
+
+    def find(self, budget: int):
+        """Source numeric routines before spending E2B time on module-shaped functions."""
+        wanted = max(budget * 8, budget)
+        for candidate in super().find(wanted):
+            params = ((candidate.detail or {}).get("schema") or {}).get("params", ())
+            if any(str(param.get("kind")) in ARRAY_KINDS
+                   for param in params if isinstance(param, dict)):
+                yield candidate
+                budget -= 1
+                if budget <= 0:
+                    return
 
     def specify(self, candidate: Candidate, *,
                 task_form: TaskForm = TaskForm.INPLACE) -> Spec:
@@ -54,11 +69,17 @@ class Kernel(Module):
         spec = super().specify(candidate, task_form=task_form)
         detail = candidate.detail or {}
         environment = dict(spec.environment)
+        from ..observe.compare.numeric_policy import select_numeric_policy
         environment.update({
             "comparison": "envelope",
+            "numeric_policy": select_numeric_policy(self._material),
             "cost": detail.get("cost", "wall-clock"),
             "gpus": int(detail.get("gpus", 0)),
             "gpu_types": list(detail.get("gpu_types", ())),
+            "scope_guidance": ("Focus on the selected numeric computation and entry symbol. Keep "
+                               "argument types, numeric edge cases, precision/error behavior, "
+                               "and allocation behavior unchanged."),
+            "invocation_label": "Factory dispatch marker",
         })
         enriched = Spec(name=spec.name, scale=self.name, language=spec.language,
                     description=spec.description, build=spec.build, invoke=spec.invoke,
@@ -82,9 +103,10 @@ class Kernel(Module):
         every number computed per scale afterwards would be measuring a mixture.
         """
         material = super()._locate(candidate)
-        if not any(param.kind in ARRAY_KINDS for param in material.schema.params):
+        numeric_array = any(param.kind in ARRAY_KINDS
+                            for param in material.schema.params)
+        if not numeric_array:
             raise ValueError(
-                "%s takes no array parameter, so it is a module rather than a kernel. Kernel tasks "
-                "are numeric routines; the array kinds are %s."
-                % (candidate.identity, ", ".join(ARRAY_KINDS)))
+                "%s is not a numeric kernel: kernel tasks require an int_array, float_array "
+                "or complex_array input" % candidate.identity)
         return material

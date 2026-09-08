@@ -43,6 +43,15 @@ def test_module_probe_prefix_contains_semantic_positive_and_negative_cases():
     assert ["listen", "silent"] in probes
 
 
+def test_array_probe_prefix_covers_reordered_and_mismatched_shapes():
+    schema = Schema.from_json({"params": [
+        {"kind": "float_array", "dtype": "float64", "size": "n"},
+        {"kind": "float_array", "dtype": "float64", "size": "n"}]})
+    probes = ProbeSource(schema).draw(8)
+    assert probes[4][1] == list(reversed(probes[4][0]))
+    assert len(probes[5][1]) == len(probes[5][0]) - 1
+
+
 def test_remote_call_build_uses_backend_instead_of_host_subprocess(tmp_path):
     source = tmp_path / "subject.go"
     source.write_text("package subject\n", encoding="utf-8")
@@ -193,11 +202,14 @@ def test_a_cross_language_repo_names_the_target_in_the_task():
     """The name is what a reader sees first, so it carries the thing that makes the task different."""
     spec = Repo().specify(_candidate("repo", invoke=["./rg"], target_language="Zig",
                                      identity="x"))
-    assert spec.name.endswith("-zig-rewrite"), spec.name
+    assert spec.name.endswith("-to-zig"), spec.name
 
 
-def test_a_repo_harbor_task_replays_its_real_source_in_a_fresh_workspace():
+def test_a_repo_harbor_task_replays_its_real_source_in_a_fresh_workspace(monkeypatch):
     """E7 uses the emitted reference and fixture, rather than factory-local state."""
+    import frf.scales.repo as repo_module
+    generator = repo_module._verifier_source
+    monkeypatch.setattr(repo_module, '_verifier_source', lambda: generator(isolated=False))
     with tempfile.TemporaryDirectory() as work, tempfile.TemporaryDirectory() as task:
         program = os.path.join(work, "program")
         with open(program, "w") as handle:
@@ -205,8 +217,11 @@ def test_a_repo_harbor_task_replays_its_real_source_in_a_fresh_workspace():
         os.chmod(program, 0o755)
         scenario = Scenario("real-source", [Step(["{PROGRAM}", "world"])])
         observed = run_scenario(scenario, [program], exclude=(".git",))
-        corpus = SimpleNamespace(scenarios=[scenario],
-                                 expectations={scenario.probe_id: [freeze(0, [observed[0]])]})
+        timed = Scenario("timed-source", [Step(["{PROGRAM}", "world"])])
+        frozen = [freeze(0, [observed[0]])]
+        corpus = SimpleNamespace(scenarios=[scenario, timed],
+                                 expectations={scenario.probe_id: frozen},
+                                 timed=[timed.probe_id], timed_expectations={timed.probe_id: frozen})
         repo = Repo()
         repo.specify(_candidate("repo", identity="example/real", root=work,
                                 invoke=[program], scenarios=[scenario]))
@@ -421,12 +436,12 @@ def test_task_names_read_as_one_thing_and_carry_no_revision():
     package = package_scale.Material(
         identity="github:gonum/gonum@8d8e8a102004", language="go", root="",
         entry_points=(), description="")
-    assert package_scale._task_name(package) == "gonum-faster"
+    assert package_scale._task_name(package) == "gonum-opt"
 
     rewrite = package_scale.Material(
         identity="github:gonum/gonum@8d8e8a102004", language="go", root="",
         entry_points=(), description="", target_language="rust")
-    assert package_scale._task_name(rewrite) == "gonum-rewrite"
+    assert package_scale._task_name(rewrite) == "gonum-to-rust"
 
     for symbol, expected in (("BubbleSort", "bubble-sort"), ("boyerMoore", "boyer-moore"),
                              ("missing_ranges", "missing-ranges")):

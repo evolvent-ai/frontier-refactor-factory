@@ -5,6 +5,45 @@ import hashlib
 import pytest
 
 
+@pytest.mark.parametrize("scale", ["kernel", "module", "package", "repo"])
+def test_forms_are_explicit_and_language_pairs_are_consistent(scale):
+    with pytest.raises(ValueError, match="explicitly specify form"):
+        RunConfig.from_dict({"jobs": [{"scale": scale}]})
+    for source, target in (("python", ""), ("rust", "rust")):
+        with pytest.raises(ValueError, match="cross requires"):
+            JobConfig(scale, "cross", source_language=source, target_language=target)
+    with pytest.raises(ValueError, match="inplace target_language"):
+        JobConfig(scale, "inplace", source_language="python", target_language="rust")
+    assert JobConfig(scale, "cross", source_language="python", target_language="rust").form == "cross"
+    assert JobConfig(scale, "inplace", source_language="python").form == "inplace"
+
+
+def test_unknown_form_is_rejected_before_allocating_resources():
+    from frf.automation import run
+    with pytest.raises(ValueError, match="form must"):
+        run("repo", form="corss")
+
+
+@pytest.mark.parametrize("kind", ["repo", "package"])
+def test_configured_target_controls_the_task_name(monkeypatch, kind):
+    from frf.core.scale import Candidate, TaskForm
+    from frf.scales import repo, package
+    from frf.core import model
+    monkeypatch.setattr(model, "available", lambda: False)
+    if kind == "repo":
+        scale = repo.Repo()
+        material = repo.Material("github:o/subject@rev", "python", "", invoke=["./tool"])
+    else:
+        scale = package.Package()
+        material = package.Material("github:o/subject@rev", "python", "", ("a", "b"), "")
+    monkeypatch.setattr(scale, "_locate", lambda c: material)
+    scale._target_language = "rust"
+    spec = scale.specify(Candidate(material.identity, kind, "python", "test"),
+                         task_form=TaskForm.CROSS_LANGUAGE)
+    assert spec.target_language == "rust"
+    assert spec.name == "subject-to-rust"
+
+
 def test_diversity_policy_limits_one_repository_without_losing_identity():
     assert repository_key("github:org/repo@abc#pkg.fn") == "github:org/repo"
     policy = DiversityPolicy(max_per_repository=2)

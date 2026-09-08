@@ -167,7 +167,10 @@ def _factory(workspace: str, destination: str) -> Factory:
     # The seam is handed the SCALE, not the observer -- see the call seam's equivalent.
     scale = _RepoScale(observer)
     seam = stages.Seam(scale, destination=destination, write_tests=write_tests, drive=drive)
-    return Factory().register(scale).install_stages(**seam.stages())
+    hooks = seam.stages()
+    # This fixture writes a miniature verifier; real evaluator isolation is tested separately.
+    hooks.pop('execution_evidence')
+    return Factory().register(scale).install_stages(**hooks)
 
 
 def test_a_process_subject_becomes_a_task():
@@ -243,9 +246,10 @@ def test_a_shell_only_corpus_is_caught_by_e5():
         # sees scoring points that are not about the subject. Both are correct findings about the
         # same defect; asserting on one stage name made the test fail the day the other started
         # firing, which is a test tracking an implementation detail rather than the property.
-        assert refusal.stage in ("adequacy", "evidence"), refusal.stage
+        assert refusal.stage in ("freeze", "adequacy", "evidence"), refusal.stage
         detail = refusal.detail.lower()
         assert ("never invoke the subject" in detail      # E5's wording
+                or "no substantive timing workload" in detail
                 or "reach" in detail                       # adequacy, reach half
                 or "does nothing already scores" in detail  # adequacy, floor half
                 ), refusal.detail
@@ -312,6 +316,10 @@ class _FrozenStep:
     def graded_points(self):
         return 4
 
+    def to_json(self):
+        return {name: vars(self.channel(name))
+                for name in ('exit_code', 'stdout', 'stderr', 'tree')}
+
     def channel(self, name):
         from frf.observe.process.observation import _digest
 
@@ -344,8 +352,11 @@ def test_one_scenario_exiting_127_is_still_real_material(monkeypatch):
     class _Scenario:
         def __init__(self, pid, code):
             self.probe_id = pid
-            self.steps = [object()]
+            self.steps = [Step(["{PROGRAM}", "input.txt"])]
             self.code = code
+
+        def to_json(self):
+            return Scenario(self.probe_id, self.steps).to_json()
 
     class _Source:
         count = 8
@@ -438,8 +449,11 @@ def test_an_error_path_is_material_when_the_corpus_also_works(monkeypatch):
 
     class _Scenario:
         def __init__(self, pid, code, out):
-            self.probe_id, self.steps = pid, [object()]
+            self.probe_id, self.steps = pid, [Step(["{PROGRAM}", "input.txt"])]
             self.code, self.out = code, out
+
+        def to_json(self):
+            return Scenario(self.probe_id, self.steps).to_json()
 
     class _Source:
         count = 8

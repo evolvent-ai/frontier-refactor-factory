@@ -248,7 +248,15 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
     that silently shrinks the pond makes a yield figure meaningless, because the denominator is no
     longer the supply.
     """
-    task_form = _FORM_MAP.get(form.strip().lower(), TaskForm.INPLACE)
+    form = form.strip().lower()
+    if form not in _FORM_MAP:
+        raise ValueError("form must be inplace or cross")
+    task_form = _FORM_MAP[form]
+    target_language = target_language.strip().lower()
+    if task_form is TaskForm.CROSS_LANGUAGE and not target_language:
+        raise FormNotHonoured("cross needs a target_language")
+    from .core import resources, scratch
+    resources.require_headroom(output_dir, scratch.base())
     name = scale.strip().lower()
     # Concurrent candidate workers may discover the same human-readable task name across pinned
     # revisions. Keep the Harbor task name stable, but isolate each candidate's output tree so one
@@ -384,7 +392,7 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         _E2B_SLOTS.acquire()
     try:
         factory = Factory(Settings(sandboxed=True, backend=backend, output_dir=output_dir,
-                                   freeze_runs=freeze_runs), log=print)
+                                   freeze_runs=freeze_runs), log=lambda message: print(message, flush=True))
     except Exception:
         if e2b_slot:
             _E2B_SLOTS.release()
@@ -427,7 +435,7 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
             # The writer needs only the language off the spec, and the material carries the same
             # one -- it is where the spec got it. Passing the material twice keeps this wiring
             # from depending on a `_spec` attribute that the call-seam scales do not keep.
-            call_package.write_tests(path, corpus, spec=material, material=material)
+            call_package.write_tests(path, corpus, spec=_scale._spec, material=material)
 
         seam = call_stages.Seam(implementation, destination=output_dir,
                                 write_tests=writer,
@@ -440,14 +448,14 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
         seam = process_stages.Seam(implementation, destination=output_dir,
                                    write_tests=method, drive=implementation.drive)
     stages = dict(seam.stages())
-    # THE IN-IMAGE GATE, WHEN THE RUN ASKED FOR ONE. Installed here rather than inside a seam
-    # because it is the same for both seams -- it builds the Dockerfile the task ships and drives
-    # whatever verifier is in there, and `in_image.drive` already knows which seam it is looking at.
-    #
-    # Off unless asked: it costs a median of 52 seconds per task and needs a docker-capable sandbox.
-    # A run without it emits exactly as before, and the attestation records that the check did not
-    # run rather than that it held.
-    if _in_image_gate_enabled():
+    # Remote production grades inside the delivered image. Reuse the candidate's sandbox and
+    # the same content-bound replay for both gates, keeping active sandboxes within the slot cap.
+    if backend == "remote":
+        from .observe.replay import ImageReplay
+        image_replay = ImageReplay(factory.backend(),
+                                   log=lambda m: print("[in-image] %s" % m, flush=True))
+        stages.update(replay=image_replay.replay, replay_in_image=image_replay.image_check)
+    elif _in_image_gate_enabled():
         from .core import credentials
         from .observe import in_image
         key = credentials.get("E2B_API_KEY") or ""
@@ -463,6 +471,10 @@ def run(scale: str, *, budget: int = 1, index: str | None = None,
     try:
         result = factory.build(name, budget, candidates=candidates)
         summary = result.summary()
+        observed_backend = getattr(getattr(implementation, '_built', None), '_backend', None)
+        runtime_evidence = getattr(observed_backend, 'evidence', None)
+        if isinstance(runtime_evidence, dict):
+            summary['reference_runtime'] = dict(runtime_evidence)
         summary["capability"] = capability(subset or os.environ.get("FRF_REPO_LANGUAGE", "unknown"),
                                             scale=name).__dict__
         elapsed_so_far = time.perf_counter() - started

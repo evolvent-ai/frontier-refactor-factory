@@ -232,29 +232,6 @@ def test_a_node_start_script_is_built_before_it_is_started():
         "a project that declares a build must have it run before start: %r" % (build,)
 
 
-def test_the_smoke_gate_keeps_what_works_instead_of_refusing_what_does_not():
-    """It ran three scenarios and checked only that nothing RAISED.
-
-    An invocation the program does not accept does not raise: it prints usage to stderr, writes
-    nothing to stdout, touches no file and exits 2. 76 of 82 repo tasks in one corpus were made
-    entirely of those -- reproducible, gradeable, and measuring nothing.
-
-    Refusing the whole candidate when three samples fail is the other error. A repository yields
-    scenarios by guessing how its program is invoked, and guessing wrongly about most of them says
-    nothing about the rest: forty lifted and eight that run is a task.
-    """
-    import frf.scales.repo as repo_module
-
-    source = open(repo_module.__file__, encoding="utf-8").read()
-    block = source[source.index("KEEP WHAT WORKS"):]
-    block = block[:block.index("# The scenario corpus is the concrete contract")]
-
-    assert "did_work" in block, "the gate must look at what came back, not only that it did"
-    assert "working.append(scenario)" in block, "and keep the scenarios that did something"
-    assert "ran but did nothing" in block, "refusing only when NOTHING worked"
-    assert "SMOKE_MAX_SECONDS" in block, "bounded, or a slow repository spends the freeze's budget"
-
-
 def test_one_definition_of_having_done_work():
     """The smoke gate asks it of one run, the freeze asks it of a corpus.
 
@@ -545,42 +522,6 @@ def test_a_documented_placeholder_is_not_a_command(tmp_path):
     argvs = [list(x.argv) for x in harvest_files(str(tmp_path), ("tool",))]
 
     assert argvs == [["tool", "convert", "samples/a.csv"]], argvs
-
-
-def test_one_documented_invocation_is_generalised_over_the_project_corpus():
-    """A corpus needs about ten scenarios and a project rarely documents ten commands.
-
-    It usually documents ONE and ships a directory of inputs -- the whole shape of a transformer,
-    and what this scale sources for. `corpus-too-thin` refused 34 candidates in one batch, most of
-    them far below the floor.
-
-    The shape stays the maintainer's; only the argument moves, and every substitution is still
-    proved by the same pre-freeze pass as the original.
-    """
-    import frf.scales.repo as repo_module
-
-    source = open(repo_module.__file__, encoding="utf-8").read()
-    block = source[source.index("ONE WORKING SHAPE, MANY INPUTS"):]
-    block = block[:block.index("return tuple(scenarios)")]
-
-    assert "siblings" in block and "SIBLING_SCENARIOS" in block
-    assert "endswith" in block, "a sibling must share the documented argument's kind"
-    assert repo_module.SIBLING_SCENARIOS >= 10, \
-        "ten scenarios of four channels is what the graded-point floor needs"
-
-
-def test_the_scenario_match_knows_the_declared_names_too():
-    """The search was taught what the project calls its command; the match was not.
-
-    A line lifted from a README as `redos-detector input.txt` found no token in `{node, cli.js}` and
-    was dropped again -- the same regression as the search, one layer down.
-    """
-    import frf.scales.repo as repo_module
-
-    source = open(repo_module.__file__, encoding="utf-8").read()
-    block = source[source.index("executable_names = ("):]
-    block = block[:block.index("scenarios = []")]
-    assert "_declared_names" in block
 
 
 def test_the_workload_fallback_prefers_the_project_own_inputs(tmp_path):

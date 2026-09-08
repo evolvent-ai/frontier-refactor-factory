@@ -78,6 +78,8 @@ def _make_world_readable(root: str) -> None:
     for directory, _, files in os.walk(root):
         for path in (directory, *(os.path.join(directory, f) for f in files)):
             try:
+                if os.path.islink(path):
+                    continue
                 mode = os.stat(path).st_mode
                 extra = 0o444 | (0o111 if mode & 0o111 else 0)
                 os.chmod(path, (mode & 0o7777) | extra)
@@ -819,6 +821,7 @@ class Material:
 # How many sibling inputs one documented invocation is generalised over. Ten scenarios of four
 # channels clear the graded-point floor, and the pre-freeze pass still has to prove each one.
 SIBLING_SCENARIOS = 12
+HARVEST_SCENARIOS = 240
 
 
 def _declared_names(root: str) -> tuple:
@@ -902,9 +905,10 @@ def _declared_names(root: str) -> tuple:
 class ProbeSource:
     """Scenarios lifted from the repository's own tests."""
 
-    def __init__(self, scenarios: tuple) -> None:
+    def __init__(self, scenarios: tuple, *, workload_features=None) -> None:
         self._scenarios = list(scenarios)
         self.count = len(self._scenarios)
+        self.workload_features = workload_features or {}
 
     def draw(self, count: int) -> list:
         return self._scenarios[:count]
@@ -1189,13 +1193,13 @@ class Observer:
         self._isolated = True
         return wrapped
 
-    def run(self, spec: Spec, scenario: Scenario) -> list:
+    def run(self, spec: Spec, scenario: Scenario, *, timeout: float = 300) -> list:
         program = self._restricted(self._program)
         return run_scenario(scenario, program,
                             fixtures_dir=self.material.fixtures or None,
                             exclude=self.material.exclude, backend=self._backend,
                             remote_program=program,
-                            remote_fixtures=self._remote_fixtures or None)
+                            remote_fixtures=self._remote_fixtures or None, timeout=timeout)
 
     def run_many(self, spec: Spec, scenarios: list) -> dict:
         """Batch hook for backends that can execute a corpus in one remote session."""
@@ -1212,12 +1216,15 @@ class Observer:
         """Run the reference, a trivial submission, or a process-level mutant."""
         program = self._program
         staged = ""
+        owned = False
+        remote = ""
         if submission is not None:
             if os.path.isdir(submission):
                 staged = submission
                 program = self._staged(staged)
             else:
                 staged = scratch.mkdtemp(prefix="frf-trivial-")
+                owned = True
                 wrapper = os.path.join(staged, ".frf-trivial-run.sh")
                 with open(wrapper, "w", encoding="utf-8") as handle:
                     handle.write(submission)
@@ -1225,33 +1232,36 @@ class Observer:
                 program = [wrapper]
         elif mutated is not None:
             staged = self._mutant(mutated)
+            owned = True
             program = self._staged(staged)
-        if getattr(self._backend, "name", "") in ("docker", "remote"):
-            from ..observe.process.runner import run_remote_many
-            if staged:
-                import uuid
-                remote = "/tmp/frf-staged-%s" % uuid.uuid4().hex[:12]
-                # A MUTANT IS A BUILT TREE TOO. `_mutant` copies the reference and perturbs one
-                # channel, and `_staged` points the program argv into that copy -- so the binary it
-                # names lives under `target/`, which the default exclude drops. Sent without it the
-                # mutant cannot run at all, and E3 then measures "program missing" on every channel
-                # instead of the perturbation it exists to measure: a mutant that differs everywhere
-                # passes the discrimination check while proving nothing about it.
-                self._backend.push(staged, remote,
-                                   exclude={'.git', '.hg', '__pycache__', '.pytest_cache', '.venv'})
-                program = [part.replace(staged, remote) for part in program]
-            program = self._restricted(program)
-            return run_remote_many(scenarios, backend=self._backend, remote_program=program,
-                                   remote_fixtures=self._remote_fixtures or None,
-                                   exclude=self.material.exclude)
-        return {scenario.probe_id: self.run(spec, scenario) for scenario in scenarios}
+        try:
+            if getattr(self._backend, "name", "") in ("docker", "remote"):
+                from ..observe.process.runner import run_remote_many
+                if staged:
+                    remote = "/tmp/frf-staged-%s" % uuid.uuid4().hex[:12]
+                    self._backend.push(staged, remote,
+                                       exclude={'.git', '.hg', '__pycache__', '.pytest_cache', '.venv'})
+                    program = [part.replace(staged, remote) for part in program]
+                program = self._restricted(program)
+                return run_remote_many(scenarios, backend=self._backend, remote_program=program,
+                                       remote_fixtures=self._remote_fixtures or None,
+                                       exclude=self.material.exclude)
+            return {scenario.probe_id: run_scenario(
+                scenario, program, fixtures_dir=self.material.fixtures or None,
+                exclude=self.material.exclude) for scenario in scenarios}
+        finally:
+            if remote:
+                self._backend.run(['rm', '-rf', remote], timeout=60)
+            if owned and staged:
+                shutil.rmtree(staged, ignore_errors=True)
 
     def _staged(self, root: str) -> list:
         """Stage an alternate checkout and point the existing program argv at it."""
         wrapper = os.path.join(root, ".frf-mutant-run.sh")
         if os.path.isfile(wrapper):
             return [wrapper]
-        return [part.replace(self.material.root, root) for part in self._program]
+        origin = self._remote_root or self.material.root
+        return [part.replace(origin, root) for part in self._program]
 
     def _mutant(self, channel: str = "stdout") -> str:
         """Copy the reference and deterministically perturb one process channel."""
@@ -1262,10 +1272,12 @@ class Observer:
         # discrimination check then measured was "command not found", which differs from the reference
         # on every channel and so passes trivially, telling us nothing about whether the channels
         # actually discriminate.
-        shutil.copytree(self.material.root, room, dirs_exist_ok=True,
-                        ignore=_source_copy_ignore)
+        if not self._remote_root:
+            shutil.copytree(self.material.root, room, dirs_exist_ok=True,
+                            ignore=_source_copy_ignore)
         wrapper = os.path.join(room, ".frf-mutant-run.sh")
-        original = [part.replace(self.material.root, room) for part in self._program]
+        original = (list(self._program) if self._remote_root else
+                    [part.replace(self.material.root, room) for part in self._program])
         import shlex
         argv = " ".join(shlex.quote(str(part)) for part in original)
         with open(wrapper, "w", encoding="utf-8") as handle:
@@ -1312,6 +1324,11 @@ class Observer:
 
     def coverage(self):
         """The reach backend for this language, or the null one when nobody wrote it."""
+        if self.material.language == 'go':
+            from ..observe.coverage.repo_golang import RepoGoCoverage
+            if not hasattr(self, '_repo_coverage'):
+                self._repo_coverage = RepoGoCoverage(self)
+            return self._repo_coverage
         return coverage.backend_for(self.material.language)
 
 
@@ -1442,7 +1459,8 @@ class Repo:
         # every task after the first describing material it was not built from.
         self._built = None
         material = self._material
-        spec = Spec(name=_task_name(material), scale=self.name, language=material.language,
+        target = getattr(self, "_target_language", "") or material.target_language
+        spec = Spec(name=_task_name(material, target), scale=self.name, language=material.language,
                     description=material.description, build=list(material.build),
                     invoke=list(material.invoke),
                     # CONFIGURED FIRST, MATERIAL SECOND. The material carries a target language only
@@ -1450,22 +1468,47 @@ class Repo:
                     # reading the material alone made a `form: cross` run emit a same-language task
                     # and report success. The material's value still wins when nothing was
                     # configured, which is how a checkout that already knows its target keeps it.
-                    target_language=(getattr(self, "_target_language", "")
-                                     or material.target_language),
-                    environment={"exclude": list(material.exclude)},
+                    target_language=target,
+                    environment={"exclude": list(material.exclude),
+                                 "scope_guidance": ("Treat the repository as an executable project. "
+                                                     "Preserve its command-line interface, exit statuses, "
+                                                     "standard output/error, produced files, and "
+                                                     "build/runtime entry points.")},
                     task_form=task_form)
         self._spec = spec
         return spec
 
     def write_tests(self, path: str, corpus) -> None:
         """Write process-seam evidence and the real repository source into the task."""
+        from ..core.source_tree import copy_tree, replace_control_link
         if self._material is None or self._spec is None:
             raise RuntimeError("repo writer called before specify")
+        cross = bool(self._spec.target_language and
+                     self._spec.target_language.lower() != self._spec.language.lower())
         for room in (os.path.join(path, "environment"),
                      os.path.join(path, "tests", "reference")):
-            shutil.copytree(self._material.root, room, dirs_exist_ok=True,
-                            ignore=_source_copy_ignore)
+            environment_room = room == os.path.join(path, 'environment')
+            def source_ignore(directory, names):
+                ignored = set(_source_copy_ignore(directory, names))
+                if environment_room and os.path.abspath(directory) == os.path.abspath(self._material.root):
+                    ignored.update({'Dockerfile', '.dockerignore'} & set(names))
+                return ignored
+            copy_tree(self._material.root, room, ignore=source_ignore)
+            if environment_room:
+                for original, staged in (('Dockerfile', '.upstream-Dockerfile'),
+                                         ('.dockerignore', '.upstream-dockerignore')):
+                    source_file = os.path.join(self._material.root, original)
+                    if os.path.isfile(source_file):
+                        shutil.copy2(source_file, os.path.join(room, staged), follow_symlinks=False)
+            observed = self._built
+            remote_root = getattr(observed, "_remote_root", "")
+            if (room == os.path.join(path, "tests", "reference") and remote_root
+                    and getattr(getattr(observed, "_backend", None), "name", "") == "remote"):
+                # Capture the built tree before creating the portable launcher.
+                observed._backend.pull(remote_root, room)
+                _make_world_readable(room)
             run = os.path.join(room, "run.sh")
+            replace_control_link(run)
             command = []
             for value in (self._spec.invoke or ("./program",)):
                 item = str(value).replace("{ROOT}", ".").replace("{PROGRAM}", "")
@@ -1502,6 +1545,33 @@ class Repo:
                              "exec " % integrity.PROCESS_CAP
                              + " ".join(resolved) + " \"$@\"\n")
             os.chmod(run, 0o755)
+        replace_control_link(os.path.join(path, 'environment', 'task-interface.json'))
+        with open(os.path.join(path, "environment", "task-interface.json"), "w", encoding="utf-8") as handle:
+            prep = []
+            for command in self._spec.build:
+                values = ([str(part).replace("{ROOT}", "/app") for part in command]
+                          if isinstance(command, (list, tuple))
+                          else [str(command).replace("{ROOT}", "/app")])
+                prep.append(" ".join(values))
+            json.dump({"run_command": "/app/run.sh",
+                       "interface": (("The target executable receives the original program's " if cross else
+                                      "The evaluator invokes /app/run.sh with the original program's ") +
+                                     "arguments and standard input in a prepared working directory. "
+                                     "Preserve argument handling, exit status, both output streams, "
+                                     "and produced file contents. Keep the working directory supplied "
+                                     "by the caller when interpreting relative input/output paths."),
+                       "preparation_commands": prep,
+                       "build_commands": [], "build_directory": "/app"}, handle, indent=2)
+        if cross:
+            from ..observe.target_workspace import write_target_workspace
+            declaration = os.path.join(path, 'environment', 'task-interface.json')
+            original_context = json.load(open(declaration))
+            target_context = write_target_workspace(os.path.join(path, 'environment'),
+                                                    self._spec.target_language.lower(), call_interface=False)
+            target_context['interface'] = original_context['interface'] + ' ' + target_context['build_contract']
+            target_context['preparation_commands'] = original_context['preparation_commands']
+            with open(declaration, 'w') as handle:
+                json.dump(target_context, handle, indent=2)
         tests = os.path.join(path, "tests")
         os.makedirs(tests, exist_ok=True)
         # The generic language Dockerfile only installs the toolchain. A repo task must also
@@ -1509,10 +1579,13 @@ class Repo:
         # command-not-found and every probe becomes a trivial fixed failure.
         dockerfile = os.path.join(path, "environment", "Dockerfile")
         if os.path.exists(dockerfile):
+            import shlex
             ignore = os.path.join(path, "environment", ".dockerignore")
             with open(ignore, "w", encoding="utf-8") as handle:
-                handle.write(".git\n.gitignore\ntests\ntest\n**/tests\n**/test\nfixtures\n**/fixtures\n"
-                             "docs\n**/docs\n*.md\n*.rst\n")
+                # This context is the upstream checkout, not the evaluator's task/tests tree.
+                # Source projects may put required Go workspace modules or generated inputs under
+                # tests/, so excluding them silently breaks builds (go.work is a real example).
+                handle.write(".git\n.hg\n__pycache__\n.pytest_cache\n.frf-fixtures\n")
             helper = os.path.join(path, "environment", ".frf_install_scripts.py")
             with open(helper, "w", encoding="utf-8") as handle:
                 handle.write("""import pathlib, tomllib
@@ -1538,8 +1611,14 @@ for name, target in scripts.items():
             # built at all. The privilege is dropped again at the end, so the submission still runs
             # unprivileged; what changes is only that the BUILD is allowed to build.
             lines = [open(dockerfile, encoding="utf-8").read().rstrip(),
-                     "", "USER root", "COPY . /app"]
-            if self._spec.language.lower() == "python":
+                         "", "USER root", "COPY . /app"]
+            restore_inputs = ['COPY %s /app/%s' % (staged, original)
+                              for original, staged in (('Dockerfile', '.upstream-Dockerfile'),
+                                                       ('.dockerignore', '.upstream-dockerignore'))
+                              if os.path.isfile(os.path.join(path, 'environment', staged))]
+            lines += restore_inputs
+            source_language = self._spec.language.lower()
+            if source_language == "python" and not cross:
                 # WITH ITS DEPENDENCIES. `--no-deps` installed the project and nothing it imports,
                 # so the delivered image held a program that could not start -- and the pipeline
                 # then recorded that the PROJECT did not work. Python repo candidates built at 8%
@@ -1550,8 +1629,7 @@ for name, target in scripts.items():
                 lines += ["RUN pip install --no-cache-dir -e . "
                           "|| pip install --no-cache-dir --no-deps -e . "
                           "|| python3 /app/.frf_install_scripts.py"]
-            import shlex
-            for command in self._spec.build:
+            for command in (() if cross else self._spec.build):
                 rendered = (shlex.join(str(x) for x in command) if isinstance(command, (list, tuple))
                             else str(command)).replace("{ROOT}", ".")
                 if self._spec.language.lower() == "python" and "pip install" in rendered:
@@ -1579,139 +1657,53 @@ for name, target in scripts.items():
             observed = self._observer or self._built
             isolated = bool(observed is not None and getattr(observed, "_isolated", False))
             json.dump({"exclude": list(self._material.exclude), "isolated": isolated,
-                       "survey": self._material.survey}, handle)
+                       "survey": self._material.survey,
+                       "target_language": self._spec.target_language.lower() if cross else None,
+                       "reference_argv": [str(value).replace('{ROOT}', '/app').replace(self._material.root, '/app')
+                                          for value in self._spec.invoke] if cross else None,
+                       "target_helpers": list(self._spec.environment.get('target_helpers') or [])}, handle)
         with open(os.path.join(tests, "timed.json"), "w", encoding="utf-8") as handle:
             json.dump(getattr(corpus, "timed", []), handle)
+        with open(os.path.join(tests, "timed_expectations.json"), "w", encoding="utf-8") as handle:
+            json.dump({pid: [step.to_json() for step in steps]
+                       for pid, steps in getattr(corpus, "timed_expectations", {}).items()}, handle)
         with open(os.path.join(tests, "verify.py"), "w", encoding="utf-8") as handle:
             handle.write(_verifier_source())
+        if cross:
+            from ..observe.reference_image import write_reference_image
+            write_reference_image(path, self._spec, install=self._spec.build)
 
     def drive(self, path: str) -> tuple[int, int]:
-        """E7 drive the self-contained process verifier shipped in the task.
-
-        Uses the reference shipped inside the task as the submission, so the verifier
-        proves the reference can reproduce its own expectations.
-        """
+        """Read-only E7 replay; remote production never falls back to executing on the host."""
         path = os.path.abspath(path)
-        reference_dir = os.path.join(path, "tests", "reference")
         observer = self._built
-        if observer is not None and getattr(observer._backend, "name", "") == "remote":
-            remote_root = str(getattr(observer, "_remote_root", "") or "")
-            if remote_root:
-                observer._backend.pull(remote_root, reference_dir)
-                # READABLE BY THE USER THAT WILL RUN IT, which is not the user that wrote it. The pull
-                # lands this tree with the archive's own modes under a root-owned temporary directory,
-                # so `tests/reference` arrives as `drwx------`. The shipped verifier then runs the
-                # reference as `setpriv --reuid nobody`, and nobody cannot traverse 0700 -- every
-                # scenario comes back `exit 2` with empty stdout, which is indistinguishable from a
-                # program that does not work and is what the refresh guard refuses on.
-                #
-                # MEASURED in the real base image rather than on this host, which is the only test
-                # that settles it. `docker run rust:1.90-bookworm` with the tree mounted:
-                #     before chmod: exit=2, 0 bytes, "cannot open /ref/run.sh: Permission denied"
-                #     after  chmod: exit=0, 959 bytes of the reference's own --help
-                # On the host the same command SUCCEEDS as nobody even at 0700, because the host's
-                # temporary directory is world-traversable and `setpriv` there kept enough privilege
-                # to bypass the mode; that false negative had me discard the permission hypothesis
-                # twice before the container disproved the host.
-                _make_world_readable(reference_dir)
-            remote_task = "/tmp/frf-task-%s" % uuid.uuid4().hex[:12]
-            # THE BUILD OUTPUT IS THE REFERENCE, so it cannot be excluded from the tree that verifies
-            # it. `push` defaults to `containers.EXCLUDED`, which drops `node_modules` and `target`
-            # because a repo-scale CHECKOUT does not need them -- but this is not a checkout, it is the
-            # finished task, and `target/release/<name>` IS the program `run.sh` executes.
-            #
-            # Sent without them, the remote verifier ran a reference that was not there: every scenario
-            # came back empty, `reward.json` was never written, and the failure surfaced as
-            # `remote verify produced no reward ... cat: reward.json: No such file or directory` --
-            # a message about a missing file that says nothing about the missing binary behind it.
-            # Measured on one batch: 6 tasks whose frozen corpora were healthy (jomini: 17 of 19
-            # graded steps exit 0, 8 with real stdout) refused here, none attested.
-            #
-            # The call seam reached this conclusion first and passes exactly this narrower set from
-            # two places; this is the same rule for the same reason.
-            observer._backend.push(path, remote_task,
-                                   exclude={'.git', '.hg', '__pycache__', '.pytest_cache', '.venv'})
-            reward_remote = remote_task + "/reward.json"
-            result = observer._backend.run(
-                ["python3", "verify.py"], workdir=remote_task + "/tests",
-                env={"REWARD_PATH": reward_remote,
-                     "SUBMISSION_ROOT": remote_task + "/tests/reference",
-                     "FRF_REFRESH_EXPECTATIONS": "1"}, timeout=1200)
-            reward_result = observer._backend.run(["cat", reward_remote], workdir=remote_task,
-                                                 timeout=60)
-            if not reward_result.ok:
-                raise RuntimeError("remote verify produced no reward (exit %s): %s; verify output: %s"
-                                   % (result.exit_code, reward_result.tail(), result.tail()))
-            refreshed = observer._backend.run(["cat", remote_task + "/tests/expectations.json"],
-                                             timeout=60)
-            observer._backend.run(["rm", "-rf", remote_task], timeout=60)
-            if refreshed.ok:
-                with open(os.path.join(path, "tests", "expectations.json"), "w",
-                          encoding="utf-8") as handle:
-                    handle.write(refreshed.stdout)
-            # The emitted checkout is the final authority. Re-freeze once locally against the
-            # pulled reference artifact so paths/filesystem metadata cannot leave a task that only
-            # passed inside the staging sandbox.
-            local_env = dict(os.environ, FRF_REFRESH_EXPECTATIONS="1",
-                             REWARD_PATH="/tmp/frf-local-reward.json",
-                             SUBMISSION_ROOT=reference_dir)
-            verify_path = os.path.join(path, "tests", "verify.py")
-            subprocess.run(["python3", verify_path], cwd=os.path.join(path, "tests"),
-                           env=local_env, capture_output=True, text=True, timeout=1200)
-            local_reward = "/tmp/frf-local-reward.json"
-            final = subprocess.run(["python3", verify_path], cwd=os.path.join(path, "tests"),
-                                   env=dict(local_env, FRF_REFRESH_EXPECTATIONS="0"),
-                                   capture_output=True, text=True, timeout=1200)
-            if final.returncode != 0 or not os.path.exists(local_reward):
-                raise RuntimeError("packaged reference self-replay failed: %s"
-                                   % (final.stderr or final.stdout)[-1000:])
-            with open(local_reward, encoding="utf-8") as handle:
-                report = json.load(handle)
-            return int(report.get("correctness_passed", 0)), int(report.get("correctness_total", 0))
-            # unreachable: the local packaged replay above is authoritative
-        with scratch.temporary_directory() as logs:
-            reward = os.path.join(logs, "reward.json")
-            remote_built = False
-            observer = self._built
-            remote_root = str(getattr(observer, "_remote_root", "") or "")
-            if observer is not None and remote_root and getattr(observer._backend, "name", "") == "remote":
-                observer._backend.pull(remote_root, reference_dir)
-                remote_built = True
-            if not remote_built:
-                for command in (self._material.build if self._material else []):
-                    argv = [str(part).replace("{ROOT}", reference_dir) for part in command]
-                    built = subprocess.run(argv, cwd=reference_dir, capture_output=True, text=True,
-                                           timeout=BUILD_TIMEOUT)
-                    if built.returncode != 0:
-                        raise RuntimeError("reference build failed during self-replay: %s"
-                                           % ((built.stderr or built.stdout).strip()[-1000:]))
-            result = subprocess.run(["python3", os.path.join(path, "tests", "verify.py")],
-                           cwd=os.path.join(path, "tests"), timeout=600,
-                           capture_output=True, text=True,
-                           env=dict(os.environ, REWARD_PATH=reward,
-                                    SUBMISSION_ROOT=reference_dir))
-            if result.returncode != 0 and not os.path.exists(reward):
-                # A subprocess can transiently lose a freshly pulled executable or fixture while
-                # the reference tree is settling. Re-run the deterministic self-check once before
-                # attributing the failure to the factory.
-                result = subprocess.run(["python3", os.path.join(path, "tests", "verify.py")],
-                               cwd=os.path.join(path, "tests"), timeout=600,
-                               capture_output=True, text=True,
-                               env=dict(os.environ, REWARD_PATH=reward,
-                                        SUBMISSION_ROOT=reference_dir))
-            if result.returncode != 0 and not os.path.exists(reward):
-                result = subprocess.run(["python3", os.path.join(path, "tests", "verify.py")],
-                               cwd=path, timeout=600, capture_output=True, text=True,
-                               env=dict(os.environ, REWARD_PATH=reward,
-                                        SUBMISSION_ROOT=reference_dir))
-            if result.returncode != 0 and not os.path.exists(reward):
-                with open("/tmp/frf-repo-drive-debug.log", "w", encoding="utf-8") as debug:
-                    debug.write("returncode=%s\nstdout=%s\nstderr=%s\n"
-                                % (result.returncode, result.stdout, result.stderr))
-                raise RuntimeError("verify.py exited %d with no reward.json\nstdout: %s\nstderr: %s" % (result.returncode, result.stdout[:1000], result.stderr[:1000]))
-            with open(reward, encoding="utf-8") as handle:
-                report = json.load(handle)
-        return int(report.get("correctness_passed", 0)), int(report.get("correctness_total", 0))
+        backend = getattr(observer, "_backend", None) or self._backend
+        if getattr(backend, "name", "") == "remote":
+            from ..observe.replay import ImageReplay
+            return ImageReplay(backend).replay(path)
+        else:
+            if backend is not None and getattr(backend, "name", "") != "local-process":
+                raise RuntimeError("repo replay requires its configured remote or development backend")
+            reference = os.path.join(path, "tests", "reference")
+            with scratch.temporary_directory() as logs:
+                reward_path = os.path.join(logs, "reward.json")
+                done = subprocess.run(
+                    ["python3", os.path.join(path, "tests", "verify.py")],
+                    cwd=os.path.join(path, "tests"), capture_output=True, text=True, timeout=1200,
+                    env=dict(os.environ, REWARD_PATH=reward_path, SUBMISSION_ROOT=reference))
+                if not os.path.isfile(reward_path):
+                    raise RuntimeError("replay produced no reward: %s" %
+                                       (done.stderr or done.stdout)[-1000:])
+                with open(reward_path, encoding="utf-8") as handle:
+                    report = json.load(handle)
+        passed = int(report.get("correctness_passed", 0))
+        total = int(report.get("correctness_total", 0))
+        status = getattr(done, "exit_code", getattr(done, "returncode", 1))
+        if status != 0 or total <= 0 or passed != total or report.get("timing_valid") is not True:
+            raise RuntimeError("reference replay failed: %s (%d/%d)" %
+                               (report.get("note", "invalid measurement"), passed, total))
+        from ..observe.replay import ReplayResult
+        return ReplayResult(passed, total, report)
 
 
     def observe(self):
@@ -1721,6 +1713,8 @@ for name, target in scripts.items():
             raise RuntimeError("observe() was asked for before specify() chose a repository")
         # Cached: build() records how to invoke the program, and run() needs that same object.
         if self._built is None:
+            from ..observe.reference_backend import source_runtime
+            self._backend = source_runtime(self._backend, self._material.language)
             self._built = Observer(self._material, backend=self._backend)
         return self._built
 
@@ -1732,86 +1726,57 @@ for name, target in scripts.items():
             scenarios = tuple(self._harvest(self._material.root))
         if not scenarios:
             harvested = self._harvest_repository_workload()
-            discovered = self._discover_scenarios()
-            scenarios = tuple(harvested) + tuple(discovered)
+            # Prefer documented command shapes; blind file/stdin guesses are a fallback.
+            scenarios = tuple(harvested) or tuple(self._discover_scenarios())
         if not scenarios:
             raise ValueError("no scenarios were lifted from %s; no deterministic repository workload was found" % self._material.identity)
-        # A CLI whose corpus-file invocations all happen to fail the smoke was refused as
-        # "no-probes-could-be-drawn" even though `--help`/`--version` are valid invocations for
-        # every CLI. Attach them and let the smoke keep whatever actually runs.
+        # Control and error behavior supplements the substantive workload.
         from ..observe.process.runner import Step as _Step, Scenario as _Scenario
         for extra in (["--help"], ["--version"], [], ["--nonexistent-flag-frf"]):
             scenarios = tuple(scenarios) + (_Scenario("cli-%04d" % len(scenarios),
                                                       [(_Step(argv=["{PROGRAM}"] + list(extra))),
                                                        ], fixture=None),)
-        # Flags-only probes are no longer refused outright: a CLI whose only valid invocation is
-        # `--help` is a real, reproducible task (its exit code and help text are gradeable), and
-        # refusing it left 76% of the CLI corpus as "no-probes-could-be-drawn". The smoke below
-        # keeps whatever actually runs, and the freeze still records its real behaviour.
         _validate_scenarios_call_subject(scenarios)
-        # KEEP WHAT WORKS, RATHER THAN REFUSING WHAT MOSTLY DOES NOT. This used to run three
-        # scenarios and check only that nothing RAISED -- and an invocation the program does not
-        # accept does not raise. It prints usage to stderr, writes nothing to stdout, touches no
-        # file and exits 2, identically every time. 76 of 82 repo tasks in one corpus were made
-        # entirely of those: reproducible, gradeable, and measuring nothing.
-        #
-        # Refusing the whole candidate when three samples fail is the other error. A repository
-        # yields scenarios by guessing how its program is invoked, and guessing wrongly about most
-        # of them says nothing about the rest: forty lifted, eight that run, is a task. So every
-        # scenario is tried ONCE -- a fifth of what the freeze will spend on it -- and the ones that
-        # did something are what the freeze then sees.
+        from ..observe.process.sensitivity import select_workloads
         observer = self.observe()
-        working, tried = [], 0
-        deadline = time.monotonic() + SMOKE_MAX_SECONDS
-        for scenario in scenarios:
-            if time.monotonic() >= deadline:
-                # Out of time rather than out of material: keep what has been proven and let the
-                # thinness checks below decide, instead of charging the clock to the repository.
-                working.extend(scenarios[tried:])
-                break
-            tried += 1
-            try:
-                observed = observer.run(spec, scenario)
-            except Exception as exc:                       # noqa: BLE001 -- one scenario, not all
-                if tried == 1 and not working:
-                    raise ValueError("repository smoke failed before freeze: %s"
-                                     % str(exc)[:1200]) from exc
-                continue
-            if any(_observation.did_work(one) for one in observed):
-                working.append(scenario)
-        if not working:
-            # WHAT WAS ACTUALLY TRIED. Without it this refusal names a symptom and hides the only
-            # thing that would fix it: whether the lifted invocations were wrong, or right and the
-            # program needed something else. The scenarios are right here.
-            sample = "; ".join(
-                " ".join(str(x) for x in step.argv)
-                for scenario in scenarios[:4] for step in scenario.steps[:1])
-            raise ValueError(
-                "%s ran but did nothing: every scenario wrote no output and exited non-zero, "
-                "which is what an invocation the program does not accept looks like. "
-                "Tried: %s" % (self._material.identity, sample[:600]))
-        scenarios = tuple(working)
+        remote = getattr(observer, '_remote_fixtures', '')
+        backend = getattr(observer, '_backend', None)
+        sync = (lambda: backend.push(self._material.fixtures, remote)) if remote else None
+        cleanup = (lambda names: backend.run(['rm', '-f', '--'] +
+                   [remote + '/' + name for name in names], timeout=30)) if remote else None
+        selected, review = select_workloads(
+            scenarios, lambda scenario, timeout: observer.run(spec, scenario, timeout=timeout),
+            fixtures_dir=self._material.fixtures, sync_fixtures=sync, cleanup_fixtures=cleanup,
+            max_seconds=SMOKE_MAX_SECONDS)
+        with open(os.path.join(self._material.root, '.frf-workload-review.json'), 'w',
+                  encoding='utf-8') as handle:
+            json.dump(review, handle, indent=2)
+        if not selected:
+            raise ValueError('%s has no verified input-sensitive workload corpus' % self._material.identity)
+        scenarios = tuple(selected)
         # The scenario corpus is the concrete contract for a process task. Feed a compact summary
         # back into the statement so a solver can see what is actually exercised instead of only
         # receiving the repository's broad README description.
         fixtures = sorted({str(s.fixture) for s in scenarios if s.fixture})
         commands = sorted({str(step.argv[0]) for s in scenarios for step in s.steps if step.argv})
-        detail = ("\n\nThe frozen workload contains %d deterministic scenario(s). Commands exercised: %s. "
+        detail = ("\n\nThe selected workload contains %d scenario(s). Commands exercised: %s. "
                   "Input fixtures: %s. Preserve exit status, standard output/error, and produced "
                   "files for these repository-owned cases." %
                   (len(scenarios), ", ".join(commands[:8]) or "the repository entrypoint",
                    ", ".join(fixtures[:8]) or "stdin cases"))
         from dataclasses import replace
         self._spec = replace(spec, description=(spec.description or "").rstrip() + detail)
-        return ProbeSource(scenarios)
+        return ProbeSource(scenarios, workload_features={
+            item['probe_id']: {key: item[key] for key in ('family', 'input_key', 'input_bytes')}
+            for item in review['tested'] if item['result'] == 'sensitive'})
 
     def _harvest_repository_workload(self) -> tuple:
         """Lift repository-owned CLI invocations and package their referenced inputs."""
         material = self._material
         if material is None or not material.invoke:
             return ()
-        from ..source.repo_harvest import (fixture_archive, harvest_corpus, harvest_files,
-                                           paths_exist)
+        from ..source.repo_harvest import (bind_inputs, command_index, fixture_archive, fixture_dependencies,
+                                           harvest_corpus, harvest_files)
         from ..observe.process.runner import Scenario, Step
 
         # THE NAME THE PROJECT PUBLISHES, AS WELL AS THE ARGV WE CHOSE. The harvest searches
@@ -1825,36 +1790,21 @@ for name, target in scripts.items():
         # So both are searched for. How we invoke it and what it is called are different facts.
         names = tuple(str(x) for x in material.invoke if str(x)) + _declared_names(material.root)
         invocations = harvest_files(material.root, names)
-        # A SCENARIO WHOSE INPUTS ARE NOT IN THE TREE CAN ONLY PRODUCE A REFUSAL, and this is the layer
-        # that knows both halves: what a lifted command wants, and what we are able to pack for it.
-        # `harvest_files` deliberately does not know -- it parses documentation, and a command in a
-        # README is worth reporting whether or not this commit happens to contain its fixtures.
-        #
-        # THE PACKING WAS ALREADY HONEST and that is what hid this: the loop below adds a referenced
-        # file only when `os.path.isfile` says it is there, so a missing one is silently left out of the
-        # archive. The scenario survived anyway, reached the freeze pointing at nothing, and the program
-        # did the only thing it could -- exit non-zero with no output.
-        #
-        # MEASURED on the two tasks this produced: `remarkable-faster` and `terser-faster` each
-        # referenced 41 paths of which 37 were absent from the archive (fixtures a build step generates,
-        # files deleted since the documentation was written). Every graded step was an error path as a
-        # direct consequence, and both still passed 8/8 evidence -- because reproducing a refusal is
-        # perfectly reproducible.
-        invocations = [item for item in invocations if paths_exist(material.root, item.argv)]
         if not invocations:
             return ()
 
         inputs = set(harvest_corpus(material.root))
         for item in invocations:
             for token in item.argv[1:]:
-                candidate = token.lstrip("./")
-                if candidate and os.path.isfile(os.path.join(material.root, candidate)):
+                candidate = os.path.normpath(token.split("=", 1)[-1])
+                if (not os.path.isabs(candidate) and ".." not in candidate.split(os.sep)
+                        and os.path.isfile(os.path.join(material.root, candidate))):
                     inputs.add(candidate)
 
         fixture = None
         if inputs:
             fixtures_dir = os.path.join(material.root, ".frf-fixtures")
-            fixture = fixture_archive(material.root, sorted(inputs), fixtures_dir,
+            fixture = fixture_archive(material.root, fixture_dependencies(material.root, sorted(inputs)), fixtures_dir,
                                       name="harvest-inputs.tar.gz")
             material.fixtures = fixtures_dir
             observer = self._built
@@ -1866,42 +1816,36 @@ for name, target in scripts.items():
         # project calls its command; this match was not, so a line lifted from a README as
         # `redos-detector input.txt` found no token in `{node, cli.js}` and was dropped again. The
         # same regression, one layer down, and invisible for the same reason.
-        executable_names = ({os.path.basename(str(x)) for x in material.invoke if str(x)}
-                            | {os.path.basename(n) for n in _declared_names(material.root)})
         scenarios = []
+        provenance, seen, groups = [], set(), []
         for item in invocations:
             argv = list(item.argv)
-            match = next((i for i, token in enumerate(argv[:3])
-                          if os.path.basename(token) in executable_names), None)
+            match = command_index(argv, names)
             if match is None:
                 continue
             # Drop wrappers such as `python -m` or `poetry run`; the built program is already the
             # executable represented by PROGRAM_TOKEN.
-            tail = argv[match + 1:]
-            scenarios.append(Scenario("harvest-%04d" % len(scenarios),
-                                      [Step(["{PROGRAM}"] + tail)], fixture=fixture))
-            # ONE WORKING SHAPE, MANY INPUTS. A corpus needs about ten scenarios to reach the
-            # graded-point floor, and a project rarely documents ten commands. It usually documents
-            # ONE and ships a directory of inputs -- which is the whole shape of a transformer, and
-            # what this scale sources for.
-            #
-            # So a lifted invocation that names a file is generalised over the repository's own
-            # corpus of files with that extension. The shape is the maintainer's; only the argument
-            # moves, and every substitution is still proven by the same pre-freeze pass as the
-            # original.
-            for position, token in enumerate(tail):
-                stem, dot, extension = token.rpartition(".")
-                if not dot or not stem or "/" in extension:
+            declared = ["{PROGRAM}"] + argv[match + 1:]
+            groups.append((item, bind_inputs(material.root, declared, sorted(inputs),
+                                            limit=SIBLING_SCENARIOS,
+                                            context=(os.path.basename(argv[match]), item.source))))
+        # Rotate documented shapes before adding siblings so expansion cannot starve later commands.
+        for rank in range(SIBLING_SCENARIOS + 1):
+            for item, variants in groups:
+                if rank >= len(variants) or len(scenarios) >= HARVEST_SCENARIOS:
                     continue
-                siblings = [x for x in sorted(inputs)
-                            if x.endswith("." + extension) and x != token.lstrip("./")]
-                for sibling in siblings[:SIBLING_SCENARIOS]:
-                    swapped = list(tail)
-                    swapped[position] = sibling
-                    scenarios.append(Scenario(
-                        "harvest-%04d" % len(scenarios),
-                        [Step(["{PROGRAM}"] + swapped)], fixture=fixture))
-                break
+                bound = variants[rank]
+                if tuple(bound) in seen:
+                    continue
+                seen.add(tuple(bound))
+                pid = "harvest-%04d" % len(scenarios)
+                scenarios.append(Scenario(pid, [Step(bound)], fixture=fixture))
+                provenance.append({"probe_id": pid, "source": item.source, "line": item.line,
+                                   "documented_argv": list(item.argv), "bound_argv": bound})
+        # Internal discovery evidence, excluded from the delivered source tree by .frf-* rules.
+        with open(os.path.join(material.root, ".frf-workload-provenance.json"), "w",
+                  encoding="utf-8") as handle:
+            json.dump(provenance, handle, indent=2)
         return tuple(scenarios)
 
     def _discover_scenarios(self) -> tuple:
@@ -2174,7 +2118,7 @@ for name, target in scripts.items():
             exclude=tuple(detail.get("exclude", (".git",))), survey=repo_survey.to_json())
 
 
-def _task_name(material: Material) -> str:
+def _task_name(material: Material, target_language: str | None = None) -> str:
     """A readable name for the task, generated from the repository identity and description.
 
     Uses the LLM to produce a self-describing kebab-case name of the form
@@ -2186,8 +2130,9 @@ def _task_name(material: Material) -> str:
     not in a string humans have to read and compare.
     """
     from frf.core.statement import generate_task_name
+    target = material.target_language if target_language is None else target_language
     return generate_task_name(material.identity, material.description or "",
-                               material.target_language or "")
+                              target if target.lower() != material.language.lower() else "")
 
 
 
@@ -2252,6 +2197,25 @@ def _validate_scenarios_call_subject(scenarios) -> None:
 
 _PROCESS_VERIFIER = '''#!/usr/bin/env python3
 import hashlib, json, os, shutil, subprocess, sys, tempfile, time
+from contextlib import ExitStack
+
+__TIMING_PROTOCOL__
+__TREE_PROTOCOL__
+__WORKLOAD_PROTOCOL__
+__TRANSPORT_PROTOCOL__
+__ISOLATION_PROTOCOL__
+__TARGET_BUILD__
+__REFERENCE_CONTEXT__
+USE_CONFINEMENT = __USE_CONFINEMENT__
+ACTIVE_ROOTS = []
+PENDING_REWARD = None
+ISOLATION_REPORT = None
+VERIFIER_SHA256 = hashlib.sha256(open(__file__, 'rb').read()).hexdigest()
+TIMING_REPORT = {}
+TIMED_EXPECTATIONS = {}
+CONTROL_OUTPUTS = set()
+TARGET_BUILD_REPORT = None
+TARGET_SCOPE = None
 
 WORKSPACE_TOKEN = "<workspace>"
 
@@ -2265,29 +2229,12 @@ INHERITED_ENV = __INHERITED_ENV__
 def digest_text(text):
     return "sha256:" + hashlib.sha256(text.encode("utf-8", "surrogateescape")).hexdigest()
 
-def tree_lines(root, exclude=()):
-    lines = []
-    for base, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in exclude)
-        for name in sorted(files):
-            path = os.path.join(base, name)
-            relative = os.path.relpath(path, root)
-            if any(part in exclude for part in relative.split(os.sep)):
-                continue
-            try:
-                stat = os.stat(path)
-            except OSError:
-                continue
-            executable = "x" if stat.st_mode & 0o111 else "-"
-            lines.append("%s %d %s" % (executable, stat.st_size, relative))
-    return sorted(lines)
-
 def stream_digest(text, masked=()):
     lines = text.splitlines()
-    kept = ["\\\\x00" if i in set(masked) else line for i, line in enumerate(lines)]
-    return digest_text("\\\\n".join(kept)), len(lines)
+    kept = ["\\x00" if i in set(masked) else line for i, line in enumerate(lines)]
+    return digest_text("\\n".join(kept)), len(lines)
 
-def run_scenario(scenario, program, fixtures_dir, exclude):
+def run_scenario(scenario, program, fixtures_dir, exclude, costs=None):
     root = tempfile.mkdtemp(prefix="frf-scenario-")
     workspace = os.path.join(root, "workspace")
     os.makedirs(workspace, exist_ok=True)
@@ -2297,7 +2244,15 @@ def run_scenario(scenario, program, fixtures_dir, exclude):
     try:
         fixture = scenario.get("fixture")
         if fixture and fixtures_dir:
-            shutil.unpack_archive(os.path.join(fixtures_dir, fixture), workspace)
+            extract_fixture(os.path.join(fixtures_dir, fixture), workspace)
+        confined = isinstance(program, Root)
+        if confined:
+            for other in ACTIVE_ROOTS:
+                if other is not program:
+                    other.pause()
+            program.stop()
+            program.prepare(workspace)
+            workspace = str(program.path / 'workspace')
         environment = {}
         for _name in INHERITED_ENV:
             _value = os.environ.get(_name)
@@ -2306,97 +2261,92 @@ def run_scenario(scenario, program, fixtures_dir, exclude):
         environment.update(SUBJECT_ENV)
         environment.update(scenario.get("environment") or {})
         for step in scenario["steps"]:
-            cwd = os.path.normpath(os.path.join(workspace, step.get("cwd", ".")))
-            os.makedirs(cwd, exist_ok=True)
+            cwd = workspace_directory(workspace, step.get('cwd', '.'), program.uid if confined else None)
             args = step["argv"]
             for _token in args:
                 _t = str(_token)
                 if not _t or _t.startswith("-") or "/" not in _t:
                     continue
-                _p = os.path.dirname(os.path.normpath(os.path.join(workspace, _t.lstrip("./"))))
+                _p = os.path.dirname(os.path.normpath(os.path.join(workspace, _t)))
                 if os.path.commonpath([os.path.abspath(_p), os.path.abspath(workspace)]) == \
                         os.path.abspath(workspace):
                     try:
-                        os.makedirs(_p, exist_ok=True)
+                        workspace_directory(workspace, os.path.relpath(_p, workspace),
+                                            program.uid if confined else None)
                     except OSError:
                         pass
             if args and args[0] == "{PROGRAM}":
-                argv = list(program) + list(args[1:])
+                argv = (getattr(program, 'entry_argv', ["/app/run.sh"]) if confined else list(program)) + list(args[1:])
             else:
-                joined = " ".join(program)
+                joined = ' '.join(getattr(program, 'entry_argv', ["/app/run.sh"])) if confined else " ".join(program)
                 argv = [str(part).replace("{PROGRAM}", joined) for part in args]
             try:
-                done = subprocess.run(argv, cwd=cwd, env=environment,
-                                      input=step.get("stdin"), capture_output=True,
-                                      text=True, timeout=300)
+                started = time.perf_counter()
+                if confined:
+                    inner_cwd = '/workspace/' + os.path.relpath(cwd, workspace)
+                    done = program.run(argv, cwd=inner_cwd, environment=environment,
+                                       input=step.get("stdin"), timeout=300)
+                else:
+                    done = bounded_run(argv, cwd=cwd, env=environment,
+                                       input=step.get("stdin"), timeout=300)
+                if costs is not None:
+                    costs.append(time.perf_counter() - started)
                 code, stdout, stderr = done.returncode, done.stdout, done.stderr
             except subprocess.TimeoutExpired as exc:
+                if costs is not None:
+                    raise
                 code, stdout, stderr = -1, exc.stdout or "", (exc.stderr or "") + "\\\\n[timed out]"
             except OSError as exc:
+                if costs is not None:
+                    raise
                 code, stdout, stderr = 127, "", "could not execute: %s" % exc
             stdout = stdout.replace(workspace, WORKSPACE_TOKEN)
             stderr = stderr.replace(workspace, WORKSPACE_TOKEN)
-            tree = "\\\\n".join(tree_lines(workspace, exclude))
+            if confined:
+                stdout = stdout.replace('/workspace', WORKSPACE_TOKEN)
+                stderr = stderr.replace('/workspace', WORKSPACE_TOKEN)
+            tree = "\\n".join(tree_lines(workspace, exclude))
             out.append({"exit_code": code, "stdout": stdout, "stderr": stderr, "tree": tree})
         return out
     finally:
+        if isinstance(program, Root):
+            program.stop()
         shutil.rmtree(root, ignore_errors=True)
 
-def time_scenario(scenario, program, fixtures_dir, exclude, repeats=3):
-    """Wall-clock cost of one scenario, minimum over repeats."""
-    best = float("inf")
-    for _ in range(max(1, repeats)):
-        started = time.perf_counter()
-        run_scenario(scenario, program, fixtures_dir, exclude)
-        best = min(best, time.perf_counter() - started)
-    return best
+def time_scenario(scenario, program, fixtures_dir, exclude):
+    """Command wall time including process launch, excluding fixture and observation work."""
+    expected = TIMED_EXPECTATIONS.get(scenario["probe_id"])
+    if not expected:
+        raise ValueError("timed workload has no frozen correctness evidence")
+    selected = eligible_timing_steps(scenario, expected, CONTROL_OUTPUTS)
+    if not selected:
+        raise ValueError("help/version/error-only or unproven workload cannot be timed")
+    costs = []
+    actuals = run_scenario(scenario, program, fixtures_dir, exclude, costs=costs)
+    if len(actuals) != len(expected):
+        raise ValueError("timed workload step count changed")
+    for actual, exp in zip(actuals, expected):
+        for channel in ("exit_code", "stdout", "stderr", "tree"):
+            rule = exp[channel]
+            if not rule.get("graded", True):
+                continue
+            value = str(actual[channel]) if channel == "exit_code" else actual[channel]
+            digest, count = stream_digest(value, rule.get("masked") or ())
+            if digest != rule["digest"] or count != rule["line_count"]:
+                raise ValueError("timed workload behavior differs from frozen reference")
+    return sum(costs[index] for index in selected)
 
 def measure_speed(scenarios, timed_ids, submission_prog, reference_prog, fixtures, exclude):
-    """-> (speedup, note). WORST WORKLOAD COUNTS."""
-    if not timed_ids:
-        return 1.0, "no workload was held out for timing"
-
-    per_scenario = {}
-    try:
-        for probe_id in timed_ids:
-            scenario = scenarios[probe_id]
-            ours, theirs = [], []
-            for _ in range(3):
-                theirs.append(time_scenario(scenario, reference_prog, fixtures, exclude))
-                ours.append(time_scenario(scenario, submission_prog, fixtures, exclude))
-
-            if not ours or not theirs or min(ours) <= 0:
-                return 1.0, "the clock could not read scenario %s" % probe_id
-
-            per_scenario[probe_id] = (ours, theirs)
-    except Exception as exc:
-        return 1.0, "timing could not be completed: %s" % exc
-
-    if not per_scenario:
-        return 1.0, "no timing measurements succeeded"
-
-    speedups = {}
-    for probe_id, (ours, theirs) in per_scenario.items():
-        min_ours = min(ours)
-        min_theirs = min(theirs)
-        spread = (max(theirs) - min(theirs)) / max(min_theirs, 1e-9)
-        ratio = min_theirs / min_ours
-        if abs(ratio - 1.0) <= spread:
-            speedups[probe_id] = 1.0
-        else:
-            speedups[probe_id] = ratio
-
-    worst_scenario = min(speedups, key=speedups.get)
-    worst_speedup = speedups[worst_scenario]
-
-    if len(speedups) == 1:
-        note = "%.2fx faster than the reference" % worst_speedup
-    else:
-        note = ("%.2fx on the worst workload (scenario %s of %d); other workloads: %s" %
-                (worst_speedup, worst_scenario, len(speedups),
-                 ", ".join("%.2fx" % speedups[p] for p in sorted(speedups) if p != worst_scenario)))
-
-    return worst_speedup, note
+    """Use the same auditable protocol as function and package tasks."""
+    global TIMING_REPORT
+    result = measure(
+        lambda scenario: time_scenario(scenario, reference_prog, fixtures, exclude),
+        lambda scenario: time_scenario(scenario, submission_prog, fixtures, exclude),
+        lambda shape, i: scenarios[shape], list(timed_ids))
+    TIMING_REPORT = result.to_json()
+    TIMING_REPORT["cost_boundary"] = "command wall time including launch; fixture preparation excluded"
+    TIMING_REPORT["input_policy"] = "fixed held-out scenarios; fresh filesystem per invocation"
+    return result.speedup, result.note
 
 def score(passed, total, speedup):
     if total == 0:
@@ -2407,6 +2357,44 @@ def score(passed, total, speedup):
     return 0.5 + 0.5 * speedup
 
 def main():
+    reward = os.environ.get('REWARD_PATH')
+    if reward and os.path.lexists(reward):
+        os.unlink(reward)
+    with ExitStack() as contexts:
+        try:
+            status = evaluate(contexts)
+        finally:
+            if PENDING_REWARD is not None and TARGET_SCOPE:
+                fields = PENDING_REWARD[0]
+                fields['verification_scope'] = TARGET_SCOPE
+                fields['target_build'] = TARGET_BUILD_REPORT
+                if TARGET_BUILD_REPORT is not None:
+                    reference_execution = ACTIVE_ROOTS[0].execution_report()
+                    candidate_execution = ACTIVE_ROOTS[1].execution_report()
+                    fields['target_execution'] = candidate_execution
+                    fields['reference_execution'] = reference_execution
+                    enforced = candidate_execution['complete'] and not candidate_execution['denied'] and candidate_execution['enforced']
+                    TARGET_BUILD_REPORT['runtime_enforced'] = enforced
+                    if not enforced or fields.get('timing_valid') and not reference_execution['complete']:
+                        fields.update(reward=0.0, correct=False, timing_valid=False, speedup=0.0,
+                                      note='target execution policy was violated or execution evidence is incomplete')
+                        status = 1
+            ACTIVE_ROOTS.clear()
+    if PENDING_REWARD is not None:
+        fields, path = PENDING_REWARD
+        with open(path, 'w') as handle:
+            json.dump(fields, handle)
+    return status
+
+def save_reward(fields, path):
+    global PENDING_REWARD
+    fields['isolation'] = ISOLATION_REPORT
+    fields['verifier_sha256'] = VERIFIER_SHA256
+    PENDING_REWARD = fields, path
+
+def evaluate(contexts):
+    global TIMED_EXPECTATIONS, CONTROL_OUTPUTS, ISOLATION_REPORT
+    global TARGET_BUILD_REPORT, TARGET_SCOPE
     root = os.path.dirname(__file__)
     scenarios = {}
     for line in open(os.path.join(root, "scenarios.jsonl")):
@@ -2414,22 +2402,42 @@ def main():
         scenarios[item["probe_id"]] = item
     expected = json.load(open(os.path.join(root, "expectations.json")))
     timed_list = json.load(open(os.path.join(root, "timed.json")))
+    timing_key = os.path.join(root, "timed_expectations.json")
+    if os.path.exists(timing_key):
+        TIMED_EXPECTATIONS = json.load(open(timing_key))
+    CONTROL_OUTPUTS = control_output_signatures(
+        list(scenarios.values()), dict(expected, **TIMED_EXPECTATIONS))
 
     passed = total = 0
+    mismatches = []
     fixtures = os.path.join(root, "fixtures")
     environment = json.load(open(os.path.join(root, "environment.json")))
     exclude = tuple(environment.get("exclude") or ())
+    target = environment.get('target_language')
 
     reference = os.path.join(root, "reference", "run.sh")
     submission = os.path.join(os.environ.get("SUBMISSION_ROOT", "/app"), "run.sh")
+    replay = target and os.path.abspath(os.path.dirname(submission)) == os.path.abspath(os.path.dirname(reference))
+    reference_workspace, reference_base, reference_environment = reference_context(root)
+    if reference_base != '/':
+        reference = os.path.join(reference_workspace, 'run.sh')
+        if replay:
+            submission = reference
+    if target:
+        TARGET_SCOPE = 'reference-self-replay' if replay else 'target-submission'
 
-    if not os.path.exists(submission):
+    if not target and not os.path.exists(submission):
         reward = os.environ.get("REWARD_PATH")
         if reward:
-            json.dump({"reward": 0.0, "correct": False, "correctness_passed": 0,
-                      "correctness_total": len(expected), "speedup": 0.0,
-                      "note": "no run.sh in the submission"}, open(reward, "w"))
+            total = sum(rule.get('graded', True) for values in expected.values()
+                        for value in values for name, rule in value.items()
+                        if name in ('exit_code', 'stdout', 'stderr', 'tree'))
+            save_reward({"reward": 0.0, "correct": False, "correctness_passed": 0,
+                      "correctness_total": total, "speedup": 0.0,
+                      "note": "no run.sh in the submission"}, reward)
         return 1
+    if target and not USE_CONFINEMENT:
+        raise RuntimeError('target-language evaluation requires confinement')
 
     # ONLY ROOT CAN DROP TO NOBODY, AND ONLY ROOT NEEDS TO. `setpriv --reuid` changes the user id,
     # which an unprivileged process may not do: run as `nobody` it fails with
@@ -2445,66 +2453,58 @@ def main():
     # obvious place: stdout and the file tree still matched perfectly, because the program that
     # never ran wrote nothing and touched nothing, while exit code and stderr failed on every one of
     # 47 scenarios. In aggregate: 47 of 75 in-image refusals at precisely 50%, 19 at precisely 25%.
-    if environment.get("isolated") and shutil.which("setpriv") and os.geteuid() == 0:
+    if USE_CONFINEMENT:
+        reference_prog = contexts.enter_context(Root(os.path.dirname(reference), uid=50002,
+            runtime_base=reference_base, runtime_environment=reference_environment))
+        submission_prog = contexts.enter_context(Root(os.path.dirname(submission), uid=50001,
+            runtime_base=reference_base if replay else '/',
+            runtime_environment=reference_environment if replay else None))
+        ACTIVE_ROOTS.extend([reference_prog, submission_prog])
+        ISOLATION_REPORT = verify_pair(reference_prog, submission_prog)
+        if target and environment.get('reference_argv'):
+            reference_prog.entry_argv = list(environment['reference_argv'])
+            if replay:
+                submission_prog.entry_argv = list(environment['reference_argv'])
+        if target and not replay:
+            try:
+                known = [Path(os.path.dirname(reference)) / name for name in ('program', 'serve.bin')]
+                TARGET_BUILD_REPORT = build_target(submission_prog, target, reference_binaries=known)
+                submission_prog.entry_argv = TARGET_BUILD_REPORT['entry_argv']
+                submission_prog.audit_execution(submission_prog.entry_argv + environment.get('target_helpers', []))
+                reference_prog.audit_execution()
+            except Exception as error:
+                total = sum(rule.get('graded', True) for values in expected.values()
+                            for value in values for name, rule in value.items()
+                            if name in ('exit_code', 'stdout', 'stderr', 'tree'))
+                reward = os.environ.get('REWARD_PATH')
+                if reward:
+                    save_reward({'reward': 0.0, 'correct': False, 'correctness_passed': 0,
+                                 'correctness_total': total, 'speedup': 0.0,
+                                 'note': 'target-language build refused: ' + str(error)[:1500]}, reward)
+                return 1
+    elif environment.get("isolated") and shutil.which("setpriv") and os.geteuid() == 0:
         reference_prog = ["setpriv", "--reuid", "nobody", "--regid", "nogroup", "--clear-groups", "--", reference]
         submission_prog = ["setpriv", "--reuid", "nobody", "--regid", "nogroup", "--clear-groups", "--", submission]
     else:
         reference_prog = [reference]
         submission_prog = [submission]
 
-    if os.environ.get("FRF_REFRESH_EXPECTATIONS"):
-        refreshed = {}
-        for pid, steps in scenarios.items():
-            actuals = run_scenario(scenarios[pid], reference_prog, fixtures, exclude)
-            rows = []
-            for index, old in enumerate(expected.get(pid, [])):
-                actual = actuals[index]
-                row = {"step": index}
-                for channel in ("exit_code", "stdout", "stderr", "tree"):
-                    rule = old[channel]
-                    value = str(actual[channel]) if channel == "exit_code" else actual[channel]
-                    digest, line_count = stream_digest(value, rule.get("masked") or ())
-                    row[channel] = {**rule, "digest": digest, "line_count": line_count}
-                rows.append(row)
-            refreshed[pid] = rows
-        # A REFRESH THAT RECORDS THE REFERENCE FAILING IS NOT A REFRESH, IT IS A CORRUPTED ANSWER KEY.
-        # This block re-observes the reference inside the delivered image and overwrites the frozen
-        # expectations with whatever it saw. When the reference cannot run in that image -- a missing
-        # dependency tree, an entry point the image does not install -- what it "sees" is empty stdout
-        # and a non-zero exit on every scenario, and that is what got written as the thing submissions
-        # are graded against. It then scores 8/8, because reproducing a crash is perfectly reproducible.
-        #
-        # MEASURED on one finished repo batch: 19 tasks emitted, and the correlation is exact --
-        # 17 with `evidence 8/8` had ZERO working graded steps, while the only 2 with form-OK corpora
-        # were the two that never reached this stage. The freeze gates were doing their job; the
-        # corruption happened after them, which is why auditing shipped artefacts kept contradicting
-        # what the freeze had accepted.
-        working = 0
-        zero = stream_digest("0", ())[0]
-        for rows in refreshed.values():
-            for row in rows:
-                out, code = row["stdout"], row["exit_code"]
-                if out.get("graded", True) and out.get("line_count", 0) > 0:
-                    working += 1
-                elif code.get("graded", True) and code["digest"] == zero:
-                    working += 1
-        if not working:
-            # REFUSED RATHER THAN WRITTEN. The frozen expectations on disk are left exactly as the
-            # freeze produced them, so nothing is lost and the failure is legible: the image cannot run
-            # its own reference, which is a fact about the image, not about any submission.
-            sys.stderr.write(
-                "refresh refused: the reference did no work on any scenario inside this image "
-                "(%d scenarios re-observed, every one empty stdout with a non-zero exit). The frozen "
-                "expectations were kept; this task's image cannot run its own reference.\\n"
-                % len(refreshed))
-            return 1
-        with open(os.path.join(root, "expectations.json"), "w", encoding="utf-8") as handle:
-            json.dump(refreshed, handle, indent=2)
-        expected = refreshed
+    # Verification never rewrites frozen expectations, even if legacy refresh flags are set.
 
     for pid, steps in expected.items():
         scenario = scenarios[pid]
-        actuals = run_scenario(scenario, submission_prog, fixtures, exclude)
+        try:
+            actuals = run_scenario(scenario, submission_prog, fixtures, exclude)
+        except (subprocess.TimeoutExpired, OutputLimitExceeded) as exc:
+            total = sum(rule.get('graded', True) for values in expected.values()
+                        for value in values for name, rule in value.items()
+                        if name in ('exit_code', 'stdout', 'stderr', 'tree'))
+            reward = os.environ.get('REWARD_PATH')
+            if reward:
+                save_reward({'reward': score(passed, total, 0.0), 'correct': False,
+                             'correctness_passed': passed, 'correctness_total': total,
+                             'speedup': 0.0, 'note': str(exc)}, reward)
+            return 1
         for index, exp in enumerate(steps):
             actual = actuals[index] if index < len(actuals) else {"exit_code": 127, "stdout": "", "stderr": "", "tree": ""}
             for channel in ("exit_code", "stdout", "stderr", "tree"):
@@ -2514,32 +2514,39 @@ def main():
                 total += 1
                 value = str(actual[channel]) if channel == "exit_code" else actual[channel]
                 actual_digest, line_count = stream_digest(value, rule.get("masked") or ())
-                passed += (line_count == int(rule.get("line_count", 0)) and
+                matches = (line_count == int(rule.get("line_count", 0)) and
                            actual_digest == rule.get("digest"))
+                passed += matches
+                if not matches and len(mismatches) < 8:
+                    mismatches.append({'probe_id': pid, 'step': index, 'channel': channel,
+                                       'actual': str(value)[:2000], 'actual_digest': actual_digest,
+                                       'expected_digest': rule.get('digest')})
 
     reward_path = os.environ.get("REWARD_PATH")
 
     if passed < total or total == 0:
         if reward_path:
-            json.dump({"reward": score(passed, total, 0.0), "correct": False,
+            save_reward({"reward": score(passed, total, 0.0), "correct": False,
                       "correctness_passed": passed, "correctness_total": total, "speedup": 0.0,
-                      "note": "not every graded observation matched the reference"}, open(reward_path, "w"))
+                      "mismatches": mismatches,
+                      "note": "not every graded observation matched the reference"}, reward_path)
         return 0 if passed > 0 else 1
 
     speedup, note = measure_speed(scenarios, timed_list, submission_prog, reference_prog, fixtures, exclude)
 
     if reward_path:
-        json.dump({"reward": score(passed, total, speedup), "correct": True,
+        save_reward({"reward": score(passed, total, speedup) if TIMING_REPORT.get("usable") else 0.0,
+                  "timing": TIMING_REPORT, "timing_valid": bool(TIMING_REPORT.get("usable")), "correct": True,
                   "correctness_passed": passed, "correctness_total": total,
-                  "speedup": round(speedup, 4), "note": note}, open(reward_path, "w"))
-    return 0
+                  "speedup": round(speedup, 4), "note": note}, reward_path)
+    return 0 if TIMING_REPORT.get("usable") else 1
 
 if __name__ == "__main__":
     raise SystemExit(main())
 '''
 
 
-def _verifier_source() -> str:
+def _verifier_source(*, isolated: bool = True) -> str:
     """The shipped verifier, with the observation environment written into it.
 
     INJECTED RATHER THAN DUPLICATED. The verifier cannot import from this package -- it ships alone
@@ -2553,8 +2560,19 @@ def _verifier_source() -> str:
     every scenario looks like rather than anything about the material.
     """
     from ..observe.process.runner import INHERITED_ENV, SUBJECT_ENV
+    from ..core import timing
+    from ..observe.process import snapshot, workload
+    from ..observe import isolated as confinement, transport, target_build, reference_image
 
     return (_PROCESS_VERIFIER
+            .replace("__TIMING_PROTOCOL__", timing.standalone_source())
+            .replace("__TREE_PROTOCOL__", snapshot.standalone_source())
+            .replace("__WORKLOAD_PROTOCOL__", workload.standalone_source())
+            .replace("__TRANSPORT_PROTOCOL__", transport.standalone_source())
+            .replace("__ISOLATION_PROTOCOL__", confinement.standalone_source())
+            .replace("__TARGET_BUILD__", target_build.standalone_source())
+            .replace("__REFERENCE_CONTEXT__", reference_image.standalone_source())
+            .replace("__USE_CONFINEMENT__", repr(isolated))
             .replace("__SUBJECT_ENV__", repr(dict(SUBJECT_ENV)))
             .replace("__INHERITED_ENV__", repr(tuple(INHERITED_ENV))))
 

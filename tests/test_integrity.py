@@ -110,9 +110,7 @@ def test_no_ban_list_means_nothing_to_find():
 def test_isolation_is_reported_from_what_was_applied_and_never_from_a_name():
     """THE test in this file, and it once asserted the bug.
 
-    The container is the real boundary. Applying the optional wrapper adds a process cap and account
-    restriction, but is not required for remote/container isolation. The test keeps those two facts
-    separate so a future wrapper change cannot accidentally redefine what E2B already guarantees.
+    Host containment does not prove reference/candidate separation within one container.
     """
     class _Local:
         name = "local-process"
@@ -123,17 +121,15 @@ def test_isolation_is_reported_from_what_was_applied_and_never_from_a_name():
     assert not integrity.isolation_for(_Local()).enforced
     assert not integrity.isolation_for(None).enforced
 
-    # The container itself is the boundary. The wrapper is an optional further restriction,
-    # not the thing that makes remote execution isolated.
     unwrapped = integrity.isolation_for(_Container())
-    assert unwrapped.enforced
+    assert not unwrapped.enforced
     assert not unwrapped.accounts
     assert unwrapped.process_cap == 0
     assert "container" in unwrapped.reason
 
-    # The same container, with the restriction actually applied.
     wrapped = integrity.isolation_for(_Container(), applied=True)
-    assert wrapped.enforced and wrapped.process_cap > 0 and wrapped.suspends_idle_side
+    assert not wrapped.enforced and not wrapped.suspends_idle_side
+    assert not wrapped.accounts
 
     # Applied on a backend that shares this machine is still not separation: the account and the cap
     # are real, the isolation is not, and conflating them is how a local run gets certified.

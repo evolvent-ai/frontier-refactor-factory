@@ -22,8 +22,9 @@ FrontierSWE-Performance, and a score that cannot be compared across benchmarks i
 score with an ugly tail. Comparability beats curve design.
 
 Speed is scored only against a ratio the measurement layer already vouched for. A difference inside
-the machine's own noise arrives here as exactly 1.0, so "no measurable change" contributes nothing
-beyond the 0.5 correctness already earned. That substitution belongs to `timing`, which alone knows
+the machine's own noise arrives here as exactly 1.0, so "no measurable change" gives the baseline
+reward of 1.0: 0.5 for correctness and 0.5 for unchanged performance. That substitution belongs to
+`timing`, which alone knows
 what this machine's noise was: by the time a number reaches this module it is a finding, not a
 reading.
 """

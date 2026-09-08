@@ -11,7 +11,7 @@ import os
 import shutil
 import subprocess
 
-from ..core import harbor, scratch
+from ..core import harbor, scratch, timing
 from ..core.contract import CheckoutContract
 
 _IGNORE = shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "target", "build",
@@ -21,10 +21,11 @@ _IGNORE = shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "target
 def write(destination: str, package: harbor.Package, contract: CheckoutContract) -> str:
     """Emit a self-contained task from a real checkout and native test commands."""
     contract.validate()
+    from ..core.source_tree import copy_tree
     harbor.write(destination, package)
     for room in (os.path.join(destination, "environment"),
                  os.path.join(destination, "tests", "reference")):
-        shutil.copytree(contract.root, room, dirs_exist_ok=True, ignore=_IGNORE)
+        copy_tree(contract.root, room, dirs_exist_ok=True, ignore=_IGNORE)
     manifest = {
         "target_paths": list(contract.target_paths),
         "build": [list(command) for command in contract.build],
@@ -37,7 +38,7 @@ def write(destination: str, package: harbor.Package, contract: CheckoutContract)
     with open(os.path.join(destination, "tests", "checkout-contract.json"), "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2, sort_keys=True)
     with open(os.path.join(destination, "tests", "verify.py"), "w", encoding="utf-8") as handle:
-        handle.write(_VERIFIER)
+        handle.write(_VERIFIER.replace('__TIMING_PROTOCOL__', timing.standalone_source()))
     return destination
 
 
@@ -64,6 +65,7 @@ def drive(path: str) -> tuple[int, int]:
 
 _VERIFIER = '''#!/usr/bin/env python3
 import argparse, json, os, statistics, subprocess, time
+__TIMING_PROTOCOL__
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--task-root", required=True)
@@ -93,40 +95,41 @@ for command in commands:
     except (OSError, subprocess.SubprocessError):
         pass
 
-def timed_workload(workspace):
-    outputs, times = [], []
-    for command in contract.get("benchmark", []):
-        t0 = time.perf_counter()
-        done = run(command, workspace, hidden=True)
-        times.append(time.perf_counter() - t0)
-        if done.returncode:
-            raise RuntimeError("workload failed: " + (done.stderr or done.stdout)[-500:])
-        try:
-            outputs.append(json.loads(done.stdout))
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("workload must write one JSON result to stdout: " + str(exc))
-    return outputs, sum(times)
+def timed_workload(workspace, index):
+    t0 = time.perf_counter()
+    done = run(contract['benchmark'][int(index)], workspace, hidden=True)
+    elapsed = time.perf_counter() - t0
+    if done.returncode:
+        raise RuntimeError("workload failed: " + (done.stderr or done.stdout)[-500:])
+    try:
+        output = json.loads(done.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("workload must write one JSON result to stdout: " + str(exc))
+    return output, elapsed
 
 benchmarks = contract.get("benchmark", [])
 speedup = 1.0
+timing_report = {}
+timing_valid = False
 note = "native checkout verification"
 if benchmarks and passed == len(commands):
     try:
-        n = int(contract.get("timing_runs", 7))
-        ref_samples, cand_samples = [], []
-        ref_outputs = None
-        for _ in range(n):
-            out, elapsed = timed_workload(reference)
-            ref_outputs = out if ref_outputs is None else ref_outputs
-            if out != ref_outputs:
-                raise RuntimeError("hidden reference workload is not deterministic")
-            ref_samples.append(elapsed)
-            out, elapsed = timed_workload(args.workspace)
-            if out != ref_outputs:
-                raise RuntimeError("candidate workload output differs from hidden reference")
-            cand_samples.append(elapsed)
-        speedup = statistics.median(ref_samples) / max(statistics.median(cand_samples), 1e-12)
-        note = "native workload: median of %d paired runs" % n
+        shapes = [str(i) for i in range(len(benchmarks))]
+        expected = {shape: timed_workload(reference, shape)[0] for shape in shapes}
+        def cost(workspace, shape):
+            out, elapsed = timed_workload(workspace, shape)
+            if out != expected[shape]:
+                raise RuntimeError('candidate or reference workload output differs from hidden reference')
+            return elapsed
+        measured = measure(lambda shape: cost(reference, shape),
+                           lambda shape: cost(args.workspace, shape),
+                           lambda shape, index: shape, shapes,
+                           samples=max(SAMPLES_PER_SHAPE, int(contract.get('timing_runs', 7))))
+        timing_report = measured.to_json()
+        timing_report['cost_boundary'] = 'command wall time including process launch'
+        if not measured.usable:
+            raise RuntimeError(measured.note)
+        speedup, note, timing_valid = measured.speedup, measured.note, True
     except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
         passed = 0
         note = str(exc)
@@ -135,6 +138,7 @@ if benchmarks and passed == len(commands):
 correct = passed == len(commands)
 report = {"correctness_passed": passed, "correctness_total": len(commands),
           "correct": correct, "reward": float(correct), "speedup": speedup, "note": note,
+          "timing_valid": timing_valid, "timing": timing_report,
           "min_speedup": contract.get("min_speedup")}
 reward = os.environ.get("REWARD_PATH")
 if reward:

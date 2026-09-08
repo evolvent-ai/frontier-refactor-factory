@@ -113,10 +113,11 @@ DOCKER_INSTALL_CMDS = [
     "apt-get update -qq",
     (
         "apt-get install -y --no-install-recommends "
-        "docker-ce docker-ce-cli containerd.io docker-buildx-plugin "
+        "docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin "
         "python3 python3-pip "
         "build-essential cmake"
     ),
+    "docker compose version",
     # Ubuntu 22.04's stock Node is too old for the pinned TypeScript compiler. Install the
     # supported Node 22 line in the remote image before npm is used; this never touches the host.
     "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",

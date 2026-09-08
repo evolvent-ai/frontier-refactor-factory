@@ -260,25 +260,14 @@ def isolation_for(backend, *, applied: bool = False) -> Isolation:
     """
     name = getattr(backend, "name", "") or "none"
     if name in ("docker", "remote"):
-        # The container is the boundary -- see `container_is_the_boundary`. The wrapper is reported
-        # when it was additionally applied, because a process cap is a real further restriction,
-        # but its absence no longer means the two sides are unseparated.
-        return Isolation(enforced=True, accounts=applied,
-                         process_cap=PROCESS_CAP if applied else 0,
-                         suspends_idle_side=True,
-                         reason="each side runs in its own container, as an unprivileged user with "
-                                "no capabilities, and the untimed side is stopped while the other "
-                                "is measured"
-                                + (" (with a process cap)" if applied else ""))
-    if applied:
-        # Wrapped, but on a backend that shares this machine. The account and the cap are real; the
-        # separation is not, because both sides still see the same kernel and the same filesystem.
-        return Isolation(enforced=False, accounts=True, process_cap=PROCESS_CAP,
-                         reason="the command was restricted, but %r shares this machine with the "
-                                "factory, so the two sides are not genuinely separated" % name)
+        # Host containment does not separate two subjects running inside the same sandbox.
+        return Isolation(enforced=False,
+                         reason="the %s container contains execution, but separate subject filesystems, "
+                                "accounts and idle-side suspension have not been demonstrated%s"
+                                % (name, "; a command wrapper alone is insufficient" if applied else ""))
     return Isolation(enforced=False,
-                     reason="%r shares this machine and this user with the factory, so work handed "
-                            "to another process would be invisible to the clock" % name)
+                     reason="%r has no demonstrated subject separation; shared files and processes "
+                            "can bypass the clock%s" % (name, " despite a command wrapper" if applied else ""))
 
 
 def restricted_argv(argv: list, *, user: str = "nobody", cap: int = PROCESS_CAP) -> list:

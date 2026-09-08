@@ -124,18 +124,23 @@ def test_a_command_that_writes_gets_somewhere_to_write():
         assert not os.path.isdir("/etc/passwd"), "and never outside the workspace"
 
 
-def test_the_three_runners_agree_about_creating_output_directories():
-    """The freeze runs one, the sandbox runs another, and the shipped task runs a third.
+def test_the_three_runners_agree_about_creating_output_directories(tmp_path, monkeypatch):
+    """Execute each runner's preparation path against a program that does not create directories."""
+    from frf.core.sandbox import LocalProcess
+    from frf.observe.process.runner import Scenario, Step, run_scenario
+    from tests.test_timing_protocol import load_verifier
 
-    If they disagree the freeze and the delivered task observe different things, which is the defect
-    class this whole week has been about.
-    """
-    import frf.observe.process.runner as runner
-    import frf.scales.repo as repo
-
-    remote = open(runner.__file__, encoding="utf-8").read()
-    verifier = open(repo.__file__, encoding="utf-8").read()
-
-    assert "_make_output_dirs(workspace, step.argv)" in remote, "the local runner"
-    assert 'mkdir -p %s; " % _shell_quote(parent)' in remote, "the sandbox runner"
-    assert "os.makedirs(_p, exist_ok=True)" in verifier, "the verifier the task ships"
+    program = tmp_path / 'writer.py'
+    program.write_text("import sys,pathlib\npathlib.Path(sys.argv[1]).write_text('content')\nprint('done')\n")
+    command = [sys.executable, str(program)]
+    scenario = Scenario('nested', [Step(['{PROGRAM}', 'nested/one/result.txt'])])
+    local = run_scenario(scenario, command)[0]
+    # Execute the remote shell implementation locally; no external service is mocked as passing.
+    remote = run_scenario(scenario, command,
+                          backend=LocalProcess(str(tmp_path), name='remote'))[0]
+    verifier = load_verifier(tmp_path, monkeypatch, 'process')
+    shipped = verifier.run_scenario(scenario.to_json(), command, '', ())[0]
+    assert local == remote
+    assert shipped == {'exit_code': local.exit_code, 'stdout': '\n'.join(local.stdout.lines) + '\n',
+                       'stderr': '', 'tree': '\n'.join(local.tree.lines)}
+    assert local.exit_code == 0 and local.stdout.lines == ('done',)

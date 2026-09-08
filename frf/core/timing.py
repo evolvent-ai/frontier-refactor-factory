@@ -10,7 +10,8 @@ Five things make it evidence, and each answers a specific way the naive measurem
     INTERLEAVED       reference and candidate timed alternately in one run, so a machine that slows
                       down halfway through slows both rather than whichever went second.
     ORDER ALTERNATED  the one that runs first pays for a cold cache, so who goes first alternates.
-    FRESH INPUT       a new probe every timed call, so a candidate cannot win by memoising.
+    INPUT POLICY      supplied by the caller and reported by the delivered evaluator; no claim
+                      that repeated held-out inputs prevent memoisation.
     NOISE FLOOR       calibrated HERE, on this machine, in this run, by timing the reference against
                       ITSELF -- a comparison whose true answer is exactly 1.0, so whatever spread
                       appears is this machine's noise and nothing else. Never a constant: a number
@@ -29,6 +30,7 @@ ratio leaves this module it is a finding.
 """
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass, field
 from typing import Callable
@@ -36,6 +38,8 @@ from typing import Callable
 # How many paired samples per shape. Below about ten the bootstrap has too little to resample and
 # its interval is as unstable as the thing it is measuring.
 SAMPLES_PER_SHAPE = 12
+WARMUP_PAIRS = 2
+PROTOCOL_VERSION = "paired-worst-v1"
 
 # Resamples drawn to build the interval. Cheap -- it is arithmetic on numbers already collected --
 # so this is set high enough that the bound does not wobble between runs on identical data.
@@ -57,9 +61,11 @@ class SpeedResult:
     measured: float | None = None       # the raw worst-shape bound, kept only when it was rejected
     usable: bool = True                 # False means nothing was measured at all -- not "no gain"
     note: str = ""
+    evidence: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
-        out = {"speedup": round(self.speedup, 4), "median": round(self.median, 4),
+        out = {"protocol": PROTOCOL_VERSION, "evidence": self.evidence,
+               "speedup": round(self.speedup, 4), "median": round(self.median, 4),
                "noise_floor": round(self.noise_floor, 4), "within_noise": self.within_noise,
                "usable": self.usable,
                "shapes": {k: round(v, 4) for k, v in self.shapes.items()}, "note": self.note}
@@ -92,7 +98,8 @@ def _bootstrap_lower_bound(ratios: list[float], *, draws: int = BOOTSTRAP_DRAWS,
 
 
 def _paired_ratios(reference: Callable[[object], float], candidate: Callable[[object], float],
-                   draw_probe: Callable[[int], object], samples: int) -> list[float]:
+                   draw_probe: Callable[[int], object], samples: int,
+                   observations: list | None = None) -> list[float]:
     """Time the two alternately on the same fresh probe. -> one ratio per sample."""
     ratios = []
     for i in range(samples):
@@ -102,14 +109,21 @@ def _paired_ratios(reference: Callable[[object], float], candidate: Callable[[ob
             t_ref, t_cand = reference(probe), candidate(probe)
         else:
             t_cand, t_ref = candidate(probe), reference(probe)
-        if t_cand > 0:
-            ratios.append(t_ref / t_cand)
+        if not all(math.isfinite(t) and t > 0 for t in (t_ref, t_cand)):
+            raise ValueError("measurement must be finite and strictly positive")
+        ratio = t_ref / t_cand
+        if not math.isfinite(ratio) or ratio <= 0:
+            raise ValueError("invalid cost ratio")
+        ratios.append(ratio)
+        if observations is not None:
+            observations.append({"reference": t_ref, "candidate": t_cand,
+                                 "reference_first": i % 2 == 0})
     return ratios
 
 
 def measure(reference: Callable[[object], float], candidate: Callable[[object], float],
             draw_probe: Callable[[str, int], object], shapes: list[str], *,
-            samples: int = SAMPLES_PER_SHAPE) -> SpeedResult:
+            samples: int = SAMPLES_PER_SHAPE, warmups: int = WARMUP_PAIRS) -> SpeedResult:
     """-> the speedup a score may use, which is the worst shape's lower bound.
 
     `reference` and `candidate` each measure the COST of one probe and return it. Keeping the
@@ -130,37 +144,56 @@ def measure(reference: Callable[[object], float], candidate: Callable[[object], 
     interface instead of two.
     """
     if not shapes:
-        return SpeedResult(1.0, 0.0, 0.0, usable=False, note="no shape was given to time")
+        return SpeedResult(0.0, 0.0, 0.0, usable=False, note="no shape was given to time")
 
-    per_shape, floors = {}, []
+    if samples < 2 or warmups < 0:
+        raise ValueError("at least two sample pairs and non-negative warmups are required")
+    per_shape, floors, evidence, medians = {}, [], {}, {}
     for shape in shapes:
-        ratios = _paired_ratios(reference, candidate,
-                                lambda i, s=shape: draw_probe(s, i), samples)
-        if not ratios:
-            return SpeedResult(1.0, 0.0, 0.0, usable=False,
-                               note="the candidate reported no positive time on shape %r" % shape)
-        per_shape[shape] = _bootstrap_lower_bound(ratios)
-
-        # THE FLOOR IS MEASURED, not assumed. Timing the reference against itself has a known true
-        # answer of 1.0, so the interval's UPPER bound is how far this machine's noise can push a
-        # ratio up on its own. A candidate whose gain does not clear that has demonstrated nothing.
-        self_ratios = _paired_ratios(reference, reference,
-                                     lambda i, s=shape: draw_probe(s, i), samples)
-        inverted = sorted(1.0 / r for r in self_ratios if r > 0)
-        floors.append(1.0 / _bootstrap_lower_bound(inverted) if inverted else 1.0)
+        record = {"warmup_pairs": warmups, "samples": [], "self_samples": []}
+        evidence[shape] = record
+        try:
+            _paired_ratios(reference, candidate, lambda i: draw_probe(shape, i), warmups)
+            ratios = _paired_ratios(reference, candidate,
+                                    lambda i: draw_probe(shape, i + warmups), samples,
+                                    record["samples"])
+            self_ratios = _paired_ratios(reference, reference,
+                                         lambda i: draw_probe(shape, i + warmups), samples,
+                                         record["self_samples"])
+        except Exception as exc:
+            return SpeedResult(0.0, 0.0, 0.0, usable=False, evidence=evidence,
+                               note="timing failed on %r: %s" % (shape, exc))
+        lower = _bootstrap_lower_bound(ratios)
+        upper = 1.0 / _bootstrap_lower_bound([1.0 / r for r in ratios])
+        self_lower = _bootstrap_lower_bound(self_ratios)
+        self_upper = 1.0 / _bootstrap_lower_bound([1.0 / r for r in self_ratios])
+        noise = max(1.0, self_upper, 1.0 / self_lower)
+        # Uncertain differences are neutral; an established slowdown must never become a gain.
+        adjusted = lower if lower > noise else (upper if upper < 1.0 / noise else 1.0)
+        per_shape[shape] = adjusted
+        medians[shape] = statistics.median(ratios)
+        floors.append(noise)
+        record.update(lower=lower, upper=upper, noise_floor=noise, speedup=adjusted)
 
     worst_shape = min(per_shape, key=lambda s: per_shape[s])
     speedup = per_shape[worst_shape]
     noise = max(floors) if floors else 1.0
-    if speedup <= noise:
+    if speedup == 1.0:
         # REPORTED AS 1.0, not as the raw ratio. `speedup` is the field a score is computed from, so
         # leaving 1.03x in it and setting a flag would mean every downstream caller has to remember
         # to re-check the flag -- and the one that forgets pays for noise. The measured value is
         # kept in `measured` for a reader who wants to see what was rejected.
-        return SpeedResult(1.0, statistics.median(per_shape.values()), noise, per_shape,
-                           within_noise=True, measured=speedup,
+        return SpeedResult(1.0, statistics.median(medians.values()), noise, per_shape,
+                           within_noise=True, measured=medians[worst_shape], evidence=evidence,
                            note=("the measured gain (%.3fx on the worst shape, %r) does not clear "
                                  "this machine's own noise (%.3fx); reported as 1.0x, which is what "
                                  "was actually established" % (speedup, worst_shape, noise)))
-    return SpeedResult(speedup, statistics.median(per_shape.values()), noise, per_shape,
-                       note="worst shape %r of %d" % (worst_shape, len(per_shape)))
+    return SpeedResult(speedup, statistics.median(medians.values()), noise, per_shape,
+                       evidence=evidence, note="worst shape %r of %d" % (worst_shape, len(per_shape)))
+
+
+def standalone_source() -> str:
+    """Embed this exact protocol in emitted verifiers without a runtime FRF dependency."""
+    from pathlib import Path
+    return Path(__file__).read_text(encoding="utf-8").replace(
+        "from __future__ import annotations", "")

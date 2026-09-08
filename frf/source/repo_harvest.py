@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import fnmatch
 import io
+import json
 import os
 import re
 import shlex
 import tarfile
+from collections import defaultdict
 from dataclasses import dataclass, field
+from urllib.parse import unquote, urlsplit
 
 
 _NEVER = {".git", "node_modules", "target", "build", "dist", ".venv", "venv", "vendor"}
@@ -80,6 +83,93 @@ class Harvested:
     source: str
     argv: tuple[str, ...]
     line: int
+
+
+def command_index(argv, program_names):
+    """Locate an executed subject, never an argument to an installer or file command."""
+    names = {os.path.basename(str(name)) for name in program_names if name}
+    index = 0
+    if not argv:
+        return None
+    if argv[index] in ("exec", "command"):
+        index += 1
+    if index < len(argv) and argv[index] in ("poetry", "uv"):
+        if tuple(argv[index:index + 2]) != (argv[index], "run"):
+            return None
+        index += 2
+    if index >= len(argv):
+        return None
+    executable = os.path.basename(argv[index])
+    if executable in ("python", "python3", "node", "ruby", "bash", "sh"):
+        index += 1
+        if index < len(argv) and argv[index] == "-m":
+            index += 1
+    if index >= len(argv):
+        return None
+    token = argv[index]
+    if token.startswith(("-", "$")) or "=" in token:
+        return None
+    return index if os.path.basename(token) in names else None
+
+
+def _input_rank(path):
+    name = os.path.basename(path).lower()
+    parts = re.split(r'[._-]', name)
+    return (bool(set(parts) & {'expected', 'golden', 'snap', 'invalid', 'bad', 'error'}), path)
+
+
+def _spread_inputs(paths, size):
+    """Interleave structural order with large inputs; neither alphabetical order nor size wins all slots."""
+    large = sorted(paths, key=lambda path: (_input_rank(path)[0], -size(path), path))
+    selected, seen = [], set()
+    for pair in zip(paths, large):
+        for path in pair:
+            if path not in seen:
+                selected.append(path)
+                seen.add(path)
+    return selected
+
+
+def bind_inputs(root, argv, inputs, *, limit=12, context=()):
+    """Instantiate a documented file argument with upstream corpus files of the same suffix.
+
+    These are candidate invocations, not verified workloads. Only the first matching file argument
+    varies; output paths and remaining options retain their documented values.
+    """
+    variants = [list(argv)] if paths_exist(root, argv) else []
+    for position, token in enumerate(argv[1:], 1):
+        prefix, value = (token.split("=", 1) if token.startswith("-") and "=" in token
+                         else ("", token))
+        if value.startswith(("-", "$")) or os.path.isabs(value) or ".." in value.split("/"):
+            continue
+        suffix = os.path.splitext(value)[1]
+        if not suffix:
+            continue
+        suffixes = ('.yaml', '.yml', '.json') if suffix in ('.yaml', '.yml') else (suffix,)
+        siblings = [path for path in inputs if path.endswith(suffixes)]
+        if not siblings:
+            continue
+        # Prefer compound file types and the subcommand's own corpus, without discarding diversity.
+        basename = os.path.basename(value)
+        compound = basename[basename.find("."):]
+        if compound.count('.') > 1:
+            # A documented *.swagger.yaml input must not silently become *.openapi.yaml.
+            siblings = [path for path in siblings
+                        if any(path.endswith(compound[:-len(suffix)] + ending) for ending in suffixes)]
+        words = set(argv[1:position])
+        context_words = {word for item in context for word in str(item).split('/')}
+        siblings.sort(key=lambda path: (not path.endswith(compound),
+                                        not bool(words & set(path.split("/"))),
+                                        not bool(context_words & set(path.split('/'))),
+                                        _input_rank(path)))
+        siblings = _spread_inputs(siblings, lambda path: os.path.getsize(os.path.join(root, path)))
+        for sibling in siblings[:limit]:
+            changed = list(argv)
+            changed[position] = (prefix + "=" if prefix else "") + sibling
+            if changed not in variants:
+                variants.append(changed)
+        break
+    return variants
 
 
 
@@ -249,7 +339,7 @@ def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int =
     found: list[Harvested] = []
     scanned = 0
     for directory, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in _NEVER]
+        dirs[:] = sorted(d for d in dirs if d not in _NEVER and not d.startswith('.frf-'))
         for filename in sorted(files):
             prose = filename.endswith(_PROSE_SUFFIXES)
             workflow = filename.endswith(_CI_SUFFIXES)
@@ -288,8 +378,7 @@ def harvest_files(root: str, program_names: tuple[str, ...], *, max_files: int =
                     continue
                 if stats:
                     stats.commands_seen += 1
-                token_names = {os.path.basename(token) for token in argv[:3]}
-                if not (token_names & names):
+                if command_index(argv, names) is None:
                     continue
                 if any(token in ("|", ">", ">>", "&&", ";") for token in argv):
                     if stats:
@@ -311,7 +400,8 @@ def harvest_corpus(root: str, *,
                    directories: tuple[str, ...] = ("testdata", "fixtures", "fixture", "__fixtures__",
                                                    "corpus", "regression", "examples", "example",
                                                    "samples", "cases", "spec", "data"),
-                   max_files: int = 40, max_bytes: int = 262144,
+                   max_files: int = 64, max_bytes: int = 4 * 1024 * 1024,
+                   max_total_bytes: int = 32 * 1024 * 1024,
                    stats: HarvestStats | None = None) -> list[str]:
     """Find repository-owned input files suitable for fixture scenarios.
 
@@ -335,29 +425,107 @@ def harvest_corpus(root: str, *,
     accept produces a refusal instead of a task. That gate has to exist for this to be safe, and it
     now does.
     """
-    found = []
+    groups = defaultdict(lambda: defaultdict(list))
+    sizes = {}
     wanted = set(directories)
     for directory, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in _NEVER]
-        rel_parts = set(os.path.relpath(directory, root).split(os.sep))
-        if not (rel_parts & wanted):
+        dirs[:] = sorted(d for d in dirs if d not in _NEVER and not d.startswith('.frf-'))
+        rel_parts = os.path.relpath(directory, root).split(os.sep)
+        match = next((i for i, part in enumerate(rel_parts) if part in wanted), None)
+        if match is None:
             continue
-        for filename in sorted(files):
+        group = '/'.join(rel_parts[:match + 1])
+        for filename in sorted(files, key=_input_rank):
             if not filename.endswith(_INPUT_SUFFIXES):
                 continue
             path = os.path.join(directory, filename)
             try:
-                if 0 < os.path.getsize(path) <= max_bytes:
-                    found.append(os.path.relpath(path, root))
+                size = os.path.getsize(path)
+                if 0 < size <= max_bytes:
+                    relative = os.path.relpath(path, root)
+                    groups[group][directory].append(relative)
+                    sizes[relative] = size
             except OSError:
                 continue
-            if len(found) >= max_files:
-                if stats:
-                    stats.inputs_found = len(found)
-                return found
+    queues = {}
+    for group, rooms in groups.items():
+        queue = []
+        ordered = sorted(rooms, key=lambda path: (path.count(os.sep), path))
+        for index in range(max_files):
+            for room in ordered:
+                if index < len(rooms[room]):
+                    queue.append(rooms[room][index])
+            if len(queue) >= max_files:
+                break
+        all_paths = [path for room in ordered for path in rooms[room]]
+        remainder = [path for path in all_paths if path not in set(queue)]
+        queues[group] = _spread_inputs(queue + remainder, sizes.__getitem__)[:max_files]
+    # Share the budget across corpus roots, then across their workload subdirectories.
+    found = []
+    total_bytes = 0
+    for index in range(max_files):
+        for group in sorted(queues):
+            if index < len(queues[group]):
+                path = queues[group][index]
+                if total_bytes + sizes[path] > max_total_bytes:
+                    continue
+                found.append(path)
+                total_bytes += sizes[path]
+                if len(found) == max_files:
+                    break
+        if len(found) == max_files:
+            break
     if stats:
         stats.inputs_found = len(found)
     return found
+
+
+def fixture_dependencies(root, relatives, *, max_files=512, max_bytes=64 * 1024 * 1024):
+    """Include repository-local JSON/YAML $ref dependencies without following network references."""
+    import yaml
+
+    root = os.path.realpath(root)
+    pending, found, size = list(relatives), set(), 0
+    while pending:
+        relative = os.path.normpath(pending.pop())
+        if relative in found or os.path.isabs(relative):
+            continue
+        declared_path = os.path.abspath(os.path.join(root, relative))
+        full = os.path.realpath(declared_path)
+        if (os.path.commonpath([root, declared_path]) != root
+                or os.path.commonpath([root, full]) != root or not os.path.isfile(full)):
+            continue
+        size += os.path.getsize(full)
+        if size > max_bytes or len(found) >= max_files:
+            raise ValueError('repository fixture dependencies exceed the staging budget')
+        found.add(relative)
+        if not full.endswith(('.json', '.yaml', '.yml')):
+            continue
+        try:
+            with open(full, encoding='utf-8') as handle:
+                data = json.load(handle) if full.endswith('.json') else yaml.safe_load(handle)
+        except (ValueError, UnicodeError, yaml.YAMLError):
+            continue
+        nodes, visited = [data], set()
+        while nodes:
+            value = nodes.pop()
+            if not isinstance(value, (dict, list)) or id(value) in visited:
+                continue
+            visited.add(id(value))
+            if isinstance(value, list):
+                nodes.extend(value)
+                continue
+            reference = value.get('$ref')
+            if isinstance(reference, str):
+                try:
+                    parsed = urlsplit(reference)
+                except ValueError:
+                    continue
+                if not parsed.scheme and not parsed.netloc and parsed.path:
+                    pending.append(os.path.normpath(os.path.join(os.path.dirname(relative),
+                                                                 unquote(parsed.path))))
+            nodes.extend(value.values())
+    return sorted(found)
 
 
 def fixture_archive(root: str, relatives: list[str], destination: str,
@@ -365,10 +533,10 @@ def fixture_archive(root: str, relatives: list[str], destination: str,
     """Write a deterministic, safe fixture archive and return its filename."""
     os.makedirs(destination, exist_ok=True)
     path = os.path.join(destination, name)
-    root_abs = os.path.abspath(root)
+    root_abs = os.path.realpath(root)
     with tarfile.open(path, "w:gz") as archive:
         for relative in sorted(set(relatives)):
-            full = os.path.abspath(os.path.join(root_abs, relative))
+            full = os.path.realpath(os.path.join(root_abs, relative))
             if not full.startswith(root_abs + os.sep) or not os.path.isfile(full):
                 continue
             data = open(full, "rb").read()

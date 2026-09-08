@@ -210,7 +210,8 @@ def repair(spec, observer, corpus, score_trivial: Callable,
     Returns:
         The corpus, possibly repaired. Check corpus.usable to see if it passed.
     """
-    for iteration in range(max_iterations):
+    attempts = 0
+    for iteration in range(max_iterations + 1):
         # Measure coverage and floor. Call seam uses corpus.inputs; process seam uses corpus.scenarios.
         probes = getattr(corpus, "inputs", None) or getattr(corpus, "scenarios", None) or {}
         reach = observer.coverage().measure(spec, probes)
@@ -225,6 +226,8 @@ def repair(spec, observer, corpus, score_trivial: Callable,
                                    if iteration > 0 else report.note)
             corpus.adequacy = report.to_json()
             return corpus
+        if iteration == max_iterations:
+            break
 
         # If no dark regions or no backend, can't repair
         if not reach.measured or not reach.dark:
@@ -259,8 +262,12 @@ def repair(spec, observer, corpus, score_trivial: Callable,
 
         # Merge and re-freeze
         try:
+            previous_count = corpus.probes
+            attempts += 1
             corpus = _merge_and_refreeze(corpus, new_probes, observer, spec, refreeze=refreeze)
             log(f"  corpus now has {corpus.probes} probe(s)")
+            if corpus.probes == previous_count:
+                break
         except Exception as error:
             log(f"  merge failed: {error}")
             break
@@ -268,7 +275,7 @@ def repair(spec, observer, corpus, score_trivial: Callable,
     # After all iterations, mark usable/unusable
     if not report.ok:
         corpus.usable = False
-        corpus.adequacy_note = f"inadequate after {max_iterations} repair attempt(s): {report.note}"
+        corpus.adequacy_note = f"inadequate after {attempts} repair attempt(s): {report.note}"
     else:
         corpus.adequacy_note = report.note
 

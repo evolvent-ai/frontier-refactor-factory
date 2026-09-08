@@ -22,10 +22,16 @@ other way to obtain one.
 from __future__ import annotations
 
 import io
+import hashlib
+import math
+from pathlib import Path, PurePosixPath
+import gzip
+from contextlib import nullcontext
 import os
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import time
 import re
 import uuid
@@ -156,37 +162,55 @@ def _wait_bounded(handle, seconds: float):
         pool.shutdown(wait=False)
 
 
-def _tar_bytes(local_dir: str, exclude: set | None = None) -> bytes:
-    """A directory as a tar stream, with the host left out of it.
+def _archive_size(local_dir: str, excluded: set) -> int:
+    estimate = 0
+    for root, dirs, files in os.walk(local_dir):
+        dirs[:] = [d for d in dirs if d not in excluded]
+        for name in dirs + files:
+            if name not in excluded:
+                path = os.path.join(root, name)
+                estimate += 2048
+                if not os.path.islink(path) and os.path.isfile(path):
+                    estimate += os.path.getsize(path)
+    return estimate
 
-    Names are stored relative to the directory root so that unpacking cannot depend on where the
-    directory happened to live, and mtimes are flattened so that pushing the same tree twice
-    produces the same bytes -- which is what makes a cached layer or a diff meaningful.
 
-    `exclude` defaults to the global EXCLUDED (host repositories never need node_modules/.git),
-    but a package subject's direct dependencies are part of the CONTRACT -- a monorepo refactor
-    task imports its own npm deps, and without them the sandbox cannot resolve the package.
-    Callers that need them pass a narrower set.
-    """
+def _write_tar(local_dir: str, buffer, excluded: set, *, compress: bool) -> None:
+    stream = gzip.GzipFile(fileobj=buffer, mode='wb', mtime=0, compresslevel=1) if compress else nullcontext(buffer)
+    with stream as output:
+        with tarfile.open(fileobj=output, mode="w|") as archive:
+            for root, dirs, files in os.walk(local_dir):
+                dirs[:] = sorted(d for d in dirs if d not in excluded)
+                for name in sorted(dirs + files):
+                    if name in excluded:
+                        continue
+                    full = os.path.join(root, name)
+                    info = archive.gettarinfo(full, arcname=os.path.relpath(full, local_dir))
+                    info.mtime = 0
+                    info.uid = info.gid = 0
+                    info.uname = info.gname = ""
+                    if info.isfile():
+                        with open(full, "rb") as handle:
+                            archive.addfile(info, handle)
+                    else:
+                        archive.addfile(info)
+
+
+def _tar_bytes(local_dir: str, exclude: set | None = None, *, compress: bool = False) -> bytes:
+    """Deterministic in-memory archive for local callers with explicit memory admission."""
     excluded = EXCLUDED if exclude is None else exclude
+    from . import resources
+    resources.require_headroom(local_dir, transfer_bytes=_archive_size(local_dir, excluded))
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as archive:
-        for root, dirs, files in os.walk(local_dir):
-            dirs[:] = [d for d in dirs if d not in excluded]
-            for name in files:
-                if name in excluded:
-                    continue
-                full = os.path.join(root, name)
-                info = archive.gettarinfo(full, arcname=os.path.relpath(full, local_dir))
-                info.mtime = 0
-                info.uid = info.gid = 0
-                info.uname = info.gname = ""
-                with open(full, "rb") as handle:
-                    archive.addfile(info, handle)
+    _write_tar(local_dir, buffer, excluded, compress=compress)
     return buffer.getvalue()
 
 
 def _untar_bytes(blob: bytes, local_dir: str) -> None:
+    return _untar_stream(io.BytesIO(blob), local_dir)
+
+
+def _untar_stream(stream, local_dir: str) -> None:
     """Unpack a tar stream, refusing anything that would write outside the destination.
 
     The check is not paranoia about a hostile registry: the streams here come back from a sandbox
@@ -202,7 +226,7 @@ def _untar_bytes(blob: bytes, local_dir: str) -> None:
     """
     os.makedirs(local_dir, exist_ok=True)
     destination = os.path.abspath(local_dir)
-    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:*") as archive:
+    with tarfile.open(fileobj=stream, mode="r:*") as archive:
         safe = []
         # The names that survived the filter, so a hard link can be checked against what will really
         # be written rather than against what the archive merely lists. `tar` emits the first copy of
@@ -364,6 +388,14 @@ class Remote:
 
     name = "remote"
 
+    def runtime(self, recipe):
+        """Reuse a source-runtime container; lifecycle belongs to this E2B sandbox."""
+        if not hasattr(self, '_source_runtimes'):
+            self._source_runtimes = {}
+        if recipe not in self._source_runtimes:
+            self._source_runtimes[recipe] = RemoteImage(self, recipe)
+        return self._source_runtimes[recipe]
+
     def __init__(self, template: str = "", *, timeout: float = SANDBOX_LIFETIME) -> None:
         try:
             from e2b import Sandbox                                        # noqa: PLC0415
@@ -408,6 +440,12 @@ class Remote:
                 time.sleep(min(2 ** attempt, 30))
 
     def close(self) -> None:
+        for runtime in getattr(self, '_source_runtimes', {}).values():
+            try:
+                runtime.close()
+            except Exception:
+                pass
+        self._source_runtimes = {}
         try:
             # BOUNDED LIKE EVERY OTHER REMOTE CALL, and this one needed saying twice: the `except`
             # below looks like it covers anything teardown can do wrong, and it does not cover the
@@ -429,42 +467,47 @@ class Remote:
         self.close()
 
     def push(self, local_dir: str, remote_dir: str, *, exclude: set | None = None) -> None:
-        """Upload as one tar and unpack there.
-
-        File by file would be one network round trip per file, and a repository is thousands. The
-        remote end is asked to unpack with its own tar rather than by the SDK, because the SDK's
-        write API takes bytes and has no opinion about archives.
-
-        `exclude` narrows what gets packed. The default excludes node_modules/.git etc (repo
-        checkouts); subject workspaces may pass a narrower set because their dependencies are part
-        of the contract.
-        """
-        blob = _tar_bytes(local_dir, exclude=exclude)
-        staged = "/tmp/frf-push-%s.tar" % uuid.uuid4().hex[:8]
-        # A READ TIMEOUT HERE IS NOTHING ABOUT THE SUBJECT. `files.write` has no retry of its own
-        # and no exit code to report, so a transient transport failure -- an E2B SDK read timeout,
-        # the exact shape that killed a tree-sitter task after its freeze had succeeded -- used to
-        # escape as an unclassified exception and take the whole candidate with it. The command path
-        # below retries the same way; the file path now does too.
-        for attempt in range(3):
+        """Spool a compressed archive to disk and send bounded, deadline-limited chunks."""
+        from . import resources
+        excluded = EXCLUDED if exclude is None else exclude
+        staged = "/tmp/frf-push-%s.tar.gz" % uuid.uuid4().hex
+        parts = []
+        with resources.transfer_slot(local_dir, _scratch.base()):
+            estimate = _archive_size(local_dir, excluded)
+            resources.require_headroom(local_dir, _scratch.base(), disk_bytes=estimate + estimate // 100)
             try:
-                self._sandbox.files.write(staged, blob, request_timeout=TRANSFER_TIMEOUT)
-                break
-            except Exception as exc:                          # noqa: BLE001 -- the SDK's own errors
-                message = str(exc)
-                transient = bool(re.search(r"timed? ?out|timeout|request.+error|no connections",
-                                           message, re.I))
-                if transient and attempt < 2:
-                    time.sleep(1.5 ** attempt)
-                    continue
-                if transient:
-                    raise SandboxError("could not push into the sandbox after retries: %s"
-                                       % message[-500:]) from exc
-                raise
-        done = self.run(["sh", "-c", "mkdir -p '%s' && tar -xf '%s' -C '%s' && rm -f '%s'"
-                         % (remote_dir, staged, remote_dir, staged)], timeout=900)
-        if not done.ok:
-            raise SandboxError("could not unpack into the sandbox: %s" % done.tail())
+                with tempfile.TemporaryFile(dir=_scratch.base()) as archive:
+                    _write_tar(local_dir, archive, excluded, compress=True)
+                    archive.seek(0)
+                    while True:
+                        chunk = archive.read(8 * 1024 * 1024)
+                        if not chunk:
+                            break
+                        resources.require_headroom(local_dir, _scratch.base(), transfer_bytes=len(chunk))
+                        part = staged + '.%06d' % len(parts)
+                        parts.append(part)
+                        for attempt in range(3):
+                            try:
+                                self._sandbox.files.write(part, chunk, request_timeout=TRANSFER_TIMEOUT)
+                                break
+                            except Exception as error:
+                                transient = bool(re.search(
+                                    r"timed? ?out|timeout|request.+error|no connections",
+                                    str(error), re.I))
+                                if transient and attempt < 2:
+                                    time.sleep(1.5 ** attempt)
+                                    continue
+                                raise SandboxError('remote archive upload failed: %s' %
+                                                   type(error).__name__) from error
+                    del chunk
+                command = ("cat -- %s > %s && mkdir -p %s && tar -xf %s -C %s" %
+                           (" ".join(_quote(part) for part in parts), _quote(staged),
+                            _quote(remote_dir), _quote(staged), _quote(remote_dir)))
+                done = self.run(['sh', '-c', command], timeout=900)
+                if not done.ok:
+                    raise SandboxError('could not unpack into the sandbox: %s' % done.tail())
+            finally:
+                self.run(['rm', '-f', '--', staged] + parts, timeout=60)
 
     def run(self, argv: list[str], *, workdir: str | None = None,
             env: dict | None = None, timeout: float = 3600.0) -> Result:
@@ -513,34 +556,55 @@ class Remote:
                       _text(getattr(handle, "stderr", "")), time.perf_counter() - started)
 
     def pull(self, remote_dir: str, local_dir: str) -> None:
-        staged = "/tmp/frf-pull-%s.tar" % uuid.uuid4().hex[:8]
-        done = self.run(["sh", "-c", "tar -cf '%s' -C '%s' ." % (staged, remote_dir)], timeout=900)
-        if not done.ok:
-            raise SandboxError("could not pack the sandbox directory %s: %s"
-                               % (remote_dir, done.tail()))
-        # `bytes` comes back as a bytearray from this SDK, and tarfile wants something it can wrap
-        # in a BytesIO -- so it is normalised here rather than at the one place that noticed.
-        # A read timeout is the same transport failure the file path above retries; it gets the same
-        # treatment so one slow pull cannot take a candidate down after its build has succeeded.
-        blob = b""
-        for attempt in range(3):
+        """Download a compressed archive as a bounded stream, without buffering the tree."""
+        from . import resources
+        staged = "/tmp/frf-pull-%s.tar.gz" % uuid.uuid4().hex
+        with resources.transfer_slot(local_dir, _scratch.base()):
             try:
-                blob = bytes(self._sandbox.files.read(staged, format="bytes",
-                                                     request_timeout=TRANSFER_TIMEOUT))
-                break
-            except Exception as exc:                          # noqa: BLE001 -- the SDK's own errors
-                message = str(exc)
-                transient = bool(re.search(r"timed? ?out|timeout|request.+error|no connections",
-                                           message, re.I))
-                if transient and attempt < 2:
-                    time.sleep(1.5 ** attempt)
-                    continue
-                if transient:
-                    raise SandboxError("could not pull from the sandbox after retries: %s"
-                                       % message[-500:]) from exc
-                raise
-        self.run(["rm", "-f", staged], timeout=60)
-        _untar_bytes(blob, local_dir)
+                done = self.run(['tar', '-czf', staged, '-C', remote_dir, '.'], timeout=900)
+                if not done.ok:
+                    raise SandboxError('could not pack the sandbox directory: %s' % done.tail())
+                size = self.run(['stat', '-c', '%s', staged], timeout=30)
+                expanded = self.run(['du', '-sb', '--', remote_dir], timeout=60)
+                if not size.ok or not expanded.ok:
+                    raise SandboxError('could not measure remote archive size')
+                compressed_bytes = int(size.stdout.strip())
+                expanded_bytes = int(expanded.stdout.split()[0])
+                resources.require_headroom(local_dir, _scratch.base(),
+                                           disk_bytes=compressed_bytes + expanded_bytes)
+                with tempfile.TemporaryFile(dir=_scratch.base()) as archive:
+                    for attempt in range(3):
+                        archive.seek(0)
+                        archive.truncate()
+                        received = 0
+                        checked_at = 0
+                        try:
+                            with self._sandbox.files.read(staged, format='stream',
+                                                         request_timeout=TRANSFER_TIMEOUT) as stream:
+                                for chunk in stream:
+                                    received += len(chunk)
+                                    if received > compressed_bytes:
+                                        raise SandboxError('remote archive grew during download')
+                                    archive.write(chunk)
+                                    if received - checked_at >= 16 * 1024 * 1024:
+                                        resources.require_headroom(local_dir, _scratch.base(),
+                                                                   disk_bytes=expanded_bytes)
+                                        checked_at = received
+                            if received != compressed_bytes:
+                                raise SandboxError('incomplete remote archive download')
+                            break
+                        except Exception as error:
+                            transient = bool(re.search(
+                                r"timed? ?out|timeout|request.+error|no connections",
+                                str(error), re.I))
+                            if transient and attempt < 2:
+                                time.sleep(1.5 ** attempt)
+                                continue
+                            raise
+                    archive.seek(0)
+                    _untar_stream(archive, local_dir)
+            finally:
+                self.run(['rm', '-f', '--', staged], timeout=60)
 
 
 def _quote(part: str) -> str:
@@ -579,3 +643,124 @@ def docker_available() -> bool:
 def scratch() -> str:
     """A temporary directory for staging pushes and pulls."""
     return _scratch.mkdtemp(prefix="frf-stage-")
+
+
+class RemoteImage:
+    name = 'remote'
+
+    def __init__(self, backend, recipe):
+        if backend.name != 'remote':
+            raise ValueError('source-runtime images require E2B')
+        self.control_backend = backend
+        self.recipe = recipe
+        self.container = 'frf-source-' + uuid.uuid4().hex
+        self.started = False
+        self.evidence = {'recipe_sha256': hashlib.sha256(recipe.encode()).hexdigest()}
+
+    def _checked(self, argv, timeout=60):
+        result = self.control_backend.run(argv, timeout=timeout)
+        if not result.ok:
+            raise SandboxError('source-runtime operation failed: ' + result.tail(1200))
+        return result
+
+    def _ensure(self):
+        if self.started:
+            return
+        remote = '/tmp/' + self.container + '-build'
+        try:
+            with _scratch.temporary_directory() as local:
+                Path(local, 'Dockerfile').write_text(self.recipe)
+                self.control_backend.push(local, remote)
+            self._checked(['docker', 'build', '--pull', '-t', self.container, remote], timeout=900)
+            identity = self._checked(['docker', 'image', 'inspect', '--format', '{{.Id}}',
+                                      self.container]).stdout.strip()
+            if not re.fullmatch(r'sha256:[0-9a-f]{64}', identity):
+                raise SandboxError('source-runtime image identity missing')
+            self._checked(['docker', 'run', '-d', '--name', self.container, '--user', '0',
+                           '--cpus', '4', '--memory', '4g', '--pids-limit', '512',
+                           '--entrypoint', 'sleep', identity, 'infinity'])
+            # Validate the toolchain inside the actual long-lived container. A successful Docker
+            # build alone is insufficient: a malformed digest or overridden image entrypoint can
+            # leave a container that starts but cannot execute the declared compiler.
+            probe = self._checked(['docker', 'exec', '--user', '0', self.container,
+                                   'sh', '-c', 'command -v python3 || command -v python || true; '
+                                   'command -v go || true; command -v rustc || true; '
+                                   'command -v cargo || true; command -v gcc || true'], timeout=30)
+            available = {Path(value).name for value in probe.stdout.split()}
+            languages = set(re.findall(r'\b(python3?|go|rustc|cargo|gcc)\b', self.recipe))
+            requirements = ({'python3'} if 'python:' in self.recipe else set())
+            if 'golang:' in self.recipe:
+                requirements.add('go')
+            if 'rust:' in self.recipe:
+                requirements.update(('rustc', 'cargo'))
+            if 'debian:' in self.recipe and 'gcc' in self.recipe:
+                requirements.add('gcc')
+            missing = sorted(requirements - available)
+            if missing:
+                raise SandboxError('source-runtime toolchain missing: ' + ', '.join(missing) +
+                                   '; available=' + repr(sorted(available)) +
+                                   '; probe=' + repr(probe.stdout[-500:]))
+            self.evidence['image_id'] = identity
+            self.started = True
+        except BaseException:
+            self.close()
+            raise
+        finally:
+            self.control_backend.run(['rm', '-rf', '--', remote], timeout=30)
+
+    @staticmethod
+    def _path(path):
+        value = PurePosixPath(path)
+        if not value.is_absolute() or '..' in value.parts or str(value) == '/':
+            raise ValueError('source-runtime transfer requires an absolute non-root path')
+        return str(value)
+
+    def push(self, local_dir, remote_dir, *, exclude=None):
+        destination = self._path(remote_dir)
+        self._ensure()
+        staged = '/tmp/frf-runtime-transfer-' + uuid.uuid4().hex
+        try:
+            self.control_backend.push(local_dir, staged, exclude=exclude)
+            self._checked(['docker', 'exec', self.container, 'mkdir', '-p', destination])
+            self._checked(['docker', 'cp', staged + '/.', self.container + ':' + destination], timeout=300)
+        finally:
+            self.control_backend.run(['rm', '-rf', '--', staged], timeout=30)
+
+    def pull(self, remote_dir, local_dir):
+        source = self._path(remote_dir)
+        self._ensure()
+        staged = '/tmp/frf-runtime-transfer-' + uuid.uuid4().hex
+        try:
+            self._checked(['mkdir', '-p', staged])
+            self._checked(['docker', 'cp', self.container + ':' + source + '/.', staged], timeout=300)
+            self.control_backend.pull(staged, local_dir)
+        finally:
+            self.control_backend.run(['rm', '-rf', '--', staged], timeout=30)
+
+    def run(self, argv, *, workdir=None, env=None, timeout=3600):
+        self._ensure()
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError('source-runtime command requires a positive timeout')
+        # Source builds must see the declared toolchain regardless of the base image's default
+        # runtime user or PATH. The task itself is later replayed under its declared user; this
+        # container is only the controlled reference-build environment.
+        command = ['docker', 'exec', '--user', '0', '--workdir', workdir or '/app']
+        command += ['--env', 'PATH=/usr/local/go/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin']
+        command += ['--env', 'GOROOT=/usr/local/go', '--env', 'GOPATH=/go']
+        for key, value in (env or {}).items():
+            command += ['--env', str(key) + '=' + str(value)]
+        # Resolve toolchain entrypoints explicitly. `timeout` uses execvp inside the image, and
+        # some official images expose /usr/local/go/bin through ENV only in their default shell;
+        # the non-interactive timeout child does not inherit that shell lookup reliably.
+        if argv and argv[0] == 'go':
+            argv = ['/usr/local/go/bin/go', *argv[1:]]
+        elif argv and argv[0] in ('rustc', 'cargo'):
+            argv = ['/usr/local/cargo/bin/' + argv[0], *argv[1:]]
+        # An E2B command deadline alone kills docker exec's client, not its container process.
+        command += [self.container, 'timeout', '--kill-after=5s', str(timeout) + 's', *argv]
+        return self.control_backend.run(command, timeout=timeout + 10)
+
+    def close(self):
+        self.control_backend.run(['docker', 'rm', '-f', self.container], timeout=30)
+        self.control_backend.run(['docker', 'image', 'rm', self.container], timeout=30)
+        self.started = False

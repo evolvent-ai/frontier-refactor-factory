@@ -219,7 +219,7 @@ def test_an_unexpected_exception_refuses_one_candidate_rather_than_ending_the_ba
         def probes(self, spec):
             # Neither Stage nor SubjectFailed: the kind of failure nobody wrote a branch for.
             if spec.name == "1":
-                raise TimeoutError("the wire went away")
+                raise LookupError("unexpected runner state")
             return object()
 
     result = Factory().register(Scale()).install_stages(**_stages()).build("surprising", budget=3)
@@ -227,7 +227,7 @@ def test_an_unexpected_exception_refuses_one_candidate_rather_than_ending_the_ba
     assert len(result) == 2, "the other two candidates still produced tasks"
     refusal = result.batch.refused[0]
     assert refusal.stage == "unclassified"
-    assert refusal.reason == "TimeoutError"
+    assert refusal.reason == "LookupError"
     # Ours until shown otherwise: an exception nobody anticipated is a gap in this code.
     assert refusal.fault is pipeline.Fault.FACTORY, refusal.to_json()
 
