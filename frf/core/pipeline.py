@@ -59,6 +59,31 @@ MIN_TIMED_SECONDS = 10e-6
 MIN_PROBES = 5
 MIN_GRADED_POINTS = 40
 
+# CAN THE CORPUS TELL TWO SUBMISSIONS APART? A floor of two distinct answers already exists at both
+# seams, and it is far too low. Measured on the last shipped corpus of 100: 26 tasks had fewer than
+# eight distinct answers, and 13 of the 25 repo tasks had exactly ONE in every channel -- every
+# scenario producing byte-identical output over as many as 79 graded points. All of them passed
+# every gate we had, because reproducibility, probe count and discard rate say nothing about
+# whether the answers DIFFER.
+#
+# Two numbers rather than one, because a single threshold is unfair in both directions: 10 distinct
+# answers over 197 points is a constant wearing a big corpus, while 10 over 57 may be a genuine
+# enum. The floor catches thin corpora, the ratio catches wide ones.
+#
+# WHAT THE CURRENT PIPELINE PRODUCES, which is what makes these numbers safe rather than arbitrary:
+# kernel/inplace 54 distinct over 57 (0.95), kernel/cross 54/57, package 148/197 (0.75), and the
+# repo smoke 8 distinct in its best channel over 11 graded steps. The rule below refuses none of
+# them, and would have refused 28 of the 100 shipped tasks.
+MIN_DISTINCT_ANSWERS = 8
+MIN_ANSWER_RATIO = 0.15
+
+# OBSERVE, DO NOT YET REFUSE. The distribution above comes from artifacts of an older factory; the
+# thresholds are chosen to clear what the repaired one emits, but "chosen to clear three samples" is
+# not the same as "measured against a batch". So the first production batch RECORDS this verdict
+# without acting on it, and the numbers it reports decide whether 0.15 is right. Refusing on a
+# threshold nobody has seen the distribution of is how a gate quietly halves a corpus.
+ENFORCE_ANSWER_DIVERSITY = os.environ.get("FRF_ENFORCE_ANSWER_DIVERSITY", "") == "1"
+
 # Checks whose INCONCLUSIVE is a statement about the MATERIAL rather than about this factory.
 #
 # The default reading of "could not conclude" is that we failed to set something up -- no container,
@@ -595,6 +620,37 @@ def _check_corpus(report) -> None:
                     "%d probe(s) and %d graded point(s); a corpus this small cannot tell a correct "
                     "submission from a lucky one (need >= %d and >= %d)"
                     % (report.probes, report.graded_points, MIN_PROBES, MIN_GRADED_POINTS))
+    _check_answer_diversity(report)
+
+
+def answer_diversity(report) -> dict:
+    """How many different answers the graded corpus holds, and whether that is enough.
+
+    Reported whether or not it is enforced, so a batch run under observation still says what the
+    rule would have done. A seam that does not measure it yields `measured: False` rather than a
+    zero -- an absence is not a corpus of constants.
+    """
+    distinct = getattr(report, "distinct_answers", None)
+    points = report.graded_points
+    if distinct is None or not points:
+        return {"measured": False}
+    ratio = distinct / points
+    return {"measured": True, "distinct": distinct, "graded_points": points,
+            "ratio": round(ratio, 4),
+            "ok": distinct >= MIN_DISTINCT_ANSWERS and ratio >= MIN_ANSWER_RATIO,
+            "enforced": ENFORCE_ANSWER_DIVERSITY}
+
+
+def _check_answer_diversity(report) -> None:
+    verdict = answer_diversity(report)
+    if not verdict.get("measured") or verdict["ok"] or not ENFORCE_ANSWER_DIVERSITY:
+        return
+    raise Stage("freeze", "answers-do-not-differ", Fault.MATERIAL,
+                "%d distinct answer(s) across %d graded point(s) (%.0f%%); a corpus this uniform "
+                "cannot tell a correct submission from one returning the common answer "
+                "(need >= %d and >= %.0f%%)"
+                % (verdict["distinct"], verdict["graded_points"], 100 * verdict["ratio"],
+                   MIN_DISTINCT_ANSWERS, 100 * MIN_ANSWER_RATIO))
 
 
 @dataclass

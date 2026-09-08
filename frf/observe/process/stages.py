@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Callable
 
-from ...core import adequacy, evidence, harbor, statement
+from ...core import adequacy, evidence, harbor, pipeline, statement
 from ...core.capabilities import capability
 from ...core.scale import Spec
 from . import observation as obs
@@ -73,6 +73,29 @@ class Corpus:
     def graded_points(self) -> int:
         return sum(step.graded_points()
                    for steps in self.expectations.values() for step in steps)
+
+    @property
+    def distinct_answers(self) -> int:
+        """How many DIFFERENT answers the graded corpus contains, counted per channel.
+
+        A repo step is worth four points, and three of them are legitimately near-constant for a
+        well-behaved CLI: exit 0 every time, empty stderr, an untouched directory. Pooling all four
+        would therefore measure the seam's shape rather than the task's substance, so each channel
+        is counted separately and the BEST one stands for the corpus -- the question is whether any
+        channel distinguishes one scenario from another, not whether all of them do.
+
+        Measured on the last shipped corpus: 13 of 25 repo tasks had exactly ONE distinct digest in
+        every channel -- `postmark-faster` over 57 graded points, `hucre-faster` over 79. Every
+        scenario produced identical output, so the corpus could not tell two submissions apart.
+        """
+        per_channel: dict = {}
+        for steps in self.expectations.values():
+            for step in steps:
+                for channel in obs.CHANNELS:
+                    rule = step.channel(channel)
+                    if rule.graded:
+                        per_channel.setdefault(channel, set()).add(rule.digest)
+        return max((len(seen) for seen in per_channel.values()), default=0)
 
 
 
@@ -449,6 +472,9 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
                     # instruction that correctly said 57 and 5 -- the one claim a reader checks.
                     "probes": corpus.probes, "freeze_runs": facts.freeze_runs,
                     "adequacy": corpus.adequacy, "evidence": checks.to_json(),
+                    # Recorded even when it is not enforced, so an observed batch reports what the
+                    # rule WOULD have refused instead of leaving the distribution unmeasured.
+                    "answer_diversity": pipeline.answer_diversity(corpus),
                     "discard_rate": round(corpus.discard_rate, 4),
                     "capability": capability(spec.language, scale=spec.scale).__dict__})
 

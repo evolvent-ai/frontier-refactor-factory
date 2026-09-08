@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from ...core import adequacy, evidence, harbor, statement
+from ...core import adequacy, evidence, harbor, pipeline, statement
 from ...core.capabilities import capability
 from ...core.scale import Spec
 from . import observation as obs
@@ -101,6 +101,21 @@ class Corpus:
         # One point per graded probe. A call returns one value, so there is nothing to subdivide --
         # unlike the process seam, where one step is worth four.
         return sum(1 for e in self.expectations if e.graded())
+
+    @property
+    def distinct_answers(self) -> int:
+        """How many DIFFERENT answers the graded corpus contains.
+
+        A corpus of 57 probes that only ever produced 3 answers grades a constant. Measured on the
+        last shipped corpus: `type-script-coin-change` had 3 distinct digests over 57 graded points,
+        `cayley-faster` 3 over 61, `causal-learn-faster` 4 over 117. Each passed every existing gate
+        -- the reference reproduced itself, the probes were numerous, the discard rate was zero --
+        because none of them asks whether the answers differ from each other.
+
+        One number, computed per seam, so the pipeline can hold the floor without learning what an
+        observation looks like.
+        """
+        return len({e.digest for e in self.expectations if e.graded()})
 
 
 def freeze(spec: Spec, observer, source, *, runs: int) -> Corpus:
@@ -401,6 +416,9 @@ def emit(destination: str, spec: Spec, corpus: Corpus, checks: evidence.Battery,
                     # instruction that correctly said 57 and 5 -- the one claim a reader checks.
                     "probes": corpus.probes, "freeze_runs": facts.freeze_runs,
                     "adequacy": corpus.adequacy, "evidence": checks.to_json(),
+                    # Recorded even when it is not enforced, so an observed batch reports what the
+                    # rule WOULD have refused instead of leaving the distribution unmeasured.
+                    "answer_diversity": pipeline.answer_diversity(corpus),
                     "discard_rate": round(corpus.discard_rate, 4),
                     "capability": capability(spec.language, scale=spec.scale).__dict__})
 

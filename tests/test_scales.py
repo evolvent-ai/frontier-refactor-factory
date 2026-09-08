@@ -11,6 +11,8 @@ import sys
 import tempfile
 from types import SimpleNamespace
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
@@ -512,3 +514,72 @@ def test_the_probe_generator_is_asked_for_a_per_operation_quota():
     # A narrow surface carries the whole floor on few operations; a wide one spreads it.
     assert _per_operation_quota([{}] * 4) > _per_operation_quota([{}] * 40)
     assert 60 > MIN_GRADED_POINTS, "the floor must leave margin for what freeze discards"
+
+
+def test_a_corpus_of_near_identical_answers_is_measured_and_can_be_refused(monkeypatch):
+    """Reproducible, numerous and uniform is still ungradeable.
+
+    Every gate we had asks whether the reference repeated itself, how many probes survived and how
+    much was discarded. None asks whether the answers DIFFER, and a corpus that always produces the
+    same answer is scored full marks by a submission that returns that answer and implements
+    nothing.
+
+    Measured on the last shipped corpus of 100: 31 tasks fail this rule, and 13 of the 25 repo tasks
+    had exactly ONE distinct digest in every channel -- `postmark-faster` and `rdb-faster` over 228
+    graded points each. A `< 2` floor already existed at both seams and passed all of them.
+
+    OBSERVED BEFORE ENFORCED. The threshold clears everything the repaired pipeline emits today
+    (0.95 kernel, 0.75 package, 0.18 for the repo smoke), but three samples are not a distribution,
+    so the verdict is recorded and acted on only under `FRF_ENFORCE_ANSWER_DIVERSITY=1`. This test
+    pins both halves of that: the number is always reported, and the refusal happens only when
+    enforcement is on.
+    """
+    from frf.core import pipeline
+    from frf.observe.call.stages import Corpus
+    from frf.observe.call.observation import Expectation
+
+    def corpus(distinct, total):
+        return Corpus(expectations=[
+            Expectation(probe_id="probe-%04d" % i, digest="sha256:%064d" % (i % distinct), runs=5)
+            for i in range(total)])
+
+    uniform = pipeline.answer_diversity(corpus(3, 57))
+    assert uniform["measured"] and not uniform["ok"], uniform
+    assert uniform["distinct"] == 3 and uniform["graded_points"] == 57, uniform
+
+    varied = pipeline.answer_diversity(corpus(54, 57))
+    assert varied["ok"], varied
+
+    # Observed: reported, not refused.
+    monkeypatch.setattr(pipeline, "ENFORCE_ANSWER_DIVERSITY", False)
+    pipeline._check_answer_diversity(corpus(3, 57))
+
+    # Enforced: refused, and charged to the material rather than to us.
+    monkeypatch.setattr(pipeline, "ENFORCE_ANSWER_DIVERSITY", True)
+    with pytest.raises(pipeline.Stage) as raised:
+        pipeline._check_answer_diversity(corpus(3, 57))
+    assert raised.value.reason == "answers-do-not-differ", raised.value.reason
+    assert raised.value.fault is pipeline.Fault.MATERIAL
+    pipeline._check_answer_diversity(corpus(54, 57))
+
+
+def test_the_process_seam_counts_answers_per_channel_not_pooled():
+    """Three of a repo step's four channels are near-constant for a well-behaved CLI.
+
+    Exit 0 every time, empty stderr, an untouched directory -- pooling all four would measure the
+    seam's shape rather than the task's substance, and would refuse a corpus whose stdout does
+    distinguish every scenario. So each channel is counted separately and the best one stands for
+    the corpus: the question is whether ANY channel tells two submissions apart.
+    """
+    from frf.observe.process.stages import Corpus
+    from frf.observe.process.observation import ChannelExpectation, Expectation
+
+    def step(index):
+        constant = ChannelExpectation(digest="sha256:" + "0" * 64, line_count=1)
+        return Expectation(step=0, exit_code=constant, stderr=constant, tree=constant,
+                           stdout=ChannelExpectation(digest="sha256:%064d" % index, line_count=1))
+
+    corpus = Corpus(expectations={"work-%02d" % i: [step(i)] for i in range(12)})
+    # 12 distinct stdout answers, 1 in each of the other three channels, 48 graded points.
+    assert corpus.graded_points == 48
+    assert corpus.distinct_answers == 12, "the varying channel must stand for the corpus"
