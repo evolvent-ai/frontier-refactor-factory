@@ -440,8 +440,18 @@ def generate_instruction(spec, facts: Facts | None = None) -> str:
     grading = (_grading(facts) if facts is not None else
                "The harness compares reproducible observations against the frozen reference. "
                "Task-specific grading details are available after freezing.")
-    text = re.sub(r"(?ms)^## Grading Signals\n.*?(?=^## |\Z)",
-                  lambda _: "## Grading Signals\n\n" + grading + "\n\n", text)
+    # SUBSTITUTED IF PRESENT, APPENDED IF NOT. A regex replaces nothing when the heading is absent,
+    # and the model writes this document: a reply that simply omits "## Grading Signals" passed
+    # `_validate_and_repair` -- which sees the section it inserted itself -- and then lost the
+    # channel list here, silently. That is the one fact a solver cannot infer from the workspace:
+    # a repo task grades exit code, stdout, stderr AND the resulting directory, four points per
+    # step, and a submission told only "each graded observation must match" does not know that
+    # leaving a stray file behind costs the same as printing the wrong answer.
+    section = "## Grading Signals\n\n" + grading + "\n\n"
+    if re.search(r"(?m)^## Grading Signals\s*$", text):
+        text = re.sub(r"(?ms)^## Grading Signals\n.*?(?=^## |\Z)", lambda _: section, text)
+    else:
+        text = text.rstrip() + "\n\n" + section
     if facts is not None:
         text += "\n## Performance Measurement\n\n" + _scoring(facts) + "\n"
         if facts.channels == ("the value the call returned",):

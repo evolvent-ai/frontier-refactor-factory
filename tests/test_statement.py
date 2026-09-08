@@ -230,3 +230,42 @@ def test_harness_substitution_tokens_never_reach_the_solver():
     leaked = _validate_and_repair("# t\n\nThe evaluator runs {PROGRAM} inside {ROOT}.\n", spec)
     assert "{ROOT}" not in leaked and "{PROGRAM}" not in leaked, leaked
     assert "/app/run.sh" in leaked, leaked
+
+
+def test_the_channel_list_survives_a_model_reply_that_omits_the_section(monkeypatch):
+    """A regex substitutes nothing when the heading it looks for is not there.
+
+    The channel list is the one grading fact a solver cannot infer from the workspace. A repo task
+    scores four points per step -- exit code, stdout, stderr and the resulting directory -- so a
+    submission told only "each graded observation must match" does not know that leaving a stray
+    file behind costs exactly as much as printing the wrong answer.
+
+    The model writes this document. `_validate_and_repair` inserts a Grading Signals section when
+    the reply lacks one, and then sees the section it inserted itself, so the omission passes every
+    structural check; the measured channels were dropped afterwards, silently, by a substitution
+    with no target. Appending when absent is what closes that.
+
+    The section must appear exactly ONCE. Appending unconditionally would give a solver two
+    different grading sections, which is worse than the bug.
+    """
+    from frf.core import statement
+
+    monkeypatch.setattr(statement, "_generate_instruction", lambda _spec: (
+        "# Something\n\n## Workspace\n\n* /app\n\n## Build & Test\n\ngo build\n\n"
+        "## Constraints\n\n**What you CAN do**\n\n* x\n\n**What you CANNOT do**\n\n* y\n\n"
+        "## Submission Contract\n\nsubmit /app\n\n## Time Budget\n\nlimit\n\n"
+        "## Behavioral Rules\n\n* do not read tests/\n"))
+
+    text = statement.generate_instruction(
+        _spec_for_repo(), _facts(scale="repo", source_language="go", probes=11, graded_points=44,
+                                 channels=("exit code", "stdout", "stderr",
+                                           "the resulting directory")))
+    for channel in ("exit code", "stdout", "stderr", "the resulting directory"):
+        assert channel in text, channel
+    assert text.count("## Grading Signals") == 1, "a solver must not get two grading sections"
+    assert "44 graded observation(s)" in text, text
+
+
+def _spec_for_repo():
+    from frf.core.scale import Spec
+    return Spec(name="tool-opt", scale="repo", language="go", description="A tool.")
